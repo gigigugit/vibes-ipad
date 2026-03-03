@@ -1,0 +1,17 @@
+[Performance Anxiety - Initial]
+
+S: Reports performance anxiety{subject_suffix}.
+
+{vitals_line}A: Performance anxiety
+
+P: Start treatment with {medication}.
+
+[Performance Anxiety - Follow-up]
+
+S: Reports {response} response to treatment {se_phrase}.
+
+{vitals_line}
+
+A: Performance anxiety
+
+P: Continue present treatment with {medication}.

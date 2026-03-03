@@ -1,0 +1,71 @@
+Tab,Variable,Description,Grab Method
+Birth Control,bc_history,Previous birth-control used,grabber.grab_question_answer() – history keywords
+Birth Control,bc_preference,Preferred birth-control method,grabber.grab_question_answer() – preference keywords
+Testosterone Deficiency,bmi,Body mass index,grabber.grab_bmi() – sidebar/intake
+Testosterone Deficiency,bp,Blood pressure,grabber.grab_bp() – regex on page text
+Hair Loss,bp,Blood pressure,grabber.grab_bp()
+Sexual Health,bp,Blood pressure,grabber.grab_bp()
+Performance Anxiety,bp,Blood pressure,grabber.grab_bp()
+Photoaging,bp,Blood pressure,grabber.grab_bp()
+Birth Control,bp,Blood pressure,grabber.grab_bp()
+Testosterone Deficiency,current_dose,Current TRT dose,grabber.grab_current_dose() – medication-title element
+Hair Loss,current_dose,Current hair-loss medication / dose,grabber.grab_current_dose()
+Sexual Health,current_dose,Current ED medication / dose,grabber.grab_current_dose()
+Performance Anxiety,current_dose,Current anxiety medication / dose,grabber.grab_current_dose()
+Photoaging,current_dose,Current skin medication / dose,grabber.grab_current_dose()
+Birth Control,current_dose,Current birth-control med / dose,grabber.grab_current_dose()
+Photoaging,dob,Date of birth,grabber.grab_dob()
+Birth Control,dob,Date of birth,grabber.grab_dob()
+Birth Control,dvt_pe,DVT/PE history,grabber.grab_question_answer() – clot/DVT keywords
+Testosterone Deficiency,dx,Diagnoses / ICD codes,grabber.grab_dx() – chip elements
+Hair Loss,dx,Diagnoses,grabber.grab_dx()
+Sexual Health,dx,Diagnoses,grabber.grab_dx()
+Performance Anxiety,dx,Diagnoses,grabber.grab_dx()
+Photoaging,dx,Diagnoses,grabber.grab_dx()
+Birth Control,dx,Diagnoses,grabber.grab_dx()
+Sexual Health,ed_goals,Treatment goals,grabber.grab_question_answer() – goals / improve keywords
+Sexual Health,ed_onset,Gradual vs. sudden onset,grabber.grab_question_answer() – onset keywords
+Sexual Health,ed_severity,Erection-difficulty level,grabber.grab_question_answer() – severity keywords
+Testosterone Deficiency,ed_status,Has ED (Yes/No),grabber.grab_ed_status() – chip / radio search
+Sexual Health,ejaculation,Ejaculation / PE concerns,grabber.grab_question_answer() – ejaculation keywords
+Photoaging,first_name,Patient first name,grabber.grab_patient_name()
+Birth Control,first_name,Patient first name,grabber.grab_patient_name()
+Testosterone Deficiency,free_t,Free testosterone lab value,"""grabber.grab_lab_value(\""free testosterone\"")"""
+Hair Loss,hair_duration,Duration of hair loss,grabber.grab_question_answer() – duration keywords
+Hair Loss,hair_pattern,Pattern/location of loss,grabber.grab_question_answer() – pattern keywords
+Hair Loss,hair_previous_tx,Previous treatments tried,grabber.grab_question_answer() – treatment keywords
+Testosterone Deficiency,hct,Hematocrit lab value,"""grabber.grab_lab_value(\""hematocrit\"")"""
+Photoaging,last_name,Patient last name,grabber.grab_patient_name()
+Birth Control,last_name,Patient last name,grabber.grab_patient_name()
+Birth Control,menstrual,Menstrual cycle information,grabber.grab_question_answer() – menstrual keywords
+Birth Control,migraine,Migraine with aura,grabber.grab_question_answer() – migraine keywords
+Performance Anxiety,pa_frequency,How often anxiety occurs,grabber.grab_question_answer() – frequency keywords
+Performance Anxiety,pa_impact,Impact on daily life,grabber.grab_question_answer() – impact keywords
+Performance Anxiety,pa_previous_tx,Previous treatments,grabber.grab_question_answer() – treatment keywords
+Performance Anxiety,pa_symptoms,Physical symptoms,grabber.grab_question_answer() – symptom keywords
+Performance Anxiety,pa_triggers,What triggers anxiety,grabber.grab_question_answer() – trigger keywords
+Testosterone Deficiency,patient_state,Patient state (e.g. AZ),grabber.detect_patient_state() – sidebar XPath / geocode
+Hair Loss,patient_state,Patient state,grabber.detect_patient_state()
+Sexual Health,patient_state,Patient state,grabber.detect_patient_state()
+Performance Anxiety,patient_state,Patient state,grabber.detect_patient_state()
+Photoaging,patient_state,Patient state,grabber.detect_patient_state()
+Birth Control,patient_state,Patient state,grabber.detect_patient_state()
+Testosterone Deficiency,pmh,Past medical history,grabber.grab_pmh() – PMH section text
+Performance Anxiety,pmh,Past medical history,grabber.grab_pmh()
+Photoaging,pmh,Past medical history,grabber.grab_pmh()
+Birth Control,pmh,Past medical history,grabber.grab_pmh()
+Testosterone Deficiency,psa,PSA lab value,"""grabber.grab_lab_value(\""psa\"")"""
+Photoaging,retinoid_history,Previous retinoid use,grabber.grab_question_answer() – retinoid keywords
+Sexual Health,sexual_health_dx_ed,Has ED diagnosis,grabber.grab_dx() → checkbox
+Sexual Health,sexual_health_dx_pe,Has PE diagnosis,grabber.grab_dx() → checkbox
+Hair Loss,side_effects,Side effects reported,grabber.grab_question_answer()
+Sexual Health,side_effects,Side effects,grabber.grab_question_answer()
+Performance Anxiety,side_effects,Side effects,grabber.grab_question_answer()
+Photoaging,side_effects,Side effects,grabber.grab_question_answer()
+Birth Control,side_effects,Side effects,grabber.grab_question_answer()
+Photoaging,skin_concerns,Primary skin concerns,grabber.grab_question_answer() – skin/concern keywords
+Photoaging,skin_type,Skin type / tone,grabber.grab_question_answer() – skin type keywords
+Birth Control,smoking,Smoking status,grabber.grab_question_answer() – smoking keywords
+Testosterone Deficiency,tdcs_c_score,TDCS‑C check‑in score,grabber.grab_tdcs_c() – sums check‑in responses
+Testosterone Deficiency,tdcs_score,TDCS questionnaire total,grabber.grab_tdcs() – sums +1/+2 radio responses
+Testosterone Deficiency,total_t,Total testosterone lab value,"""grabber.grab_lab_value(\""total testosterone\"")"""

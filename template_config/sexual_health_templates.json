@@ -1,0 +1,11 @@
+{
+    "list_name": "Sexual Health Templates",
+    "templates": [
+        "SH Initial",
+        "SH Follow-up",
+        "SH Plan",
+        "SH Change Cadence",
+        "SH Change Number",
+        "SH Change Medication"
+    ]
+}

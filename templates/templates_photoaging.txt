@@ -1,0 +1,7 @@
+[Photoaging - Note]
+
+S: Reports concern about aging, with presence of photoaging. {retinoid_history}. No serious health conditions.
+O: {exam_text}
+A: Photoaging.
+P: Start treatment with {medication}.
+Prescription written, follow-up per routine.

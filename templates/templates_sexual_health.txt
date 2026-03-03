@@ -1,0 +1,58 @@
+[SH Initial]
+
+CC/HPI: {age} presents for {visit_type}
+
+Pt reports {rapidity_of_onset} onset {frequency} {ed_description} characterized by {ed_characterization}
+
+Best EHS score: {ehs}
+PEP score: {pep_score}
+
+Prior ED treatments: {past_ed_treatments}
+
+ROS:
+
+Pertinent Positives: {ros_positives}
+Pertinent Negatives: {ros_negatives}
+
+BP: {bp}
+
+A: {diagnoses}
+
+P: Start treatment with {medication}
+Prescription written, follow-up per routine.
+
+[SH Follow-up]
+
+S: Reports {response_text} to treatment without side effects.
+O: BP {bp}
+A: {diagnoses}
+P: {action_text} with {medication}.
+Prescription written, follow-up per routine.
+
+[SH Plan]
+ Start treatment with {medication}
+Prescription written, follow-up per routine.
+
+[SH Change Cadence]
+
+S: The patient wishes to change the cadence of their prescription. No health changes or side effects are reported.
+O: BP not required
+A: {diagnoses}
+P: Continue present treatment with {medication} and amended cadence
+Prescription written, follow-up per routine.
+
+[SH Change Number]
+
+S: The patient wishes to change the dose number of their prescription. No health changes or side effects are reported.
+O: BP not required
+A: {diagnoses}
+P: Continue present treatment with {medication} and amended dose number.
+Prescription written, follow-up per routine.
+
+[SH Change Medication]
+
+S: The patient requests to change the medication they are taking to try to get a stronger effect. No health changes or side effects are reported.
+O: BP not required
+A: {diagnoses}
+P: Change treatment to {medication} as-needed.
+Prescription written, follow-up per routine.

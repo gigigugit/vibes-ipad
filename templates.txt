@@ -1,0 +1,168 @@
+[Insert Labs]
+Labs:
+{lab_values_formatted}
+
+[Rx Note]
+S: Patient presents with symptoms of low testosterone.
+TDCS = {tdcs}
+ED reported: {ed_status}
+Qualifying medical conditions: {pmh}
+O: Labs reviewed. 
+A: {diagnoses}
+P: Start treatment with {medication}. Follow-up with labs in 3 months.
+
+
+[Referral note]
+S: Patient presents for evaluation of suspected testosterone deficiency. Endorses symptoms which have been reviewed.
+TDCS = {tdcs}
+{ed_status}
+
+PMH {pmh}
+
+O: Labs reviewed and significant for:
+{lab_values_formatted}
+
+A: {diagnoses}
+
+P: Refer for in person care due to 
+
+[Lab Message]
+Hi, my name is Matthew Tomcik, MD, a board-certified family physician licensed in your state.
+
+I have reviewed your intake and the labs which are now complete. There is total testosterone of {total_testosterone} ng/dL and free testosterone of {free_testosterone} ng/dL. The other labs done for safety, to rule out possible concerning causes of deficiency, are unremarkable.
+
+Based on these results and the symptom burden you reported, you do qualify for treatment with the {medication} that you selected as your preference.
+
+[Testosterone Deficiency Follow-up]
+S: Reports he feels "{response}" with regard to the treatment, and reports side effects of: "{side_effects}"
+TDCS-C = {tdcs_c}
+
+O:
+Total testosterone: {total_testosterone} ng/dL
+PSA: {psa} ng/mL
+Estradiol: {estradiol} pg/mL
+Hematocrit: {hematocrit} %
+
+A: {diagnoses}
+
+P: Proceed with {medication}
+Prescription written
+
+[Testosterone Follow-up Labs]
+Hi, my name is Matthew Tomcik, MD, a board-certified family physician licensed in your state.
+
+I have reviewed your responses here, and the labs which are now complete.
+
+The total testosterone is now in the normal range at {total_testosterone} ng/dL ([up/down] from [last value total testosterone] in [Month, year]), while the estradiol, hematocrit, and PSA are [normal/elevated] at {estradiol} pg/mL, {hematocrit} %, and {psa} ng/mL. Please list each as "lab name is [normal/abnormal] at [value]" for any additional tests reviewed.
+
+I see you've reported [improvement/no change/worsening] in symptoms and [blank/no] side effects [including side effects from the questionnaire], we'd recommend that you [continue the treatment as-is/increase the dose to ***/decrease to ***] at this time.
+
+[SH Initial]
+
+CC/HPI: {age} presents for {visit_type}
+
+Pt reports {rapidity_of_onset} onset {frequency} {ed_description} characterized by {ed_characterization}
+
+Best EHS score: {ehs}
+PEP score: {pep_score}
+
+Prior ED treatments: {past_ed_treatments}
+
+ROS:
+
+Pertinent Positives: {ros_positives}
+Pertinent Negatives: {ros_negatives}
+
+BP: {bp}
+
+A: {diagnoses}
+
+P: Start treatment with {medication}
+Prescription written, follow-up per routine.
+
+[SH Follow-up]
+
+S: Reports {response_text} to treatment without side effects.
+O: BP {bp}
+A: {diagnoses}
+P: {action_text} with {medication}.
+Prescription written, follow-up per routine.
+
+[SH Plan]
+ Start treatment with {medication}
+Prescription written, follow-up per routine.
+
+[SH Change Cadence]
+
+S: The patient wishes to change the cadence of their prescription. No health changes or side effects are reported.
+O: BP not required
+A: {diagnoses}
+P: Continue present treatment with {medication} and amended cadence
+Prescription written, follow-up per routine.
+
+[SH Change Number]
+
+S: The patient wishes to change the dose number of their prescription. No health changes or side effects are reported.
+O: BP not required
+A: {diagnoses}
+P: Continue present treatment with {medication} and amended dose number.
+Prescription written, follow-up per routine.
+
+[SH Change Medication]
+
+S: The patient requests to change the medication they are taking to try to get a stronger effect. No health changes or side effects are reported.
+O: BP not required
+A: {diagnoses}
+P: Change treatment to {medication} as-needed.
+Prescription written, follow-up per routine.
+
+[Hair - Initial]
+
+S: Reports hair loss described as: '{hsx}'
+Denies smooth bald spots or redness/crusting around hair follicles.
+
+{objective_section}A: Hair loss consistent with androgenic alopecia
+
+P: Start treatment with {medication}.
+Prescription written, follow-up per routine.
+
+[Hair - Follow-up]
+
+S: Reports response to treatment without notable side effects. Endorses: '{hvar}'
+{objective_section}A: Androgenic alopecia
+P: Continue present treatment with {medication}.
+Prescription written, follow-up per routine.
+
+[Hair - Limited Check-in]
+
+S: Reports good response to treatment without side effects.
+A: Androgenic alopecia
+P: Continue present treatment with {medication}.
+Prescription written, follow-up per routine.
+
+[Photoaging - Note]
+
+S: Reports concern about aging, with presence of photoaging. {retinoid_history}. No serious health conditions.
+O: {exam_text}
+A: Photoaging.
+P: Start treatment with {medication}.
+Prescription written, follow-up per routine.
+
+[Performance Anxiety - Initial]
+
+S: Reports performance anxiety{subject_suffix}.
+
+{vitals_line}A: Performance anxiety
+
+P: Start treatment with {medication}.
+
+[Performance Anxiety - Follow-up]
+
+S: Reports {response} response to treatment {se_phrase}.
+
+{vitals_line}
+
+A: Performance anxiety
+
+P: Continue present treatment with {medication}.
+

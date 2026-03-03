@@ -1,0 +1,23 @@
+[Hair - Initial]
+
+S: Reports hair loss described as: '{hsx}'
+Denies smooth bald spots or redness/crusting around hair follicles.
+
+{objective_section}A: Hair loss consistent with androgenic alopecia
+
+P: Start treatment with {medication}.
+Prescription written, follow-up per routine.
+
+[Hair - Follow-up]
+
+S: Reports response to treatment without notable side effects. Endorses: '{hvar}'
+{objective_section}A: Androgenic alopecia
+P: Continue present treatment with {medication}.
+Prescription written, follow-up per routine.
+
+[Hair - Limited Check-in]
+
+S: Reports good response to treatment without side effects.
+A: Androgenic alopecia
+P: Continue present treatment with {medication}.
+Prescription written, follow-up per routine.

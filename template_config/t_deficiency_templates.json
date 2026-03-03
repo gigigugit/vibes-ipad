@@ -1,0 +1,11 @@
+{
+    "list_name": "T Deficiency Templates",
+    "templates": [
+        "Insert Labs",
+        "Rx Note",
+        "Referral note",
+        "Lab Message",
+        "Testosterone Deficiency Follow-up",
+        "Testosterone Follow-up Labs"
+    ]
+}
