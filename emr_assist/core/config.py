@@ -225,7 +225,7 @@ VISIT_TAB_INDICES: Dict[str, int] = {
     "Birth Control": 6,
 }
 
-AUTO_CLICKER_TAB_INDEX = 4
+DASHBOARD_TAB_INDEX = 4
 
 # ---------------------------------------------------------------------------
 # Intake form selectors

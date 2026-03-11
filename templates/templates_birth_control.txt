@@ -1,6 +1,9 @@
 [Birth Control - Initial]
 
 S: Patient presents for birth control consultation.
+LMP: {lmp}
+
+O: BP: {blood_pressure}
 
 A: Contraception management
 
@@ -9,9 +12,11 @@ Prescription written, follow-up per routine.
 
 [Birth Control - Follow-up]
 
-S: Reports satisfaction with current contraceptive method without side effects.
-
+S: The patient reports {is_phrase} doing well on treatment.
+Side effects: {side_effects}
+Changes in medical history: {med_history_changes}
+O: BP: {blood_pressure}
+LMP: {lmp}
 A: Contraception management
-
-P: Continue present treatment with {medication}.
+P: {plan_phrase} {medication}
 Prescription written, follow-up per routine.

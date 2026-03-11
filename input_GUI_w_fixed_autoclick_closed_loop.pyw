@@ -19,6 +19,18 @@
 
 from __future__ import annotations
 
+import sys, io
+
+# Force UTF-8 stdout/stderr so emoji print() calls don't crash on cp1252
+if sys.stdout and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
+    )
+if sys.stderr and hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True
+    )
+
 import wx
 import wx.lib.scrolledpanel as scrolled
 import pyperclip
@@ -541,7 +553,8 @@ VISIT_TAB_INDICES = {
     "Birth Control": 6,
 }
 
-AUTO_CLICKER_TAB_INDEX = 4
+DASHBOARD_TAB_INDEX = 4
+AUTO_CLICKER_TAB_INDEX = DASHBOARD_TAB_INDEX  # backward compat alias
 
 BIRTH_CONTROL_PMH_OPTIONS = [
     ("htn", "HTN (hypertension)"),
@@ -564,90 +577,7 @@ BIRTH_CONTROL_PMH_KEYWORDS = {
 AUTO_CLICKER_DEBUG = False
 
 CDP_HEADER_SELECTORS_JSON = json.dumps(CDP_HEADER_SELECTORS)
-CDP_TITLE_XPATHS_JSON = json.dumps(CDP_TITLE_XPATHS)
-CDP_TITLE_SELECTORS_JSON = json.dumps(CDP_TITLE_SELECTORS)
 CDP_VISIT_FALLBACK_KEYWORDS_JSON = json.dumps([kw for kw, _ in VISIT_TYPE_FALLBACK_KEYWORDS])
-
-_CDP_VISIT_HEADER_SCRIPT = (
-    """
-(() => {
-    const sels = __SELS__;
-    const xpaths = __XPATHS__;
-    const keywords = __KEYWORDS__;
-
-    const normalize = (text) => (text || '').trim();
-    const accept = (text) => {
-        const raw = normalize(text);
-        if (!raw) return null;
-        const low = raw.toLowerCase();
-        if (low.includes('navigation') || low.includes('menu')) return null;
-        for (const kw of keywords) {
-            if (low.includes(kw)) return raw;
-        }
-        return null;
-    };
-
-    const scrapeNodes = (doc, nodes) => {
-        for (const node of nodes) {
-            try {
-                const txt = accept(node.innerText || node.textContent || '');
-                if (txt) return txt;
-            } catch (e) {}
-        }
-        return null;
-    };
-
-    const queryDocument = (doc) => {
-        if (!doc) return null;
-
-        for (const xp of xpaths) {
-            try {
-                const res = doc.evaluate(xp, doc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-                const nodes = [];
-                for (let i = 0; i < res.snapshotLength; i++) {
-                    nodes.push(res.snapshotItem(i));
-                }
-                const hit = scrapeNodes(doc, nodes);
-                if (hit) return hit;
-            } catch (e) {}
-        }
-
-        for (const sel of sels) {
-            try {
-                const matches = Array.from(doc.querySelectorAll(sel));
-                const hit = scrapeNodes(doc, matches);
-                if (hit) return hit;
-            } catch (e) {}
-        }
-
-        return null;
-    };
-
-    const mainDoc = document;
-    const direct = queryDocument(mainDoc);
-    if (direct) return direct;
-
-    const frames = Array.from(document.querySelectorAll('iframe'));
-    for (const frame of frames) {
-        try {
-            const doc = frame.contentDocument;
-            const hit = queryDocument(doc);
-            if (hit) return hit;
-        } catch (e) {}
-    }
-
-    try {
-        const titleHit = accept(document.title || '');
-        if (titleHit) return titleHit;
-    } catch (e) {}
-
-    return null;
-})();
-"""
-    .replace("__SELS__", CDP_TITLE_SELECTORS_JSON)
-    .replace("__XPATHS__", CDP_TITLE_XPATHS_JSON)
-    .replace("__KEYWORDS__", CDP_VISIT_FALLBACK_KEYWORDS_JSON)
-)
 
 INTAKE_FORM_DATE_SELECTOR = "div[data-testid='intake-form'] time, div[data-testid='IntakeForm'] time, time[datetime][dir]"
 
@@ -712,8 +642,8 @@ USE_CLIPBOARD_FOR_TEXT = True
 # Global grab-method toggle for T Deficiency, Hair Loss, and Photoaging tabs
 # True = use CDP/Playwright (fast, no clipboard needed), False = use clipboard (Ctrl+A/Ctrl+C)
 USE_CDP_FOR_GRAB = False
-# Delay (ms) before running an auto grab so the EMR has time to focus after a tab switch
-AUTO_GRAB_DELAY_MS = 900
+# Delay (ms) before running an auto grab so the EMR has time to fully render after navigation
+AUTO_GRAB_DELAY_MS = 2500
 
 # Width to leave visible when the GUI is hidden off-screen
 GUI_HIDDEN_VISIBLE_WIDTH = 65
@@ -1144,74 +1074,60 @@ def detect_td_diagnosis(text: str) -> bool:
     )
     return any(k in low for k in keywords)
 
-def load_templates_from_file():
-    """Load templates from external templates.txt file"""
+
+def _parse_template_file(filepath: str) -> dict:
+    """Parse a single template file and return a dict of {name: content}."""
     templates = {}
-    
-    # Get the directory where this script is located
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    templates_path = os.path.join(script_dir, 'templates.txt')
-    
     try:
-        with open(templates_path, 'r', encoding='utf-8') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
-        
-        # Parse templates - simplified format without [END] markers
         current_template = None
-        current_content = []
-        
+        current_content: list = []
         for line in content.split('\n'):
             stripped_line = line.strip()
-            if stripped_line.startswith('[') and stripped_line.endswith(']'):
-                # Save previous template if exists
+            if stripped_line.startswith("[") and stripped_line.endswith("]"):
                 if current_template and current_content:
-                    template_text = '\n'.join(current_content).rstrip()  # Keep formatting but remove trailing spaces
+                    template_text = "\n".join(current_content).rstrip()
                     if template_text:
                         templates[current_template] = template_text
-                
-                # Start new template
-                current_template = stripped_line[1:-1]  # Remove brackets
+                current_template = stripped_line[1:-1]
                 current_content = []
-            elif current_template is not None:  # Include empty lines for paragraph breaks
-                current_content.append(line.rstrip())  # Keep original line but remove trailing spaces
-        
-        # Save last template
+            elif current_template is not None:
+                current_content.append(line.rstrip())
         if current_template and current_content:
-            template_text = '\n'.join(current_content).rstrip()  # Keep formatting but remove trailing spaces
+            template_text = "\n".join(current_content).rstrip()
             if template_text:
                 templates[current_template] = template_text
-    
     except FileNotFoundError:
-        print(f"Templates file not found: {templates_path}")
-        # Fallback to basic templates
-        templates = {
-            "Insert Labs": "Labs:\n{lab_values_formatted}",
-            "Lab Message": "I have reviewed your intake and the labs which are now complete. There is total testosterone of {total_testosterone} ng/dL and free testosterone of {free_testosterone} ng/dL. The other labs done for safety, to rule out possible concerning causes of deficiency, are unremarkable",
-            "Testosterone Follow-up Labs": (
-                "Hi, my name is Matthew Tomcik, MD, a board-certified family physician licensed in your state.\n\n"
-                "I have reviewed your responses here, and the labs which are now complete.\n\n"
-                "The total testosterone is now in the normal range at {total_testosterone} ng/dL ([up/down] from [last value total testosterone] in [Month, year]), "
-                "while the estradiol, hematocrit, and PSA are [normal/elevated] at {estradiol} pg/mL, {hematocrit} %, and {psa} ng/mL. "
-                "Please list each as \"lab name is [normal/abnormal] at [value]\" for any additional tests reviewed.\n\n"
-                "I see you've reported [improvement/no change/worsening] in symptoms and [blank/no] side effects [including side effects from the questionnaire], "
-                "we'd recommend that you [continue the treatment as-is/increase the dose to ***/decrease to ***] at this time."
-            ),
-            "Testosterone Deficiency Follow-up": (
-                "S: Reports he is {response} treatment with {side_effects}\n"
-                "O:\n"
-                "Total testosterone: {total_testosterone} ng/dL\n"
-                "PSA: {psa} ng/mL\n"
-                "estradiol: {estradiol} pg/mL\n"
-                "Hematocrit: {hematocrit} %\n"
-                "A: {diagnoses}\n"
-                "P: Proceed with {medication}\n"
-                "Prescription written, follow-up per routine."
-            ),
-        }
+        print(f"Template file not found: {filepath}")
     except Exception as e:
-        print(f"Error loading templates: {e}")
-        templates = {"Error": "Could not load templates"}
-    
+        print(f"Error parsing template file {filepath}: {e}")
+    return templates
+
+
+def load_templates_from_file():
+    """Load templates from templates.txt and all files in the templates/ folder."""
+    templates = {}
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 1) Load base templates.txt (T-Deficiency / general)
+    base_path = os.path.join(script_dir, "templates.txt")
+    templates.update(_parse_template_file(base_path))
+
+    # 2) Load every file in the templates/ subfolder
+    templates_dir = os.path.join(script_dir, "templates")
+    if os.path.isdir(templates_dir):
+        for fname in sorted(os.listdir(templates_dir)):
+            if fname.endswith(".txt"):
+                fpath = os.path.join(templates_dir, fname)
+                templates.update(_parse_template_file(fpath))
+
+    if not templates:
+        print("Warning: No templates loaded from any file.")
+
+    # Log loaded template names for debugging
+    print(f"Loaded {len(templates)} templates: {list(templates.keys())}")
     return templates
 
 
@@ -1501,7 +1417,8 @@ def _get_emr_text_cdp():
         print(f"CDP text grab failed: {e}")
         return None
 
-def grab_all_labs():
+
+def grab_all_labs(auto_grab=False):
     """Grab all lab values using EMR extraction method"""
     finished = [False]
 
@@ -1520,10 +1437,8 @@ def grab_all_labs():
             # --- Clipboard path (when CDP is disabled or failed) ---
             if not new_content:
                 used_clipboard = True
-                # If CDP mode was on but failed, need to hide frame for clipboard
-                if USE_CDP_FOR_GRAB:
-                    frame.Hide()
-                    time.sleep(0.1)
+                frame.Hide()
+                time.sleep(0.1)
 
                 # Store original clipboard
                 try:
@@ -1575,19 +1490,19 @@ def grab_all_labs():
                 # Clear any selection if we used clipboard
                 if used_clipboard:
                     _clear_text_selection()
-                
+
                 # Parse the grabbed text for all lab values
                 for lab_name, lab_config in LABS_CONFIG.items():
                     result = extract_lab_value_simple(lab_config, new_content)
                     var_name = lab_config["var"]
-                    
+
                     if result["found"]:
                         grabbed_vars[var_name] = result["raw_value"]
                         print(f"Found {lab_name}: {result['raw_value']} {result['unit']}")
                     else:
                         grabbed_vars[var_name] = ""
                         print(f"Could not find {lab_name}")
-                
+
                 # Parse TDCS score from text
                 tdcs_score = parse_tdcs_score(new_content)
                 tdcs_value[0] = str(tdcs_score)
@@ -1595,7 +1510,7 @@ def grab_all_labs():
                 # Parse TDCS-C score from text
                 tdcs_c_score = parse_tdcsc_score(new_content)
                 tdcs_c_value[0] = str(tdcs_c_score) if tdcs_c_score is not None else "—"
-                
+
                 # Parse ED status from text
                 ed_status = parse_ed_status(new_content)
                 ed_value[0] = "He reports symptoms consistent with ED." if ed_status == "Yes" else "He denies symptoms of ED." if ed_status == "No" else "—"
@@ -1621,18 +1536,18 @@ def grab_all_labs():
                 medication_value[0] = detected_med if detected_med else ""
                 if detected_med:
                     print(f"Detected TD medication: {detected_med}")
-                
+
                 # Update UI on main thread
                 wx.CallAfter(update_ui_after_grab)
 
                 emit_emr_bridge({"context": "labs"})
-                
+
                 # Restore original clipboard
                 try:
                     pyperclip.copy(original)
                 except Exception:
                     pass
-                
+
             else:
                 # Failure to grab: notify and ensure UI is restored
                 print("Failed to grab text from EMR")
@@ -1651,7 +1566,7 @@ def grab_all_labs():
                     frame.Show()
                     frame.Raise()
                 wx.CallAfter(_show_fail_msg)
-                
+
         except Exception as e:
             print(f"Error during grab: {e}")
             # Restore original clipboard and UI on exceptions as well
@@ -1667,11 +1582,11 @@ def grab_all_labs():
         finally:
             finished[0] = True
 
-    # Only hide frame for clipboard mode (CDP doesn't need screen interaction)
+    # Hide frame for clipboard mode (CDP doesn't need screen interaction)
     if not USE_CDP_FOR_GRAB:
         frame.Hide()
     time.sleep(0.1)
-    
+
     # Watchdog: if the worker hangs, restore the UI after a timeout
     def _watchdog():
         if not finished[0]:
@@ -1693,6 +1608,7 @@ def grab_all_labs():
 
     # Run grab in thread
     threading.Thread(target=do_grab, daemon=True).start()
+
 
 def update_ui_after_grab():
     """Update UI with grabbed values"""
@@ -1726,22 +1642,22 @@ def insert_template_at_cursor():
     if not selected_template[0]:
         wx.MessageBox("Please select a template first", "No Template Selected", wx.ICON_WARNING)
         return
-    
+
     template_name = selected_template[0]
     if template_name not in templates:
         wx.MessageBox(f"Template '{template_name}' not found", "Template Error", wx.ICON_ERROR)
         return
-    
+
     frame.Hide()
     time.sleep(0.2)
-    
+
     try:
         # Get the template content
         template_content = templates[template_name]
-        
+
         # Prepare variables for template substitution
         template_vars = {}
-        
+
         # Add individual lab variables
         for lab_name, lab_config in LABS_CONFIG.items():
             var_name = lab_config["var"]
@@ -1751,7 +1667,7 @@ def insert_template_at_cursor():
         # Default PSA to "not done" when missing
         if not template_vars.get("psa") or not template_vars.get("psa").strip():
             template_vars["psa"] = "- not done -"
-        
+
         # Add formatted lab values
         lab_lines = []
         for lab_name, lab_config in LABS_CONFIG.items():
@@ -1765,7 +1681,7 @@ def insert_template_at_cursor():
                 elif low_cb.GetValue():
                     suffix = " (low)"
                 lab_lines.append(f"{lab_name}: {value} {lab_config['unit']}{suffix}")
-        
+
         template_vars["lab_values_formatted"] = "\n".join(lab_lines) if lab_lines else "(none grabbed)"
 
         # Determine which tab we're inserting for
@@ -1820,18 +1736,18 @@ def insert_template_at_cursor():
             elif current_tab == "Birth Control":
                 active_med = frame.bc_med_text.GetValue().strip() if hasattr(frame, "bc_med_text") else ""
             template_vars["medication"] = active_med if active_med else medication_value[0]
-        
+
         # ============================================================
         # Tab-specific variables (Hair, Sexual Health, Photoaging, PA)
         # ============================================================
-        
+
         # --- Hair Loss tab variables ---
         try:
             template_vars["hvar"] = frame.hair_hvar_text.GetValue().strip()
             template_vars["hsx"] = frame.hair_hsx_text.GetValue().strip()
-            
+
             # (medication is resolved from active tab above — no per-tab override here)
-            
+
             # Build objective_section from hair exam checkboxes
             hair_exam_findings = []
             if frame.hair_exam_front_hairline.GetValue():
@@ -1846,7 +1762,7 @@ def insert_template_at_cursor():
                 hair_exam_findings.append("confluent from the front hairline to the crown")
             if frame.hair_exam_near_front.GetValue():
                 hair_exam_findings.append("near the front with sparing of the hairline")
-            
+
             if hair_exam_findings:
                 exam_text = ", ".join(hair_exam_findings)
                 template_vars["objective_section"] = f"O: Images reviewed showing hair loss at {exam_text}\n\n"
@@ -1857,18 +1773,18 @@ def insert_template_at_cursor():
             template_vars["hvar"] = ""
             template_vars["hsx"] = ""
             template_vars["objective_section"] = ""
-        
+
         # --- Sexual Health tab variables ---
         try:
             bp_val = frame.sexual_health_bp_text.GetValue().strip()
             template_vars["bp"] = bp_val if bp_val else "not recorded"
-            
+
             # (medication is resolved from active tab above — no per-tab override here)
-            
+
             # Response text based on followup/initial
             sh_response = frame.sexual_health_response_choice.GetStringSelection() if hasattr(frame, 'sexual_health_response_choice') else ""
             template_vars["response_text"] = sh_response if sh_response else "a satisfactory response"
-            
+
             # Plan action text
             sh_plan = frame.sexual_health_plan_choice.GetStringSelection() if hasattr(frame, 'sexual_health_plan_choice') else ""
             template_vars["action_text"] = sh_plan if sh_plan else "Continue present treatment"
@@ -1900,13 +1816,13 @@ def insert_template_at_cursor():
             template_vars["past_ed_treatments"] = "none reported"
             template_vars["ros_positives"] = "none"
             template_vars["ros_negatives"] = ""
-        
+
         # --- Photoaging tab variables ---
         try:
             template_vars["retinoid_history"] = frame.photoaging_retinoid_text.GetValue().strip() if hasattr(frame, 'photoaging_retinoid_text') else ""
-            
+
             # (medication is resolved from active tab above — no per-tab override here)
-            
+
             # Build exam_text from photoaging exam checkboxes
             photoaging_exam_findings = []
             if hasattr(frame, 'photoaging_exam_fine_lines') and frame.photoaging_exam_fine_lines.GetValue():
@@ -1933,7 +1849,7 @@ def insert_template_at_cursor():
                 photoaging_exam_findings.append("acne scarring")
             if hasattr(frame, 'photoaging_exam_normal') and frame.photoaging_exam_normal.GetValue():
                 photoaging_exam_findings.append("no significant findings")
-            
+
             if photoaging_exam_findings:
                 template_vars["exam_text"] = "Images reviewed showing " + ", ".join(photoaging_exam_findings)
             else:
@@ -1941,11 +1857,11 @@ def insert_template_at_cursor():
         except AttributeError:
             template_vars["retinoid_history"] = ""
             template_vars["exam_text"] = "Images reviewed"
-        
+
         # --- Performance Anxiety tab variables ---
         try:
             # (medication is resolved from active tab above — no per-tab override here)
-            
+
             # Build subject_suffix from situational fears checkboxes
             fears = []
             if hasattr(frame, 'pa_fear_new') and frame.pa_fear_new.GetValue():
@@ -1955,7 +1871,7 @@ def insert_template_at_cursor():
             if hasattr(frame, 'pa_fear_pressure') and frame.pa_fear_pressure.GetValue():
                 fears.append("when feeling pressured")
             template_vars["subject_suffix"] = (" " + ", ".join(fears)) if fears else ""
-            
+
             # Build vitals_line from BP and pulse
             bp_val = frame.pa_bp_text.GetValue().strip() if hasattr(frame, 'pa_bp_text') else ""
             pulse_val = frame.pa_pulse_text.GetValue().strip() if hasattr(frame, 'pa_pulse_text') else ""
@@ -1968,7 +1884,7 @@ def insert_template_at_cursor():
                 template_vars["vitals_line"] = "O: " + ", ".join(vitals_parts) + "\n\n"
             else:
                 template_vars["vitals_line"] = ""
-            
+
             # Response for follow-up (only override when on PA tab to avoid clobbering T tab's response)
             if current_tab == "Performance Anxiety":
                 if hasattr(frame, 'pa_response_good_rb') and frame.pa_response_good_rb.GetValue():
@@ -1979,7 +1895,7 @@ def insert_template_at_cursor():
                     template_vars["response"] = "a poor"
                 else:
                     template_vars["response"] = "a satisfactory"
-            
+
             # Side effects phrase (only for PA tab)
             if current_tab == "Performance Anxiety":
                 if hasattr(frame, 'pa_se_none_rb') and frame.pa_se_none_rb.GetValue():
@@ -1994,7 +1910,23 @@ def insert_template_at_cursor():
             template_vars["subject_suffix"] = ""
             template_vars["vitals_line"] = ""
             template_vars["se_phrase"] = "without side effects"
-        
+
+        # --- Birth Control tab variables ---
+        try:
+            template_vars["lmp"] = (
+                frame.bc_lmp_text.GetValue().strip()
+                if hasattr(frame, "bc_lmp_text")
+                else ""
+            )
+            template_vars["blood_pressure"] = (
+                frame.bc_bp_text.GetValue().strip()
+                if hasattr(frame, "bc_bp_text")
+                else "nr"
+            )
+        except AttributeError:
+            template_vars["lmp"] = ""
+            template_vars["blood_pressure"] = "nr"
+
         # Format the template
         try:
             formatted_text = template_content.format(**template_vars)
@@ -2008,10 +1940,10 @@ def insert_template_at_cursor():
         _type_template_text(formatted_text)
 
         print(f"Inserted template '{template_name}': {repr(formatted_text[:100])}...")
-        
+
     except Exception as e:
         wx.MessageBox(f"Error inserting template: {e}", "Error", wx.ICON_ERROR)
-    
+
     frame.Show()
     frame.Raise()
 
@@ -2326,7 +2258,7 @@ def show_clinical_matrix():
 
 class BrowserEMRGrabber:
     """Playwright-based EMR data extraction for reliable element grabbing"""
-    
+
     def __init__(self):
         self.driver = None
         self.wait = None
@@ -2351,7 +2283,7 @@ class BrowserEMRGrabber:
         self._cdp_last_check: float = 0.0
         self._pw_thread_id = None
         self._driver_thread_id = None
-    
+
     def _reset_text_caches(self):
         """Clear per-page text caches to avoid stale reads between grabs."""
         self._cache_latest_segment = None
@@ -2395,7 +2327,9 @@ class BrowserEMRGrabber:
                 self._pw_thread_id = current_thread
             if self._cdp_browser is None:
                 cdp_url = f"http://127.0.0.1:{CDP_DEBUG_PORT}"
-                self._cdp_browser = self._pw.chromium.connect_over_cdp(cdp_url)
+                self._cdp_browser = self._pw.chromium.connect_over_cdp(
+                    cdp_url, timeout=10000
+                )
             if self._pw_thread_id is None:
                 self._pw_thread_id = current_thread
             return True
@@ -2436,11 +2370,14 @@ class BrowserEMRGrabber:
         for page in pages:
             try:
                 if self._is_emr_url(page.url or ""):
+                    page.set_default_timeout(10000)
                     return page
             except Exception:
                 continue
+        if pages:
+            pages[0].set_default_timeout(10000)
         return pages[0] if pages else None
-        
+
     def connect_to_chrome(self):
         """Connect to existing Chrome debugging session with retries for transient attach failures."""
         # Reuse existing driver when possible
@@ -2507,7 +2444,7 @@ class BrowserEMRGrabber:
         if last_error:
             print(f"❌ Chrome connection failed after retries: {last_error}")
         return False
-    
+
     def disconnect(self):
         """Cleanup - but don't close the browser session"""
         if self.driver:
@@ -2560,7 +2497,9 @@ class BrowserEMRGrabber:
             self._pw = None
             self._pw_thread_id = None
 
-    def fetch_patient_location_summary(self, debug_print=True) -> dict | None:
+    def fetch_patient_location_summary(
+        self, debug_print=True, skip_wi_detail=True
+    ) -> dict | None:
         summary: dict = {
             "state": None,
             "state_display": None,
@@ -2662,10 +2601,11 @@ class BrowserEMRGrabber:
                 except Exception as e:
                     summary["detection_error"] = f"Body text state name fallback error: {e}"
 
-            # If state is WI or WISCONSIN, try to get city/address as before
+            # If state is WI or WISCONSIN, always record it; optionally get city/address
             normalized = summary.get("state", None)
             if normalized in ("WI", "WISCONSIN"):
                 summary["state"] = "WI"
+            if normalized in ("WI", "WISCONSIN") and not skip_wi_detail:
                 address_row_xpath = "(//div[contains(@class,'py-3') and contains(@class,'text-xs') and contains(@class,'text-black')])[3]"
                 try:
                     edit_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button#editPatient")))
@@ -2882,7 +2822,7 @@ class BrowserEMRGrabber:
         except Exception as e:
             print(f"ensure_emr_tab error: {e}")
             return False
-    
+
     def _close_patient_edit_modal(self) -> None:
         """Exit the patient edit modal via the close icon (fallback to Escape)."""
         if not self.driver:
@@ -2964,7 +2904,7 @@ class BrowserEMRGrabber:
         if not self.driver:
             if not self.connect_to_chrome():
                 return None
-        
+
         try:
             # Ensure we're on an EMR tab before extracting
             if not self._ensure_emr_tab():
@@ -2978,7 +2918,7 @@ class BrowserEMRGrabber:
             overall_start = time.perf_counter()
             dprint("🔍 Starting browser-based Sexual Health grab…")
             dprint(f"📍 Current page: {self.driver.current_url}")
-            
+
             # Define EMR element selectors for Sexual Health data
             selectors = {
                 'medication_title': get_selector('sexual_health', 'medication', engine='selenium', selector_type='css') or '[data-testid="medication-title"]',
@@ -2986,16 +2926,16 @@ class BrowserEMRGrabber:
                 'treatment_plan': get_selector('sexual_health', 'treatment_plan', engine='selenium', selector_type='css') or '[data-testid="proposedTreatmentPlan"]',
                 'current_dose': get_selector('sexual_health', 'current_dose', engine='selenium', selector_type='css') or '[data-testid="treatmentPlan"]',
             }
-            
+
             # Additional selectors to try if main ones don't work
             fallback_selectors = {
                 'medication_alt1': '.medication-name, .med-name, [class*="medication"]',
                 'medication_alt2': '[class*="dose"], [class*="dosage"]',
                 'treatment_alt': '[class*="treatment"], [class*="plan"]',
             }
-            
+
             extracted_data = {}
-            
+
             # Try to extract medication information
             t0 = time.perf_counter()
             medication = self._extract_medication(selectors, fallback_selectors)
@@ -3012,7 +2952,7 @@ class BrowserEMRGrabber:
             intake_med_plain = self._strip_frequency_suffix(medication) if medication else ""
             if intake_med_plain:
                 extracted_data['intake_med_name'] = intake_med_plain
-            
+
             # Try to extract effectiveness information (prefer fast text parsing)
             t2 = time.perf_counter()
             # Keep text gathering fast: avoid iframe walks unless Hybrid mode is selected
@@ -3027,14 +2967,14 @@ class BrowserEMRGrabber:
             if effectiveness:
                 extracted_data['effectiveness'] = effectiveness
                 dprint(f"   ✅ Extracted effectiveness: '{effectiveness}' ({(time.perf_counter()-t2)*1000:.0f} ms)")
-            
+
             # Try to extract blood pressure
             t3 = time.perf_counter()
             blood_pressure = self._extract_blood_pressure()
             if blood_pressure:
                 extracted_data['blood_pressure'] = blood_pressure
                 dprint(f"   ✅ Extracted blood pressure: '{blood_pressure}' ({(time.perf_counter()-t3)*1000:.0f} ms)")
-            
+
             # Try to extract diagnoses from notes
             t4 = time.perf_counter()
             diagnoses = self._extract_diagnoses()
@@ -3050,14 +2990,14 @@ class BrowserEMRGrabber:
             if current_med_detail:
                 extracted_data['current_med_detail'] = current_med_detail
                 dprint(f"   ✅ Current detail: '{current_med_detail}'")
-            
+
             # Extract hair loss data if present
             t6 = time.perf_counter()
             hair_loss_location = self._extract_hair_loss_location()
             if hair_loss_location:
                 extracted_data['hair_loss_location'] = hair_loss_location
                 dprint(f"   ✅ Extracted hair loss location: '{hair_loss_location}' ({(time.perf_counter()-t6)*1000:.0f} ms)")
-            
+
             t7 = time.perf_counter()
             hair_loss_additional_sxx = self._extract_hair_loss_additional_sxx()
             if hair_loss_additional_sxx:
@@ -3130,10 +3070,10 @@ class BrowserEMRGrabber:
 
             if full_text:
                 extracted_data['full_text'] = full_text
-            
+
             dprint(f"✅ Browser grab completed in {(time.perf_counter()-overall_start)*1000:.0f} ms. Found {len(extracted_data)} data types.")
             return extracted_data
-            
+
         except Exception as e:
             print(f"❌ Browser grab error: {e}")
             return None
@@ -3207,7 +3147,7 @@ class BrowserEMRGrabber:
             return self._cache_latest_segment
         self._cache_latest_segment = page_text
         return self._cache_latest_segment
-    
+
     def _extract_medication(self, selectors, fallback_selectors):
         """Extract medication quickly via DOM queries with Playwright; fall back to text parsing when needed.
         The returned string appends a simple frequency suffix (", daily" or ", as-needed").
@@ -3454,7 +3394,7 @@ class BrowserEMRGrabber:
         except Exception as e:
             print(f"   ❌ Playwright connection/use error: {e}")
             return ""
-    
+
     def _extract_medication_detail_text(self) -> str:
         selector = '[data-testid="medication-text"]'
         try:
@@ -3711,7 +3651,7 @@ return null;
 
         except Exception as e:
             dprint(f"   ❌ Effectiveness extraction error: {e}")
-        
+
         return None
 
     def _extract_effectiveness_playwright(self) -> Optional[str]:
@@ -4024,7 +3964,7 @@ return null;
         try:
             if sync_playwright is None:
                 return False
-                
+
             with sync_playwright() as p:  # type: ignore
                 cdp_url = f"http://127.0.0.1:{CDP_DEBUG_PORT}"
                 browser = p.chromium.connect_over_cdp(cdp_url)
@@ -4058,7 +3998,7 @@ return null;
                     locator.first.click(timeout=3000)
                     print(f"   ✅ Playwright clicked 'Get next task' button using selector: {playwright_selector}")
                     return True
-                    
+
                 finally:
                     try:
                         browser.close()
@@ -4107,7 +4047,7 @@ return null;
         except Exception as e:
             print(f"click_get_next_task error: {e}")
             return False
-    
+
     def _extract_blood_pressure(self):
         """Extract blood pressure information from the provided CSS class.
         Prefer exact element text like '90-139/50-80' or a reading like '120/80'.
@@ -4440,7 +4380,7 @@ return null;
         except Exception:
             return None
         return None
-    
+
     def _extract_diagnoses(self):
         """Extract Sexual Health diagnoses with robust mapping and negation handling.
         Returns a list containing any of: 'ED', 'PE', 'PE-like ejaculatory dysfunction'.
@@ -4739,14 +4679,14 @@ return null;
         except Exception:
             return []
         return []
-    
+
     def _extract_hair_loss_location(self) -> str:
         """Extract hair loss location from the EMR page.
         Uses fallback selector to find the specific element for hair loss location.
         """
         try:
             self._switch_to_default()
-            
+
             # Possible hair loss location options
             location_patterns = [
                 "Thinning at the hairline",
@@ -4755,10 +4695,10 @@ return null;
                 "Redness and irritation found at sites of hair loss",
                 "I'll take a photo of my head instead"
             ]
-            
+
             # Try the specific fallback selector first
             fallback_selector = "div:nth-of-type(1) > div:nth-of-type(4) > div > div:nth-of-type(2) > div:nth-of-type(1) > div > div > div > div > div > div > div:nth-of-type(4) > div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(44) > div > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1)"
-            
+
             try:
                 element = self.driver.find_element(By.CSS_SELECTOR, fallback_selector)
                 text = (element.get_attribute('innerText') or element.text or '').strip()
@@ -4767,11 +4707,11 @@ return null;
                     return text
             except Exception as e:
                 print(f"   ⚠️ Fallback selector failed: {e}")
-            
+
             # If fallback fails, search all elements with the generic class
             elements = self.driver.find_elements(By.CSS_SELECTOR, "div.css-1rynq56.r-cqee49.r-b88u0q")
             print(f"   🔍 Searching {len(elements)} elements for hair loss location...")
-            
+
             # Collect all matching text
             matches = []
             for element in elements:
@@ -4782,13 +4722,13 @@ return null;
                         print(f"   ✅ Found match: '{text}'")
                 except Exception:
                     continue
-            
+
             if matches:
                 # Return comma-separated list of unique matches
                 result = ", ".join(sorted(set(matches)))
                 print(f"   ✅ Hair loss location extracted: '{result}'")
                 return result
-            
+
             print(f"   ⚠️ No hair loss location found")
             return ""
         except Exception as e:
@@ -4799,14 +4739,14 @@ return null;
                 self._switch_to_default()
             except Exception:
                 pass
-    
+
     def _extract_hair_loss_additional_sxx(self) -> str:
         """Extract additional hair loss symptoms from the EMR page.
         Uses fallback selector to find the specific element for hair loss additional symptoms.
         """
         try:
             self._switch_to_default()
-            
+
             # Possible additional symptom options
             symptom_patterns = [
                 "No, none of these",
@@ -4814,10 +4754,10 @@ return null;
                 "Patches of rough, scaly skin or scarring",
                 "Pustules or crusting"
             ]
-            
+
             # Try the specific fallback selector first
             fallback_selector = "div:nth-of-type(1) > div:nth-of-type(4) > div > div:nth-of-type(2) > div:nth-of-type(1) > div > div > div > div > div > div > div:nth-of-type(4) > div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(43) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div"
-            
+
             try:
                 element = self.driver.find_element(By.CSS_SELECTOR, fallback_selector)
                 text = (element.get_attribute('innerText') or element.text or '').strip()
@@ -4829,15 +4769,15 @@ return null;
                     return text
             except Exception as e:
                 print(f"   ⚠️ Fallback selector failed: {e}")
-            
+
             # If fallback fails, search all elements with the generic class
             elements = self.driver.find_elements(By.CSS_SELECTOR, "div.css-1rynq56.r-cqee49.r-b88u0q")
             print(f"   🔍 Searching {len(elements)} elements for hair loss additional sxx...")
-            
+
             # Special case: if "No, none of these" is found, return the special text
             none_of_these_found = False
             other_symptoms = []
-            
+
             for element in elements:
                 try:
                     text = (element.get_attribute('innerText') or element.text or '').strip()
@@ -4849,19 +4789,19 @@ return null;
                         print(f"   ✅ Found symptom: '{text}'")
                 except Exception:
                     continue
-            
+
             # If "No, none of these" was selected
             if none_of_these_found and not other_symptoms:
                 result = "none, denies burning, pain, patches of rough scaly skin, scarring, pustules, and crusting"
                 print(f"   ✅ Hair loss additional sxx extracted: '{result}'")
                 return result
-            
+
             # Otherwise return comma-separated list of symptoms
             if other_symptoms:
                 result = ", ".join(sorted(set(other_symptoms)))
                 print(f"   ✅ Hair loss additional sxx extracted: '{result}'")
                 return result
-            
+
             print(f"   ⚠️ No hair loss additional sxx found")
             return ""
         except Exception as e:
@@ -5564,7 +5504,7 @@ return null;
             return f"{base_line}{infer_freq()}"
         except Exception:
             return ""
-    
+
     def _get_page_text(self):
         """Get all text content from the page as fallback"""
         if self._cache_body_text is not None:
@@ -6706,8 +6646,9 @@ return null;
         return None
 
     def _get_section_header(self) -> str | None:
-        """Try to read the main section header like 'Hair Loss', 'Sexual Health', 'Testosterone', 'Photoaging'
-        from the element described by the user or via a text-based XPath. Searches across iframes.
+        """Try to read the main section header like 'Hair Loss', 'Sexual Health', 'Testosterone',
+        'Photoaging', 'Performance Anxiety', 'Birth Control' from the page header element
+        or via a text-based XPath. Searches across iframes.
         """
         try:
             # Serve from cache if fresh (10s)
@@ -6736,7 +6677,17 @@ return null;
                     continue
 
             # Next, try XPath matching the known section names ignoring case and whitespace
-            options = ["hair loss", "sexual health", "testosterone", "photoaging"]
+            options = [
+                "hair loss",
+                "sexual health",
+                "testosterone",
+                "photoaging",
+                "performance anxiety",
+                "birth control",
+                "t deficiency",
+                "premature ejaculation",
+                "contraception",
+            ]
             preds = " or ".join([
                 f"normalize-space(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))='{opt}'" for opt in options
             ])
@@ -6763,7 +6714,7 @@ return null;
 
     def detect_visit_type(self) -> str | None:
         """Return canonical visit type name based on section header text.
-        Returns one of: 'Hair Loss', 'Sexual Health', 'Testosterone', 'Photoaging' or None.
+        Returns one of the keys from VISIT_TAB_INDICES, 'EMR Dashboard', or None.
         """
         # Serve from cache if fresh (10s)
         if (time.time() - getattr(self, '_cache_visit_type_time', 0)) < 10 and self._cache_visit_type:
@@ -6780,13 +6731,20 @@ return null;
             return None
         low = txt.strip().lower()
         mapping = {
-            'hair loss': 'Hair Loss',
-            'sexual health': 'Sexual Health',
-            'testosterone': 'T Deficiency',
-            'photoaging': 'Photoaging',
-            'performance anxiety': 'Performance Anxiety',
-            't deficiency': 'T Deficiency',
-            'td/ed': 'T Deficiency',
+            "hair loss": "Hair Loss",
+            "sexual health": "Sexual Health",
+            "premature ejaculation": "Sexual Health",
+            "testosterone": "T Deficiency",
+            "testosterone deficiency": "T Deficiency",
+            "t deficiency": "T Deficiency",
+            "td/ed": "T Deficiency",
+            "td/ed labs": "T Deficiency",
+            "td labs": "T Deficiency",
+            "low t": "T Deficiency",
+            "photoaging": "Photoaging",
+            "performance anxiety": "Performance Anxiety",
+            "birth control": "Birth Control",
+            "contraception": "Birth Control",
         }
         for key, val in mapping.items():
             if key in low:
@@ -6917,6 +6875,19 @@ return null;
                                 break
                         return answers
                 return []
+
+            # BP fallback: parse separate systolic/diastolic intake questions from text
+            if data.get("blood_pressure", "nr") == "nr":
+                sys_answer = find_answer(["systolic blood pressure"])
+                dia_answer = find_answer(["diastolic blood pressure"])
+                sys_val = (
+                    re.search(r"\b(\d{2,3})\b", sys_answer[0]) if sys_answer else None
+                )
+                dia_val = (
+                    re.search(r"\b(\d{2,3})\b", dia_answer[0]) if dia_answer else None
+                )
+                if sys_val and dia_val:
+                    data["blood_pressure"] = f"{sys_val.group(1)}/{dia_val.group(1)}"
 
             lmp_answer = find_answer(['last menstrual period'])
             if lmp_answer:
@@ -7175,6 +7146,10 @@ class TemplatePopup(wx.Frame):
 
 
 class MyFrame(wx.Frame):
+    GUI_TOGGLE_HOTKEY_NAME = "ctrl+alt+h"
+    GUI_TOGGLE_WX_MODIFIERS = wx.MOD_CONTROL | wx.MOD_ALT
+    GUI_TOGGLE_WX_KEYCODE = ord("H")
+
     @property
     def _selenium_grabber_cache(self):
         """Backwards-compatible access to the browser grabber cache."""
@@ -7201,16 +7176,16 @@ class MyFrame(wx.Frame):
             return None, False
     def __init__(self):
         global templates
-        
+
         # Load templates first
         templates = load_templates_from_file()
-        
+
         super().__init__(
             None,
             title=panel_title,
             style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX) | wx.STAY_ON_TOP
         )
-        
+
         panel = wx.Panel(self)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -7278,7 +7253,7 @@ class MyFrame(wx.Frame):
         tdcs_c_row.Add(self.tdcs_c_text, 0, wx.ALL, 5)
         tab1_sizer.Add(tdcs_c_row, 0, wx.EXPAND)
 
-        # ED Status text field  
+        # ED Status text field
         ed_row = wx.BoxSizer(wx.HORIZONTAL)
         ed_label = wx.StaticText(tab1, label="ED Status:", size=(120, -1))
         self.ed_text = wx.TextCtrl(tab1, size=(200, -1))
@@ -7294,11 +7269,11 @@ class MyFrame(wx.Frame):
             txt = wx.TextCtrl(tab1, size=(200, -1))
             high_cb = wx.CheckBox(tab1, label="High")
             low_cb = wx.CheckBox(tab1, label="Low")
-            
+
             var_name = lab_config["var"]
             text_ctrls[var_name] = txt
             check_ctrls[var_name] = (high_cb, low_cb)
-            
+
             row.Add(label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
             row.Add(txt, 1, wx.ALL | wx.EXPAND, 5)
             row.Add(high_cb, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
@@ -7420,7 +7395,8 @@ class MyFrame(wx.Frame):
         tab1.Layout()
 
         # --- Tab 2: Hair Loss tools ---
-        tab2 = wx.Panel(self.notebook)
+        tab2 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab2.SetupScrolling(scroll_x=False, scroll_y=True)
         tab2_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -7472,10 +7448,10 @@ class MyFrame(wx.Frame):
         # Hair loss exam findings
         hair_exam_label = wx.StaticText(tab2, label="Exam findings (from images):")
         tab2_sizer.Add(hair_exam_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         # Hair exam checkboxes - organized in rows
         hair_exam_sizer = wx.BoxSizer(wx.VERTICAL)
-        
+
         # Row 1
         hair_exam_row1 = wx.BoxSizer(wx.HORIZONTAL)
         self.hair_exam_front_hairline = wx.CheckBox(tab2, label="front hairline")
@@ -7485,27 +7461,27 @@ class MyFrame(wx.Frame):
         hair_exam_row1.Add(self.hair_exam_top_crown, 0, wx.ALL, 5)
         hair_exam_row1.Add(self.hair_exam_widening_part, 0, wx.ALL, 5)
         hair_exam_sizer.Add(hair_exam_row1, 0, wx.EXPAND)
-        
-        # Row 2  
+
+        # Row 2
         hair_exam_row2 = wx.BoxSizer(wx.HORIZONTAL)
         self.hair_exam_diffuse_thinning = wx.CheckBox(tab2, label="diffuse thinning")
         self.hair_exam_confluent = wx.CheckBox(tab2, label="confluent from the front hairline to the crown")
         hair_exam_row2.Add(self.hair_exam_diffuse_thinning, 0, wx.ALL, 5)
         hair_exam_row2.Add(self.hair_exam_confluent, 0, wx.ALL, 5)
         hair_exam_sizer.Add(hair_exam_row2, 0, wx.EXPAND)
-        
+
         # Row 3
         hair_exam_row3 = wx.BoxSizer(wx.HORIZONTAL)
         self.hair_exam_near_front = wx.CheckBox(tab2, label="near the front with sparing of the hairline")
         hair_exam_row3.Add(self.hair_exam_near_front, 0, wx.ALL, 5)
         hair_exam_sizer.Add(hair_exam_row3, 0, wx.EXPAND)
-        
+
         tab2_sizer.Add(hair_exam_sizer, 0, wx.EXPAND)
 
         # Hair loss template buttons
         hair_template_label = wx.StaticText(tab2, label="Templates:")
         tab2_sizer.Add(hair_template_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         hair_btn_row = wx.BoxSizer(wx.HORIZONTAL)
         insert_hair_btn = wx.Button(tab2, label="Insert Hair Note (Follow-up)")
         insert_hair_btn.Bind(wx.EVT_BUTTON, lambda event: self.insert_hair_note(followup=True))
@@ -7518,7 +7494,7 @@ class MyFrame(wx.Frame):
         # Tooltip: System-wide when Hair Loss tab is selected
         insert_initial_btn.SetToolTip("Insert Hair Note (Initial) (Ctrl+Alt+N)")
         hair_btn_row.Add(insert_initial_btn, 0, wx.ALL, 5)
-        
+
         tab2_sizer.Add(hair_btn_row, 0, wx.EXPAND)
 
         # Limited Check-in note button on its own row
@@ -7528,15 +7504,16 @@ class MyFrame(wx.Frame):
         # Tooltip: System-wide when Hair Loss tab is selected
         limited_checkin_btn.SetToolTip("Limited Check-in note (Ctrl+Alt+C)")
         hair_btn_row2.Add(limited_checkin_btn, 0, wx.ALL, 5)
-        print("✅ LIMITED CHECK-IN NOTE BUTTON CREATED SUCCESSFULLY!")  # Debug output
-        
+        print("[OK] LIMITED CHECK-IN NOTE BUTTON CREATED SUCCESSFULLY")
+
         tab2_sizer.Add(hair_btn_row2, 0, wx.EXPAND)
 
         tab2.SetSizer(tab2_sizer)
         tab2.Layout()
 
         # --- Tab 3: Photoaging tools ---
-        tab3 = wx.Panel(self.notebook)
+        tab3 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab3.SetupScrolling(scroll_x=False, scroll_y=True)
         tab3_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -7587,10 +7564,10 @@ class MyFrame(wx.Frame):
         # Photoaging exam findings
         photoaging_exam_label = wx.StaticText(tab3, label="Exam findings (from images):")
         tab3_sizer.Add(photoaging_exam_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         # Photoaging exam checkboxes - organized in rows
         photoaging_exam_sizer = wx.BoxSizer(wx.VERTICAL)
-        
+
         # Row 1
         photoaging_exam_row1 = wx.BoxSizer(wx.HORIZONTAL)
         self.photoaging_exam_fine_lines = wx.CheckBox(tab3, label="Fine lines")
@@ -7600,7 +7577,7 @@ class MyFrame(wx.Frame):
         photoaging_exam_row1.Add(self.photoaging_exam_wrinkles, 0, wx.ALL, 5)
         photoaging_exam_row1.Add(self.photoaging_exam_crows_feet, 0, wx.ALL, 5)
         photoaging_exam_sizer.Add(photoaging_exam_row1, 0, wx.EXPAND)
-        
+
         # Row 2
         photoaging_exam_row2 = wx.BoxSizer(wx.HORIZONTAL)
         self.photoaging_exam_pigmentation = wx.CheckBox(tab3, label="Pigmentation changes")
@@ -7610,7 +7587,7 @@ class MyFrame(wx.Frame):
         photoaging_exam_row2.Add(self.photoaging_exam_age_spots, 0, wx.ALL, 5)
         photoaging_exam_row2.Add(self.photoaging_exam_melasma, 0, wx.ALL, 5)
         photoaging_exam_sizer.Add(photoaging_exam_row2, 0, wx.EXPAND)
-        
+
         # Row 3
         photoaging_exam_row3 = wx.BoxSizer(wx.HORIZONTAL)
         self.photoaging_exam_texture_changes = wx.CheckBox(tab3, label="Texture changes")
@@ -7620,7 +7597,7 @@ class MyFrame(wx.Frame):
         photoaging_exam_row3.Add(self.photoaging_exam_enlarged_pores, 0, wx.ALL, 5)
         photoaging_exam_row3.Add(self.photoaging_exam_loss_elasticity, 0, wx.ALL, 5)
         photoaging_exam_sizer.Add(photoaging_exam_row3, 0, wx.EXPAND)
-        
+
         # Row 4
         photoaging_exam_row4 = wx.BoxSizer(wx.HORIZONTAL)
         self.photoaging_exam_inflammation = wx.CheckBox(tab3, label="Signs of inflammation")
@@ -7630,25 +7607,26 @@ class MyFrame(wx.Frame):
         photoaging_exam_row4.Add(self.photoaging_exam_scarring, 0, wx.ALL, 5)
         photoaging_exam_row4.Add(self.photoaging_exam_normal, 0, wx.ALL, 5)
         photoaging_exam_sizer.Add(photoaging_exam_row4, 0, wx.EXPAND)
-        
+
         tab3_sizer.Add(photoaging_exam_sizer, 0, wx.EXPAND)
 
         # Photoaging template buttons
         photoaging_template_label = wx.StaticText(tab3, label="Templates:")
         tab3_sizer.Add(photoaging_template_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         photoaging_btn_row = wx.BoxSizer(wx.HORIZONTAL)
         insert_photoaging_btn = wx.Button(tab3, label="Insert Photoaging Note")
         insert_photoaging_btn.Bind(wx.EVT_BUTTON, lambda event: self.insert_photoaging_note())
         photoaging_btn_row.Add(insert_photoaging_btn, 0, wx.ALL, 5)
-        
+
         tab3_sizer.Add(photoaging_btn_row, 0, wx.EXPAND)
 
         tab3.SetSizer(tab3_sizer)
         tab3.Layout()
 
         # --- Tab 4: Sexual Health tools ---
-        tab4 = wx.Panel(self.notebook)
+        tab4 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab4.SetupScrolling(scroll_x=False, scroll_y=True)
         tab4_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -7841,7 +7819,7 @@ class MyFrame(wx.Frame):
         # Sexual health diagnosis checkboxes
         sexual_health_dx_label = wx.StaticText(tab4, label="Diagnosis:")
         tab4_sizer.Add(sexual_health_dx_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         sexual_health_dx_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.sexual_health_dx_ed = wx.CheckBox(tab4, label="ED")
         self.sexual_health_dx_pe = wx.CheckBox(tab4, label="PE")
@@ -7860,7 +7838,7 @@ class MyFrame(wx.Frame):
         # Sexual health template buttons
         sexual_health_template_label = wx.StaticText(tab4, label="Templates:")
         tab4_sizer.Add(sexual_health_template_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         # Row 1: follow-up and plan note
         sexual_health_btn_row = wx.BoxSizer(wx.HORIZONTAL)
         insert_sexual_health_btn = wx.Button(tab4, label="Insert Follow-up Note")
@@ -7882,7 +7860,7 @@ class MyFrame(wx.Frame):
         sh_change_med_btn = wx.Button(tab4, label="Change med")
         sh_change_med_btn.Bind(wx.EVT_BUTTON, lambda event: self.insert_sh_change_medication())
         sexual_health_btn_row2.Add(sh_change_med_btn, 0, wx.ALL, 5)
-        
+
         # Row 3: Hair loss button
         sexual_health_btn_row3 = wx.BoxSizer(wx.HORIZONTAL)
         insert_hair_info_btn = wx.Button(tab4, label="Insert Hair Info")
@@ -7934,7 +7912,7 @@ class MyFrame(wx.Frame):
             accel_entries.append(ent)
         # Attach the accelerator table to Tab 4 so shortcuts work when this tab has focus
         tab4.SetAcceleratorTable(wx.AcceleratorTable(accel_entries))
-        
+
         tab4_sizer.Add(sexual_health_btn_row, 0, wx.EXPAND)
         tab4_sizer.Add(sexual_health_btn_row2, 0, wx.EXPAND)
         tab4_sizer.Add(sexual_health_btn_row3, 0, wx.EXPAND)
@@ -7948,25 +7926,26 @@ class MyFrame(wx.Frame):
         self.cdp_click_count = 0
         self.clicker_method_mode = "cdp"
 
-        # --- Tab 5: Auto Clicker ---
-        tab5 = wx.Panel(self.notebook)
+        # --- Tab 5: Dashboard ---
+        tab5 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab5.SetupScrolling(scroll_x=False, scroll_y=True)
         tab5_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Auto Clicker title
-        clicker_title = wx.StaticText(tab5, label="Auto Clicker & URL Monitor")
+        # Dashboard title
+        clicker_title = wx.StaticText(tab5, label="Dashboard & URL Monitor")
         clicker_title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         tab5_sizer.Add(clicker_title, 0, wx.ALL | wx.CENTER, 10)
 
         # Control buttons - vertical layout
         clicker_controls = wx.BoxSizer(wx.VERTICAL)
-        
+
         self.clicker_start_btn = wx.Button(tab5, label="Start Autoclick: Dashboard", size=(280, 40))
         self.clicker_start_btn.Bind(wx.EVT_BUTTON, lambda event: self.toggle_auto_clicker())
         self.clicker_start_btn.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        
+
         self.clicker_test_btn = wx.Button(tab5, label="Detect Browser", size=(280, 30))
         self.clicker_test_btn.Bind(wx.EVT_BUTTON, lambda event: self.test_chrome_connection())
-        
+
         # Detect Tab button uses browser-based header detection to switch tabs
         self.detect_tab_btn = wx.Button(tab5, label="Detect Tab", size=(280, 30))
         self.detect_tab_btn.Bind(wx.EVT_BUTTON, lambda event: self.detect_visit_type_and_switch_tab())
@@ -7974,17 +7953,17 @@ class MyFrame(wx.Frame):
         # Quick Next Task button - clicks floating button then "Get Next Task"
         self.quick_next_btn = wx.Button(tab5, label="Quick Next Task", size=(280, 30))
         self.quick_next_btn.Bind(wx.EVT_BUTTON, lambda event: self.quick_next_task())
-        
+
         # Start Autoclick: In-Visit - runs quick_next_task repeatedly at interval until URL changes
         self.clicker_invisit_btn = wx.Button(tab5, label="Start Autoclick: In-Visit", size=(280, 40))
         self.clicker_invisit_btn.Bind(wx.EVT_BUTTON, lambda event: self.toggle_invisit_clicker())
         self.clicker_invisit_btn.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        
+
         # Auto-Refresh Page - refreshes current tab every 3 minutes ±30%
         self.page_refresh_btn = wx.Button(tab5, label="Start Auto-Refresh Page", size=(280, 40))
         self.page_refresh_btn.Bind(wx.EVT_BUTTON, lambda event: self.toggle_page_refresh())
         self.page_refresh_btn.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        
+
         self.clicker_status_text = wx.StaticText(tab5, label="Status: STOPPED")
         self.clicker_status_text.SetForegroundColour(wx.Colour(255, 0, 0))  # Red
 
@@ -8015,6 +7994,20 @@ class MyFrame(wx.Frame):
         notif_row.Add(self.popup_toggle, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         tab5_sizer.Add(notif_row, 0, wx.EXPAND | wx.LEFT, 12)
 
+        # Additional location checking toggle (WI state detail)
+        loc_check_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.location_check_toggle = wx.CheckBox(
+            tab5, label="Additional Location Checking (WI)"
+        )
+        self.location_check_toggle.SetValue(False)
+        self.location_check_toggle.SetToolTip(
+            "When enabled, performs extra steps to reveal address and calculate distance for WI patients."
+        )
+        loc_check_row.Add(
+            self.location_check_toggle, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5
+        )
+        tab5_sizer.Add(loc_check_row, 0, wx.EXPAND | wx.LEFT, 12)
+
         # App-wide status label moved into Auto Clicker tab
         self.grab_status_text = wx.StaticText(tab5, label="Ready")
         self.grab_status_text.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_ITALIC, wx.FONTWEIGHT_NORMAL))
@@ -8023,7 +8016,7 @@ class MyFrame(wx.Frame):
         # Settings
         settings_box = wx.StaticBox(tab5, label="Click Settings")
         settings_sizer = wx.StaticBoxSizer(settings_box, wx.VERTICAL)
-        
+
         # Coordinates
         coord_row = wx.BoxSizer(wx.HORIZONTAL)
         coord_label = wx.StaticText(tab5, label="Click Position:")
@@ -8035,7 +8028,7 @@ class MyFrame(wx.Frame):
         coord_row.Add(wx.StaticText(tab5, label="Y:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         coord_row.Add(self.clicker_y_text, 0, wx.ALL, 5)
         settings_sizer.Add(coord_row, 0, wx.EXPAND)
-        
+
         # Interval
         interval_row = wx.BoxSizer(wx.HORIZONTAL)
         interval_label = wx.StaticText(tab5, label="Interval (seconds):")
@@ -8081,11 +8074,11 @@ class MyFrame(wx.Frame):
         # URL Monitor
         url_box = wx.StaticBox(tab5, label="URL Monitor")
         url_sizer = wx.StaticBoxSizer(url_box, wx.VERTICAL)
-        
+
         self.clicker_url_text = wx.StaticText(tab5, label="Current URL: Not detected")
         self.clicker_url_text.Wrap(600)
         url_sizer.Add(self.clicker_url_text, 0, wx.ALL | wx.EXPAND, 5)
-        
+
         tab5_sizer.Add(url_sizer, 1, wx.EXPAND | wx.ALL, 10)
 
         # Instructions
@@ -8093,7 +8086,7 @@ class MyFrame(wx.Frame):
             label=f"Instructions:\n• Set click coordinates and interval\n• Click 'Start Clicking' to begin\n• Clicking auto-stops when URL changes\n• Chrome/Thorium must be running with remote debugging (--remote-debugging-port={CDP_DEBUG_PORT})")
         instructions.Wrap(600)
         tab5_sizer.Add(instructions, 0, wx.ALL | wx.EXPAND, 10)
-        
+
         # Initialize in-visit clicker state
         self.invisit_running = False
         self.invisit_thread = None
@@ -8102,7 +8095,8 @@ class MyFrame(wx.Frame):
         tab5.Layout()
 
         # --- Tab 6: Performance Anxiety ---
-        tab6 = wx.Panel(self.notebook)
+        tab6 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab6.SetupScrolling(scroll_x=False, scroll_y=True)
         tab6_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -8197,7 +8191,8 @@ class MyFrame(wx.Frame):
         tab6.Layout()
 
         # --- Tab 7: Birth Control ---
-        tab7 = wx.Panel(self.notebook)
+        tab7 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab7.SetupScrolling(scroll_x=False, scroll_y=True)
         tab7_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -8312,7 +8307,7 @@ class MyFrame(wx.Frame):
         self.notebook.AddPage(tab2, "Hair Loss")
         self.notebook.AddPage(tab3, "Photoaging")
         self.notebook.AddPage(tab4, "Sexual Health")
-        self.notebook.AddPage(tab5, "Auto Clicker")
+        self.notebook.AddPage(tab5, "Dashboard")
         self.notebook.AddPage(tab6, "Performance Anxiety")
         self.notebook.AddPage(tab7, "Birth Control")
 
@@ -8348,30 +8343,30 @@ class MyFrame(wx.Frame):
         info_label_sizer.Add(self.visit_type_text, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 8)
         info_label_sizer.Add(self.patient_location_text, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
         top_info_sizer.Add(info_label_sizer, 1, wx.EXPAND)
-        
+
         # Edit Templates button (opens template file for current tab)
         self.edit_templates_btn = wx.Button(panel, label="Edit Templates")
         self.edit_templates_btn.SetToolTip("Edit template text file for current tab (opens in Notepad)")
         self.edit_templates_btn.Bind(wx.EVT_BUTTON, self.on_edit_templates_global)
         top_info_sizer.Add(self.edit_templates_btn, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 8)
-        
+
         self.detect_visit_btn = wx.Button(panel, label="Detect Visit")
         self.detect_visit_btn.SetToolTip("Detect the active EMR visit type and switch to that tab")
         self.detect_visit_btn.Bind(wx.EVT_BUTTON, lambda evt: self.detect_visit_type_and_switch_tab())
         top_info_sizer.Add(self.detect_visit_btn, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 8)
-        
+
         main_sizer.Add(top_info_sizer, 0, wx.EXPAND)
-        
+
         # Track current tab for Edit Templates button
         self._current_template_tab = "T Deficiency"
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_notebook_page_changed)
-        
+
         main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
 
         # Initialize auto-refresh state
         self.auto_refresh_enabled = False
         self.auto_refresh_thread = None
-        
+
         # Initialize page refresh state
         self.page_refresh_running = False
         self.page_refresh_thread = None
@@ -8392,16 +8387,16 @@ class MyFrame(wx.Frame):
         self._cdp_last_display = None
         # Start CDP visit-type monitor (no flicker)
         self._start_cdp_visit_monitor()
-        
+
         # URL monitoring disabled per user request
 
         panel.SetSizer(main_sizer)
         panel.Layout()
-        
+
         # Get screen dimensions and set window to full height
         display_size = wx.GetDisplaySize()
         screen_height = display_size.GetHeight()
-        
+
         self.Fit()
         self.SetMinSize((600, 800))
         self.SetSize((700, screen_height - 100))  # Full height minus taskbar space
@@ -8557,6 +8552,7 @@ class MyFrame(wx.Frame):
             return
 
         def worker():
+            grabber = None
             try:
                 grabber = BrowserEMRGrabber()
             except Exception as exc:
@@ -8569,7 +8565,10 @@ class MyFrame(wx.Frame):
                     print("Location refresh error: could not attach to Chrome")
                     return
 
-                summary = grabber.fetch_patient_location_summary(debug_print=True)
+                skip_wi = not self.location_check_toggle.GetValue()
+                summary = grabber.fetch_patient_location_summary(
+                    debug_print=True, skip_wi_detail=skip_wi
+                )
                 print(f"[PATIENT LOCATION REFRESH] {summary}")
                 wx.CallAfter(self._update_patient_location_label, summary)
             except Exception as exc:
@@ -8633,27 +8632,78 @@ class MyFrame(wx.Frame):
         if hasattr(self, "grab_status_text"):
             wx.CallAfter(self.grab_status_text.SetLabel, f"Auto-grabbing {canonical} data...")
 
+        _dispatch_retries = [0]
+        _auto_grab_attempt = [0]
         def dispatch():
             if getattr(self, "_is_closing", False):
                 return
+            # If popup is open, defer and retry (up to 5 times)
+            if getattr(self, "new_task_popup", None) and self.new_task_popup.IsShown():
+                _dispatch_retries[0] += 1
+                if _dispatch_retries[0] <= 5:
+                    print(
+                        f"[CDP MONITOR] Deferring auto-grab for {canonical} (popup open, retry {_dispatch_retries[0]})"
+                    )
+                    wx.CallLater(2000, dispatch)
+                else:
+                    print(
+                        f"[CDP MONITOR] Auto-grab abandoned for {canonical} (popup still open after retries)"
+                    )
+                return
+            _auto_grab_attempt[0] += 1
+            attempt = _auto_grab_attempt[0]
             try:
                 if canonical == "Sexual Health":
-                    self.grab_sexual_health()
+                    self.grab_sexual_health(auto_grab=True)
                 elif canonical == "Hair Loss":
-                    self.grab_hair()
+                    self.grab_hair(auto_grab=True)
                 elif canonical == "Photoaging":
-                    self.grab_photoaging()
+                    self.grab_photoaging(auto_grab=True)
                 elif canonical == "Performance Anxiety":
-                    self.grab_performance_anxiety()
+                    self.grab_performance_anxiety(auto_grab=True)
                 elif canonical == "Birth Control":
-                    self.grab_birth_control()
+                    self.grab_birth_control(auto_grab=True)
                 else:
-                    grab_all_labs()
-                print(f"[CDP MONITOR] Auto grab dispatched for {canonical} (url={source_url})")
+                    grab_all_labs(auto_grab=True)
+                print(
+                    f"[CDP MONITOR] Auto grab dispatched for {canonical} (attempt {attempt}, url={source_url})"
+                )
             except Exception as exc:
                 print(f"[CDP MONITOR] Auto grab error for {canonical}: {exc}")
 
+            # Schedule a retry if medication field is still empty after first attempt
+            if attempt == 1:
+
+                def retry_if_med_empty():
+                    med_field = self._get_active_med_field(canonical)
+                    if med_field is not None and not med_field.GetValue().strip():
+                        print(
+                            f"[CDP MONITOR] Medication empty after first auto-grab, retrying {canonical}..."
+                        )
+                        dispatch()
+                    else:
+                        print(
+                            f"[CDP MONITOR] Medication field populated for {canonical}, no retry needed"
+                        )
+
+                wx.CallLater(3000, retry_if_med_empty)
+
         wx.CallAfter(wx.CallLater, AUTO_GRAB_DELAY_MS, dispatch)
+
+    def _get_active_med_field(self, canonical: str):
+        """Return the medication text control for a given visit type, or None."""
+        field_map = {
+            "Sexual Health": "sexual_health_med_text",
+            "Hair Loss": "hair_med_text",
+            "Photoaging": "photoaging_med_text",
+            "Performance Anxiety": "pa_med_text",
+            "Birth Control": "bc_med_text",
+        }
+        attr = field_map.get(canonical)
+        if attr:
+            return getattr(self, attr, None)
+        # T Deficiency / labs: check the medication text control
+        return getattr(self, "td_med_text", None)
 
     # --- CDP visit-type monitor methods (no flicker) ---
     def _cdp_connect_driver(self):
@@ -8778,118 +8828,6 @@ class MyFrame(wx.Frame):
             pass
 
     def _cdp_get_frame_contexts(self, session_id: str) -> List[int]:
-        ctxs: List[int] = []
-        try:
-            ft = self._cdp_driver.execute_cdp_cmd("Page.getFrameTree", {"sessionId": session_id})
-            def walk(node):
-                frame = (node or {}).get("frame", {})
-                fid = frame.get("id")
-                if fid:
-                    try:
-                        cw = self._cdp_driver.execute_cdp_cmd(
-                            "Page.createIsolatedWorld",
-                            {"frameId": fid, "worldName": "visit_type_probe", "sessionId": session_id},
-                        )
-                        cid = cw.get("executionContextId")
-                        if isinstance(cid, int):
-                            ctxs.append(cid)
-                    except Exception:
-                        pass
-                for ch in (node or {}).get("childFrames", []) or []:
-                    walk(ch)
-            root = (ft or {}).get("frameTree")
-            if root:
-                walk(root)
-        except Exception:
-            pass
-        return ctxs
-
-    def _cdp_detect_visit_text(self, target_id: str) -> Optional[tuple]:
-        """
-        Attach to target and detect visit type.
-        Returns: (title_text, actual_url) tuple if successful, None if failed or wrong page
-        """
-        try:
-            # Attach to target
-            att = self._cdp_driver.execute_cdp_cmd("Target.attachToTarget", {"targetId": target_id, "flatten": True})
-            session_id = att.get("sessionId")
-            if not session_id:
-                return None
-            
-            try:
-                # Verify actual URL
-                expr_url = "window.location.href"
-                actual_url = self._cdp_eval(session_id, expr_url)
-                
-                if not actual_url:
-                    return None
-                    
-                # Check if this is actually an EMR visit page
-                if not self._cdp_is_emr(actual_url):
-                    self._cdp_log(f"Skipping non-EMR page: {actual_url}")
-                    return None
-                
-                # Try to get visit type text
-                contexts = self._cdp_get_frame_contexts(session_id)
-                for ctx in contexts:
-                    txt = self._cdp_try_get_header_text(session_id, ctx)
-                    if txt:
-                        return (txt, actual_url)
-                
-                return None
-                
-            finally:
-                try:
-                    self._cdp_driver.execute_cdp_cmd("Target.detachFromTarget", {"sessionId": session_id})
-                except Exception:
-                    pass
-                    
-        except Exception as e:
-            return None
-
-    def _start_cdp_visit_monitor(self):
-        """Background thread that monitors visit type via CDP"""
-        def worker():
-            last_text = None
-            last_url = None
-            
-            while self._cdp_monitor_active:
-                try:
-                    # Get all page targets
-                    targets = self._cdp_list_targets()
-                    
-                    # Try each target until we find an EMR visit page
-                    found = False
-                    for t in targets:
-                        result = self._cdp_detect_visit_text(t['targetId'])
-                        if result:
-                            text, url = result
-                            found = True
-                            
-                            # Update display if changed
-                            if text != last_text or url != last_url:
-                                last_text = text
-                                last_url = url
-                                wx.CallAfter(self._update_visit_display, text)
-                                self._cdp_log(f"Visit type detected: {text} | URL: {url}")
-                            break
-                    
-                    if not found:
-                        if last_text is not None:
-                            last_text = None
-                            last_url = None
-                            wx.CallAfter(self._update_visit_display, None)
-                    
-                    time.sleep(2)
-                    
-                except Exception as e:
-                    self._cdp_log(f"Monitor error: {e}")
-                    time.sleep(5)
-        
-        self._cdp_monitor_thread = threading.Thread(target=worker, daemon=True)
-        self._cdp_monitor_thread.start()
-
-    def _cdp_get_frame_contexts(self, session_id: str) -> List[int]:
         """Get execution contexts for all frames"""
         ctxs: List[int] = []
         try:
@@ -8982,33 +8920,6 @@ class MyFrame(wx.Frame):
             return val.strip()
         return None
 
-    def _cdp_get_frame_contexts(self, session_id: str) -> List[int]:
-        ctxs: List[int] = []
-        try:
-            ft = self._cdp_driver.execute_cdp_cmd("Page.getFrameTree", {"sessionId": session_id})
-            def walk(node):
-                frame = (node or {}).get("frame", {})
-                fid = frame.get("id")
-                if fid:
-                    try:
-                        cw = self._cdp_driver.execute_cdp_cmd(
-                            "Page.createIsolatedWorld",
-                            {"frameId": fid, "worldName": "visit_type_probe", "sessionId": session_id},
-                        )
-                        cid = cw.get("executionContextId")
-                        if isinstance(cid, int):
-                            ctxs.append(cid)
-                    except Exception:
-                        pass
-                for ch in (node or {}).get("childFrames", []) or []:
-                    walk(ch)
-            root = (ft or {}).get("frameTree")
-            if root:
-                walk(root)
-        except Exception:
-            pass
-        return ctxs
-
     def _cdp_detect_visit_text(self, target_id: str) -> Optional[tuple]:
         """
         Attach to target and detect visit type.
@@ -9029,7 +8940,7 @@ class MyFrame(wx.Frame):
                 self._cdp_driver.execute_cdp_cmd("Runtime.enable", {"sessionId": session_id})
             except Exception:
                 pass
-            
+
             # Verify we're attached to the correct page by checking window.location.href
             try:
                 actual_url = self._cdp_eval(session_id, "window.location.href", context_id=None)
@@ -9053,7 +8964,7 @@ class MyFrame(wx.Frame):
                 else:
                     self._cdp_log("Dashboard detected via URL (no welcome header found)")
                 return ("EMR Dashboard", actual_url)
-            
+
             # main world
             self._cdp_log("Probing main world for header text…")
             t = self._cdp_try_get_header_text(session_id, context_id=None)
@@ -9148,14 +9059,22 @@ class MyFrame(wx.Frame):
                         if key != self._cdp_last_visit_key:
                             self._cdp_last_visit_key = key
                             self._cdp_log(f"Visit type: {display} (from: {txt})")
-                            wx.CallAfter(self.refresh_patient_location_async)
+                            wx.CallAfter(
+                                lambda: wx.CallLater(
+                                    2000, self.refresh_patient_location_async
+                                )
+                            )
                             if canonical:
                                 status_msg = f"Auto-detected: {display}"
                                 switched = self._schedule_tab_switch(canonical, status_msg)
                                 if switched:
                                     self._queue_auto_grab(canonical, actual_url)
                         elif url_changed:
-                            wx.CallAfter(self.refresh_patient_location_async)
+                            wx.CallAfter(
+                                lambda: wx.CallLater(
+                                    2000, self.refresh_patient_location_async
+                                )
+                            )
                     else:
                         if self._cdp_active_url is not None:
                             self._cdp_log("EMR visit page no longer found")
@@ -9191,7 +9110,7 @@ class MyFrame(wx.Frame):
             if widget is not None and widget is not evt.GetEventObject():
                 widget.SetSelection(sel)
 
-    def grab_hair(self):
+    def grab_hair(self, auto_grab=False):
         """Grab the active EMR text and parse for medication and response lines for hair-loss."""
         def do_grab():
             try:
@@ -9303,7 +9222,7 @@ class MyFrame(wx.Frame):
                     r'redness and irritation found at sites of hair loss',
                     r"i'll take a photo of my head instead"
                 ]
-                
+
                 # Look through all lines for matching symptoms - extract exact phrases
                 for line in lines:
                     line_clean = line.strip()
@@ -9316,7 +9235,7 @@ class MyFrame(wx.Frame):
                                     symptom_text = match.group(0)
                                     if symptom_text not in hsx_symptoms:
                                         hsx_symptoms.append(symptom_text)
-                
+
                 # Join all found symptoms with commas
                 hsx = ', '.join(hsx_symptoms)
 
@@ -9410,7 +9329,7 @@ class MyFrame(wx.Frame):
                         r'side effects|stopped.*due',
                         r'continued.*improvement|ongoing.*improvement'
                     ]
-                    
+
                     for ln in lines:
                         for pattern in response_patterns:
                             if re.search(pattern, ln, re.IGNORECASE):
@@ -9473,7 +9392,7 @@ class MyFrame(wx.Frame):
             hair_exam_findings.append("confluent from the front hairline to the crown")
         if self.hair_exam_near_front.GetValue():
             hair_exam_findings.append("near the front with sparing of the hairline")
-        
+
         # Only include O: section if exam findings are selected
         objective_section = ""
         if hair_exam_findings:
@@ -9517,11 +9436,11 @@ class MyFrame(wx.Frame):
     def insert_hair_limited_checkin_note(self):
         """Insert a limited check-in note for hair loss follow-up visits."""
         med = self.hair_med_text.GetValue().strip()
-        
+
         if not med:
             wx.MessageBox('No medication captured. Use Grab or enter values manually.', 'Nothing to Insert', wx.ICON_WARNING)
             return
-        
+
         note = (
             "S: Reports good response to treatment without side effects.\n"
             "A: Androgenic alopecia\n"
@@ -9539,7 +9458,7 @@ class MyFrame(wx.Frame):
         frame.Show()
         frame.Raise()
 
-    def grab_photoaging(self):
+    def grab_photoaging(self, auto_grab=False):
         """Grab the active EMR text and parse for photoaging-related information."""
         def do_grab():
             try:
@@ -9586,14 +9505,14 @@ class MyFrame(wx.Frame):
 
                 # Parse photoaging-related fields
                 lines = [ln.strip() for ln in new_content.splitlines() if ln.strip()]
-                
+
                 med = ''
                 skin_goals = ''
                 retinoid_history = ''
-                
+
                 # Parse medication - look for Tretinoin compounds
                 med_keywords_re = re.compile(r'tretinoin|niacinamide|azelaic.*acid|retinoid|aging.*rx|custom.*formula', re.IGNORECASE)
-                
+
                 # Look for treatment/medication section - prioritize actual medication composition
                 for i, ln in enumerate(lines):
                     if re.search(r'^(treatment|aging rx|patient preference)\b', ln, re.IGNORECASE):
@@ -9612,13 +9531,13 @@ class MyFrame(wx.Frame):
                                 # Fallback: general medication-like lines
                                 elif med_keywords_re.search(candidate) and not best_candidate:
                                     best_candidate = candidate
-                        
+
                         # Use best candidate if no perfect match found
                         if not med and best_candidate:
                             med = best_candidate
                         if med:
                             break
-                
+
                 # Parse skin goals - look for "Patient's skin care goals" section
                 for i, ln in enumerate(lines):
                     if re.search(r'patient.*skin.*care.*goals?', ln, re.IGNORECASE):
@@ -9629,7 +9548,7 @@ class MyFrame(wx.Frame):
                                 skin_goals = candidate
                                 break
                         break
-                
+
                 # Parse retinoid history - look for previous retinoid use
                 retinoid_found = False
                 for ln in lines:
@@ -9643,20 +9562,20 @@ class MyFrame(wx.Frame):
                             retinoid_history = "Has used prescription retinoids"
                             retinoid_found = True
                             break
-                
+
                 # If no specific retinoid history found, check for general skincare use
                 if not retinoid_found:
                     for ln in lines:
                         if re.search(r'over-the-counter.*product|men.*skin.*cream|skincare', ln, re.IGNORECASE):
                             retinoid_history = "Has used OTC skincare products"
                             break
-                
+
                 # Append daily frequency to medication if not present
                 if med and not re.search(r'\b(daily|bi-monthly|monthly|weekly)\b', med, re.IGNORECASE):
                     med = med.rstrip(' .') + ' daily'
-                
+
                 print(f"Parsed photoaging data: Med='{med}', Goals='{skin_goals}', History='{retinoid_history}'")
-                
+
                 # Update fields on main thread
                 wx.CallAfter(self.photoaging_med_text.SetValue, med)
                 wx.CallAfter(self.photoaging_goals_text.SetValue, skin_goals)
@@ -9683,7 +9602,7 @@ class MyFrame(wx.Frame):
 
         threading.Thread(target=do_grab, daemon=True).start()
 
-    def grab_performance_anxiety(self):
+    def grab_performance_anxiety(self, auto_grab=False):
         """Collect Performance Anxiety fields and populate the tab. Respects USE_CDP_FOR_GRAB toggle."""
         def do_grab():
             try:
@@ -9823,7 +9742,7 @@ class MyFrame(wx.Frame):
 
         threading.Thread(target=do_grab, daemon=True).start()
 
-    def grab_birth_control(self):
+    def grab_birth_control(self, auto_grab=False):
         """Collect Birth Control tab data via the browser grabber and populate fields.
         Respects USE_CDP_FOR_GRAB toggle."""
 
@@ -9949,10 +9868,25 @@ class MyFrame(wx.Frame):
                             return answers
                     return []
 
-                # BP from text
+                # BP from text — try combined format first, then separate systolic/diastolic questions
                 bp_match = re.search(r'(?:blood\s*pressure|bp)[:\s]*(\d{2,3}\s*/\s*\d{2,3})', clip_text, re.IGNORECASE)
                 if bp_match:
                     bp = bp_match.group(1).replace(' ', '')
+                else:
+                    sys_answer = find_answer(["systolic blood pressure"])
+                    dia_answer = find_answer(["diastolic blood pressure"])
+                    sys_val = (
+                        re.search(r"\b(\d{2,3})\b", sys_answer[0])
+                        if sys_answer
+                        else None
+                    )
+                    dia_val = (
+                        re.search(r"\b(\d{2,3})\b", dia_answer[0])
+                        if dia_answer
+                        else None
+                    )
+                    if sys_val and dia_val:
+                        bp = f"{sys_val.group(1)}/{dia_val.group(1)}"
 
                 # LMP
                 lmp_answer = find_answer(['last menstrual period'])
@@ -10155,19 +10089,34 @@ class MyFrame(wx.Frame):
     def insert_birth_control_initial_note(self):
         med = (self.bc_med_text.GetValue() or '').strip()
         bp = (self.bc_bp_text.GetValue() or '').strip() or 'nr'
+        lmp = (self.bc_lmp_text.GetValue() or "").strip()
         pmh_summary = self._format_birth_control_pmh()
         if not med:
             wx.MessageBox('No medication captured. Use Grab or enter manually.', 'Nothing to Insert', wx.ICON_WARNING)
             return
 
-        note = (
-            "S: Patient looking to initiate oral contraceptive.\n"
-            f"PMH: {pmh_summary}\n"
-            f"O: BP: {bp}\n"
-            "A: Contraceptive management\n"
-            f"P: Start treatment with {med}\n"
-            "Prescription written, follow-up per routine."
-        )
+        tpl = templates.get("Birth Control - Initial")
+        if tpl:
+            try:
+                note = tpl.format(
+                    medication=med, blood_pressure=bp, lmp=lmp, pmh=pmh_summary
+                )
+            except KeyError as e:
+                print(
+                    f"[BC Initial] Template variable missing: {e}, falling back to hardcoded"
+                )
+                tpl = None
+        if not tpl:
+            lmp_line = f"LMP: {lmp}\n" if lmp else ""
+            note = (
+                "S: Patient looking to initiate oral contraceptive.\n"
+                f"PMH: {pmh_summary}\n"
+                f"O: BP: {bp}\n"
+                f"{lmp_line}"
+                "A: Contraceptive management\n"
+                f"P: Start treatment with {med}\n"
+                "Prescription written, follow-up per routine."
+            )
 
         frame.Hide(); time.sleep(0.2)
         try:
@@ -10180,6 +10129,7 @@ class MyFrame(wx.Frame):
     def insert_birth_control_followup_note(self):
         med = (self.bc_med_text.GetValue() or '').strip()
         bp = (self.bc_bp_text.GetValue() or '').strip() or 'nr'
+        lmp = (self.bc_lmp_text.GetValue() or "").strip()
         med_history_changes = (self.bc_history_changes_text.GetValue() or '').strip() or 'none'
         side_effects_text, wellbeing_hint = self._normalize_birth_control_side_effects()
         doing_well = wellbeing_hint and side_effects_text == 'none'
@@ -10193,15 +10143,43 @@ class MyFrame(wx.Frame):
 
         is_phrase, plan_phrase = self._resolve_birth_control_plan_phrase(doing_well)
 
-        note = (
-            "S: The patient reports {} doing well on treatment.\n"
-            "Side effects: {}\n"
-            "Changes in medical history: {}\n"
-            "O: BP: {}\n"
-            "A: Contraceptive management\n"
-            "P: {} {}\n"
-            "Prescription written, follow-up per routine."
-        ).format(is_phrase, side_effects_text, med_history_changes, bp, plan_phrase, med)
+        tpl = templates.get("Birth Control - Follow-up")
+        if tpl:
+            try:
+                note = tpl.format(
+                    medication=med,
+                    blood_pressure=bp,
+                    lmp=lmp,
+                    is_phrase=is_phrase,
+                    side_effects=side_effects_text,
+                    med_history_changes=med_history_changes,
+                    plan_phrase=plan_phrase,
+                )
+            except KeyError as e:
+                print(
+                    f"[BC Follow-up] Template variable missing: {e}, falling back to hardcoded"
+                )
+                tpl = None
+        if not tpl:
+            lmp_line = f"LMP: {lmp}\n" if lmp else ""
+            note = (
+                "S: The patient reports {} doing well on treatment.\n"
+                "Side effects: {}\n"
+                "Changes in medical history: {}\n"
+                "O: BP: {}\n"
+                "{}"
+                "A: Contraceptive management\n"
+                "P: {} {}\n"
+                "Prescription written, follow-up per routine."
+            ).format(
+                is_phrase,
+                side_effects_text,
+                med_history_changes,
+                bp,
+                lmp_line,
+                plan_phrase,
+                med,
+            )
 
         frame.Hide(); time.sleep(0.2)
         try:
@@ -10228,7 +10206,7 @@ class MyFrame(wx.Frame):
                 center_x, center_y = screen_width // 2, screen_height // 2
                 pyautogui.click(center_x, center_y)
                 time.sleep(0.3)
-                
+
                 # Try multiple approaches to get all content
                 attempts = [
                     # Attempt 1: Standard ctrl+a
@@ -10240,35 +10218,35 @@ class MyFrame(wx.Frame):
                     # Attempt 4: Try ctrl+home then ctrl+shift+end to select all
                     lambda: (pyautogui.hotkey('ctrl', 'home'), time.sleep(0.2), pyautogui.hotkey('ctrl', 'shift', 'end'), time.sleep(0.2), pyautogui.hotkey('ctrl', 'c'), time.sleep(0.3))
                 ]
-                
+
                 best_content = ""
                 best_length = 0
-                
+
                 for i, attempt in enumerate(attempts):
                     try:
                         # Execute the attempt
                         attempt()
-                        
+
                         # Check what we got
                         test_content = pyperclip.paste()
                         print(f"Sexual Health Grab Attempt {i+1}: Got {len(test_content)} characters")
                         print(f"First 100 chars: {repr(test_content[:100])}")
-                        
+
                         # Keep the longest/best content
                         if len(test_content) > best_length and len(test_content) > 20:
                             best_content = test_content
                             best_length = len(test_content)
                             print(f"New best content from attempt {i+1}: {len(test_content)} chars")
-                            
+
                             # If we got a substantial amount of text, we can break early
                             if len(test_content) > 500:
                                 print(f"Got substantial content ({len(test_content)} chars), using this")
                                 break
-                                
+
                     except Exception as e:
                         print(f"Attempt {i+1} failed: {e}")
                         continue
-                
+
                 new_content = best_content
 
                 if not new_content or len(new_content) < 20:
@@ -10283,7 +10261,7 @@ class MyFrame(wx.Frame):
                             (center_x, center_y - 300),       # Top center
                             (center_x + 100, center_y - 300), # Top center-right
                         ]
-                        
+
                         for tab_x, tab_y in notes_tab_attempts:
                             try:
                                 pyautogui.click(tab_x, tab_y)
@@ -10292,22 +10270,22 @@ class MyFrame(wx.Frame):
                                 time.sleep(0.2)
                                 pyautogui.hotkey('ctrl', 'c')
                                 time.sleep(0.3)
-                                
+
                                 test_content = pyperclip.paste()
                                 print(f"Notes tab attempt at ({tab_x}, {tab_y}): Got {len(test_content)} characters")
-                                
+
                                 if len(test_content) > len(new_content):
                                     new_content = test_content
                                     print(f"Better content found from Notes tab click: {len(test_content)} chars")
                                     break
-                                    
+
                             except Exception as e:
                                 print(f"Notes tab attempt at ({tab_x}, {tab_y}) failed: {e}")
                                 continue
-                                
+
                     except Exception as e:
                         print(f"Notes tab approach failed: {e}")
-                
+
                 if not new_content or len(new_content) < 20:
                     wx.CallAfter(lambda: wx.MessageBox(f'Failed to grab text for sexual health parsing. Got {len(new_content)} characters. Make sure EMR window is active and contains text. Try clicking into the Notes section first.', 'Error', wx.ICON_ERROR))
                     pyperclip.copy(original)
@@ -10319,29 +10297,29 @@ class MyFrame(wx.Frame):
 
                 # Parse sexual health-related fields
                 lines = [ln.strip() for ln in new_content.splitlines() if ln.strip()]
-                
+
                 print(f"Sexual Health Parse Debug:")
                 print(f"Total content length: {len(new_content)} characters")
                 print(f"Total lines after filtering: {len(lines)}")
                 print(f"First 10 lines: {lines[:10]}")
                 print(f"Last 10 lines: {lines[-10:]}")
-                
+
                 med = ''
                 effectiveness = ''
                 bp_var = 'nr'  # Default to "nr" if no blood pressure found
-                
+
                 # Auto-detect diagnoses from most recent Sexual Health note
                 detected_diagnoses = []
-                
+
                 # Look for Sexual Health notes (they contain "presents for Sexual Health")
                 sexual_health_notes = []
                 current_note = []
                 collecting_note = False
-                
+
                 for i, line in enumerate(lines):
                     # More comprehensive note boundary detection
                     is_note_start = False
-                    
+
                     # Date patterns at start of line
                     if re.search(r'^\d{1,2}/\d{1,2}/\d{4}', line):
                         is_note_start = True
@@ -10364,7 +10342,7 @@ class MyFrame(wx.Frame):
                                     re.search(r'presents for.*sexual health', next_line, re.IGNORECASE)):
                                     is_note_start = True
                                 break
-                    
+
                     if is_note_start:
                         # Save previous note if it was a sexual health note
                         if collecting_note and current_note:
@@ -10372,52 +10350,52 @@ class MyFrame(wx.Frame):
                             if re.search(r'presents for sexual health|sexual health.*visit|sexual.*dysfunction', note_text, re.IGNORECASE):
                                 sexual_health_notes.append(note_text)
                                 print(f"Found Sexual Health note: {note_text[:100]}...")
-                        
+
                         # Start new note
                         current_note = [line]
                         collecting_note = True
                     elif collecting_note and line.strip():  # Only add non-empty lines
                         current_note.append(line)
-                
+
                 # Don't forget the last note
                 if collecting_note and current_note:
                     note_text = ' '.join(current_note)
                     if re.search(r'presents for sexual health|sexual health.*visit|sexual.*dysfunction', note_text, re.IGNORECASE):
                         sexual_health_notes.append(note_text)
                         print(f"Found Sexual Health note (last): {note_text[:100]}...")
-                
+
                 print(f"Total Sexual Health notes found: {len(sexual_health_notes)}")
-                
+
                 # Check sexual health notes for diagnoses (most recent first)
                 for i, note in enumerate(sexual_health_notes):
                     print(f"Checking note {i+1} for diagnoses...")
-                    
+
                     # Look for ED diagnoses - be more flexible with patterns
                     if re.search(r'\bED\b|erectile dysfunction|E\.D\.|erection.*dysfunction', note, re.IGNORECASE):
                         if "ED" not in detected_diagnoses:
                             detected_diagnoses.append("ED")
                             print(f"Found ED diagnosis in note {i+1}")
-                    
+
                     # Look for PE diagnoses - be more flexible with patterns
                     if re.search(r'\bPE\b|premature ejaculation|P\.E\.|early ejaculation|rapid ejaculation', note, re.IGNORECASE):
                         if "PE" not in detected_diagnoses:
                             detected_diagnoses.append("PE")
                             print(f"Found PE diagnosis in note {i+1}")
-                    
+
                     # Look for PE-like ejaculatory dysfunction
                     if re.search(r'PE-like ejaculatory dysfunction|ejaculatory dysfunction|climax.*dysfunction', note, re.IGNORECASE):
                         if "PE-like ejaculatory dysfunction" not in detected_diagnoses:
                             detected_diagnoses.append("PE-like ejaculatory dysfunction")
                             print(f"Found PE-like dysfunction in note {i+1}")
-                    
+
                     # If we found diagnoses in this note, stop looking
                     if detected_diagnoses:
                         print(f"Found diagnoses: {detected_diagnoses}, stopping search")
                         break
-                
+
                 # Parse medication - look for Current Dose or Treatment section
                 med_keywords_re = re.compile(r'sildenafil|viagra|tadalafil|cialis|generic viagra|generic cialis', re.IGNORECASE)
-                
+
                 # Look for Current Dose or Treatment section
                 for i, ln in enumerate(lines):
                     if re.search(r'^(current dose|treatment)\b', ln, re.IGNORECASE):
@@ -10431,11 +10409,11 @@ class MyFrame(wx.Frame):
                                     break
                         if med:
                             break
-                
+
                 # Append "daily" if not present and doesn't already have frequency
                 if med and not re.search(r'\b(daily|as needed|prn|weekly|monthly|every|per|doses)\b', med, re.IGNORECASE):
                     med = med.rstrip(' .') + ' daily'
-                
+
                 # Parse effectiveness - look for treatment satisfaction question
                 for i, ln in enumerate(lines):
                     if re.search(r'are you happy with the way your treatment is working', ln, re.IGNORECASE):
@@ -10447,7 +10425,7 @@ class MyFrame(wx.Frame):
                                     effectiveness = candidate.capitalize()
                                     break
                         break
-                
+
                 # Parse blood pressure - look specifically for "What was your last blood pressure reading?" section
                 for i, ln in enumerate(lines):
                     if re.search(r'what was your last blood pressure reading\?', ln, re.IGNORECASE):
@@ -10464,10 +10442,10 @@ class MyFrame(wx.Frame):
                             break
 
                 bp_var = self._normalize_sexual_health_bp(bp_var)
-                
+
                 print(f"Parsed sexual health data: Med='{med}', Effectiveness='{effectiveness}', BP='{bp_var}'")
                 print(f"Auto-detected diagnoses: {detected_diagnoses}")
-                
+
                 # Update fields on main thread
                 wx.CallAfter(self.sexual_health_med_text.SetValue, med)
                 wx.CallAfter(self.sexual_health_effectiveness_text.SetValue, effectiveness)
@@ -10490,7 +10468,7 @@ class MyFrame(wx.Frame):
 
         threading.Thread(target=do_grab, daemon=True).start()
 
-    def grab_sexual_health(self):
+    def grab_sexual_health(self, auto_grab=False):
         """Sexual Health data extraction. Respects USE_CDP_FOR_GRAB toggle."""
         def do_grab():
             try:
@@ -10791,7 +10769,7 @@ class MyFrame(wx.Frame):
                 if grabber and grabber is getattr(self, "_browser_grabber_cache", None):
                     self._browser_grabber_cache = None
                 return None
-        
+
         return threading.Thread(target=do_detection, daemon=True).start()
 
     def universal_grab(self):
@@ -10799,7 +10777,7 @@ class MyFrame(wx.Frame):
         def do_universal_grab():
             try:
                 wx.CallAfter(self.grab_status_text.SetLabel, "Detecting visit type...")
-                
+
                 # First detect and switch to appropriate tab
                 grabber = getattr(self, "_browser_grabber_cache", None)
                 created = False
@@ -10857,17 +10835,17 @@ class MyFrame(wx.Frame):
             except Exception as e:
                 print(f"❌ Universal grab error: {e}")
                 wx.CallAfter(self.grab_status_text.SetLabel, f"Grab failed: {str(e)[:30]}")
-        
+
         threading.Thread(target=do_universal_grab, daemon=True).start()
 
     def toggle_auto_refresh(self):
         """Toggle auto-refresh functionality - now calls the same auto-clicker as the tab"""
         # Switch to Auto Clicker tab
         self.notebook.SetSelection(4)  # Auto Clicker tab index
-        
+
         # Call the same toggle method as the Auto Clicker tab button
         self.toggle_auto_clicker()
-        
+
         # Update the universal button appearance to match the tab button
         if auto_clicker_enabled[0]:
             self.auto_refresh_btn.SetLabel("🛑 Stop Auto-Refresh")
@@ -10881,26 +10859,26 @@ class MyFrame(wx.Frame):
     def auto_refresh_loop(self):
         """Auto-refresh loop that grabs data every 10 seconds without hiding GUI"""
         refresh_interval = 10  # seconds
-        
+
         while self.auto_refresh_enabled:
             try:
                 print(f"🔄 Auto-refresh monitoring EMR...")
                 wx.CallAfter(self.grab_status_text.SetLabel, "Monitoring EMR...")
-                
+
                 # Background grab without hiding GUI
                 self.background_emr_grab()
-                
+
                 # Wait for the specified interval
                 for i in range(refresh_interval):
                     if not self.auto_refresh_enabled:
                         break
                     time.sleep(1)
-                
+
             except Exception as e:
                 print(f"❌ Auto-refresh error: {e}")
                 wx.CallAfter(self.grab_status_text.SetLabel, f"Auto-refresh error")
                 time.sleep(5)  # Wait 5 seconds on error
-        
+
         print("🔄 Auto-refresh loop ended")
 
     def start_url_monitoring(self):
@@ -10934,7 +10912,9 @@ class MyFrame(wx.Frame):
                 if current_url != self.current_url:
                     self.current_url = current_url
                     print(f"🌐 URL changed to: {current_url}")
-                    wx.CallAfter(self.refresh_patient_location_async)
+                    wx.CallAfter(
+                        lambda: wx.CallLater(2000, self.refresh_patient_location_async)
+                    )
 
                     # Get page content to determine visit type
                     page_text = grabber._get_page_text()
@@ -10978,7 +10958,7 @@ class MyFrame(wx.Frame):
                 if grabber and grabber is getattr(self, "_browser_grabber_cache", None):
                     self._browser_grabber_cache = None
                 time.sleep(5)
-        
+
         print("🌐 URL monitoring ended")
 
     def background_emr_grab(self):
@@ -11013,13 +10993,13 @@ class MyFrame(wx.Frame):
                 print(f"🔄 Background grab completed for: {visit if visit else 'Unknown'}")
 
                 self.refresh_patient_location_async()
-                
+
             except Exception as e:
                 print(f"❌ Background grab error: {e}")
                 wx.CallAfter(self.grab_status_text.SetLabel, f"Background grab failed")
                 if 'grabber' in locals() and grabber is getattr(self, "_browser_grabber_cache", None):
                     self._browser_grabber_cache = None
-        
+
         threading.Thread(target=do_background_grab, daemon=True).start()
 
     def update_sexual_health_fields(self, data):
@@ -11101,7 +11081,7 @@ class MyFrame(wx.Frame):
             sexual_health_diagnoses.append("PE-like ejaculatory dysfunction")
         if self.sexual_health_dx_hair_loss.GetValue():
             sexual_health_diagnoses.append("Hair Loss")
-        
+
         # Use selected diagnoses or empty if none selected
         if sexual_health_diagnoses:
             diagnosis_text = ", ".join(sexual_health_diagnoses)
@@ -11152,7 +11132,7 @@ class MyFrame(wx.Frame):
             med = (self.sexual_health_med_text.GetValue() or "").strip()
 
             # Prefer external template
-            tpl = templates.get("Sexual Health - Plan")
+            tpl = templates.get("SH Plan")
             if tpl:
                 brief = tpl.format(diagnoses=diagnosis_text, medication=med)
             else:
@@ -11181,7 +11161,7 @@ class MyFrame(wx.Frame):
         bp_var = (self.sexual_health_bp_text.GetValue() or "").strip()
         if not bp_var or bp_var == 'nr':
             bp_var = "not required"
-            
+
         if not med:
             wx.MessageBox('No medication captured. Use Grab or enter values manually.', 'Nothing to Insert', wx.ICON_WARNING)
             return
@@ -11255,27 +11235,27 @@ class MyFrame(wx.Frame):
         """Insert hair loss information template in Sexual Health tab."""
         hair_location = grabbed_vars.get('hair_loss_location', '').strip()
         hair_sxx = grabbed_vars.get('hair_loss_additional_sxx', '').strip()
-        
+
         # Also check the text fields directly in case they were manually edited
         if not hair_location:
             try:
                 hair_location = self.sexual_health_hair_location_text.GetValue().strip()
             except Exception:
                 pass
-        
+
         if not hair_sxx:
             try:
                 hair_sxx = self.sexual_health_hair_sxx_text.GetValue().strip()
             except Exception:
                 pass
-        
+
         if not hair_location and not hair_sxx:
             wx.MessageBox('No hair loss information captured. Use Grab or enter values manually.', 'Nothing to Insert', wx.ICON_WARNING)
             return
-        
+
         # Build the template text
         note = f"Reports hair loss described as '{hair_location}'. With regard to additional symptoms he affirms: '{hair_sxx}'."
-        
+
         # Hide and paste/type note
         frame.Hide()
         time.sleep(0.2)
@@ -11294,7 +11274,7 @@ class MyFrame(wx.Frame):
                 bp_val = "not required"
             dx_text = self._get_sh_dx_text()
             med = (self.sexual_health_med_text.GetValue() or "").strip()
-            tpl = templates.get("Sexual Health - Change Cadence")
+            tpl = templates.get("SH Change Cadence")
             if tpl:
                 note = tpl.format(bp=bp_val, diagnoses=dx_text, medication=(med or medication_value[0]))
             else:
@@ -11320,7 +11300,7 @@ class MyFrame(wx.Frame):
                 bp_val = "not required"
             dx_text = self._get_sh_dx_text()
             med = (self.sexual_health_med_text.GetValue() or "").strip()
-            tpl = templates.get("Sexual Health - Change Number")
+            tpl = templates.get("SH Change Number")
             if tpl:
                 note = tpl.format(bp=bp_val, diagnoses=dx_text, medication=(med or medication_value[0]))
             else:
@@ -11347,7 +11327,7 @@ class MyFrame(wx.Frame):
 
             dx_text = self._get_sh_dx_text()
             med = (self.sexual_health_med_text.GetValue() or "").strip()
-            tpl = templates.get("Sexual Health - Change Medication")
+            tpl = templates.get("SH Change Medication")
             if tpl:
                 note = tpl.format(bp=bp_val, diagnoses=dx_text, medication=(med or medication_value[0]))
             else:
@@ -11528,38 +11508,38 @@ class MyFrame(wx.Frame):
         """
         # Load dropdown choices from config
         template_list = load_tab_template_list(tab_name)
-        
+
         # Create horizontal sizer for the dropdown row
         dropdown_row = wx.BoxSizer(wx.HORIZONTAL)
-        
+
         # Label
         label = wx.StaticText(parent, label="Template:")
         dropdown_row.Add(label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        
+
         # Dropdown
         dropdown = wx.Choice(parent, choices=template_list)
         if template_list:
             dropdown.SetSelection(0)
         dropdown_row.Add(dropdown, 1, wx.ALL | wx.EXPAND, 5)
-        
+
         # "..." button to edit dropdown config (JSON)
         config_btn = wx.Button(parent, label="...", size=(30, -1))
         config_btn.SetToolTip("Edit dropdown list (opens JSON config in Notepad)")
-        
+
         def on_edit_config(event):
             config_path = get_template_config_path(tab_name)
             if os.path.exists(config_path):
                 open_in_notepad(config_path)
             else:
                 wx.MessageBox(f"Config file not found:\n{config_path}", "File Not Found", wx.OK | wx.ICON_WARNING)
-        
+
         config_btn.Bind(wx.EVT_BUTTON, on_edit_config)
         dropdown_row.Add(config_btn, 0, wx.ALL, 5)
-        
+
         # Refresh button to reload dropdown after editing
         refresh_btn = wx.Button(parent, label="↻", size=(30, -1))
         refresh_btn.SetToolTip("Refresh dropdown list after editing config")
-        
+
         def on_refresh(event):
             new_list = load_tab_template_list(tab_name)
             dropdown.Clear()
@@ -11567,31 +11547,31 @@ class MyFrame(wx.Frame):
             if new_list:
                 dropdown.SetSelection(0)
             print(f"Refreshed {tab_name} template dropdown: {len(new_list)} templates")
-        
+
         refresh_btn.Bind(wx.EVT_BUTTON, on_refresh)
         dropdown_row.Add(refresh_btn, 0, wx.ALL, 5)
-        
+
         tab_sizer.Add(dropdown_row, 0, wx.EXPAND | wx.ALL, 2)
-        
+
         # Second row: Insert Template button (wider, centered)
         insert_row = wx.BoxSizer(wx.HORIZONTAL)
-        
+
         insert_btn = wx.Button(parent, label="Insert Template", size=(200, -1))
         insert_btn.SetBackgroundColour(wx.Colour(200, 230, 200))  # Light green tint
         insert_btn.SetToolTip("Insert selected template at cursor (Ctrl+V paste)")
-        
+
         def on_insert(event):
             selection = dropdown.GetStringSelection()
             if selection:
                 self.insert_specific_template(selection)
             else:
                 print("No template selected")
-        
+
         insert_btn.Bind(wx.EVT_BUTTON, on_insert)
         insert_row.Add(insert_btn, 0, wx.ALL | wx.CENTER, 5)
-        
+
         tab_sizer.Add(insert_row, 0, wx.ALIGN_CENTER | wx.ALL, 2)
-        
+
         return dropdown
 
     def create_template_dropdown_row(self, parent, tab_sizer, tab_name: str) -> wx.Choice:
@@ -11608,70 +11588,70 @@ class MyFrame(wx.Frame):
         # Create separator line above dropdown
         separator = wx.StaticLine(parent, style=wx.LI_HORIZONTAL)
         tab_sizer.Add(separator, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 8)
-        
+
         # Load dropdown choices from config
         template_list = load_tab_template_list(tab_name)
-        
+
         # Create horizontal sizer for the dropdown row
         dropdown_row = wx.BoxSizer(wx.HORIZONTAL)
-        
+
         # Label
         label = wx.StaticText(parent, label="Template:")
         dropdown_row.Add(label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        
+
         # Dropdown
         dropdown = wx.Choice(parent, choices=template_list)
         if template_list:
             dropdown.SetSelection(0)
         dropdown_row.Add(dropdown, 1, wx.ALL | wx.EXPAND, 5)
-        
+
         # Insert button
         insert_btn = wx.Button(parent, label="Insert", size=(60, -1))
         insert_btn.SetBackgroundColour(wx.Colour(200, 230, 200))  # Light green tint
         insert_btn.SetToolTip("Insert selected template at cursor (Ctrl+V paste)")
-        
+
         def on_insert(event):
             selection = dropdown.GetStringSelection()
             if selection:
                 self.insert_specific_template(selection)
             else:
                 print("No template selected")
-        
+
         insert_btn.Bind(wx.EVT_BUTTON, on_insert)
         dropdown_row.Add(insert_btn, 0, wx.ALL, 5)
-        
+
         # "..." button to edit dropdown config (JSON)
         config_btn = wx.Button(parent, label="...", size=(30, -1))
         config_btn.SetToolTip("Edit dropdown list (opens JSON config in Notepad)")
-        
+
         def on_edit_config(event):
             config_path = get_template_config_path(tab_name)
             if os.path.exists(config_path):
                 open_in_notepad(config_path)
             else:
                 wx.MessageBox(f"Config file not found:\n{config_path}", "File Not Found", wx.OK | wx.ICON_WARNING)
-        
+
         config_btn.Bind(wx.EVT_BUTTON, on_edit_config)
         dropdown_row.Add(config_btn, 0, wx.ALL, 5)
-        
+
         # "Edit Templates" button to edit template file
         edit_templates_btn = wx.Button(parent, label="Edit Templates", size=(100, -1))
         edit_templates_btn.SetToolTip("Edit template text file (opens in Notepad)")
-        
+
         def on_edit_templates(event):
             template_path = get_template_file_path(tab_name)
             if os.path.exists(template_path):
                 open_in_notepad(template_path)
             else:
                 wx.MessageBox(f"Template file not found:\n{template_path}", "File Not Found", wx.OK | wx.ICON_WARNING)
-        
+
         edit_templates_btn.Bind(wx.EVT_BUTTON, on_edit_templates)
         dropdown_row.Add(edit_templates_btn, 0, wx.ALL, 5)
-        
+
         # Refresh button to reload dropdown after editing
         refresh_btn = wx.Button(parent, label="↻", size=(30, -1))
         refresh_btn.SetToolTip("Refresh dropdown list after editing config")
-        
+
         def on_refresh(event):
             new_list = load_tab_template_list(tab_name)
             dropdown.Clear()
@@ -11679,18 +11659,18 @@ class MyFrame(wx.Frame):
             if new_list:
                 dropdown.SetSelection(0)
             print(f"Refreshed {tab_name} template dropdown: {len(new_list)} templates")
-        
+
         refresh_btn.Bind(wx.EVT_BUTTON, on_refresh)
         dropdown_row.Add(refresh_btn, 0, wx.ALL, 5)
-        
+
         tab_sizer.Add(dropdown_row, 0, wx.EXPAND | wx.ALL, 2)
-        
+
         return dropdown
 
     # ================================================================
     # Template Tab Tracking (for Edit Templates button in header)
     # ================================================================
-    
+
     # Map notebook tab indices to TEMPLATE_CONFIG keys
     TAB_INDEX_TO_TEMPLATE_KEY = {
         0: "T Deficiency",
@@ -11701,21 +11681,21 @@ class MyFrame(wx.Frame):
         5: "Performance Anxiety",
         6: "Birth Control",
     }
-    
+
     def on_notebook_page_changed(self, event):
         """Track current tab for Edit Templates button."""
         tab_index = event.GetSelection()
         tab_name = self.TAB_INDEX_TO_TEMPLATE_KEY.get(tab_index)
-        
+
         if tab_name:
             self._current_template_tab = tab_name
             self.edit_templates_btn.Enable(True)
         else:
             # Auto Clicker tab or unknown - disable Edit Templates button
             self.edit_templates_btn.Enable(False)
-        
+
         event.Skip()  # Allow default processing
-    
+
     def on_edit_templates_global(self, event):
         """Open the template file for current tab in Notepad."""
         template_path = get_template_file_path(self._current_template_tab)
@@ -11795,7 +11775,7 @@ class MyFrame(wx.Frame):
             self.stop_invisit_clicker()
         else:
             self.start_invisit_clicker()
-    
+
     def stop_invisit_clicker(self):
         """Stop the in-visit auto-clicker"""
         self.invisit_running = False
@@ -11803,23 +11783,23 @@ class MyFrame(wx.Frame):
         self.clicker_status_text.SetLabel("Status: STOPPED")
         self.clicker_status_text.SetForegroundColour(wx.Colour(255, 0, 0))  # Red
         print("[In-Visit Autoclick] Stopped by user")
-    
+
     def start_invisit_clicker(self):
         """Start the in-visit auto-clicker (runs quick_next_task repeatedly)"""
         if self.invisit_running:
             return
-        
+
         self.invisit_running = True
         self.clicker_invisit_btn.SetLabel("Stop Autoclick: In-Visit")
         self.clicker_status_text.SetLabel("Status: RUNNING (In-Visit)")
         self.clicker_status_text.SetForegroundColour(wx.Colour(0, 200, 0))  # Green
-        
+
         # Get interval from settings
         try:
             interval = float(self.clicker_interval_text.GetValue())
         except ValueError:
             interval = 3.0
-        
+
         # Start monitoring thread
         def monitor_and_click():
             grabber = BrowserEMRGrabber()
@@ -11827,7 +11807,7 @@ class MyFrame(wx.Frame):
                 wx.CallAfter(lambda: print("❌ Could not connect to browser for in-visit autoclick"))
                 wx.CallAfter(self.stop_invisit_clicker)
                 return
-            
+
             def normalize_url(u: str) -> str:
                 try:
                     if not u:
@@ -11867,7 +11847,7 @@ class MyFrame(wx.Frame):
                 return
             print(f"[In-Visit Autoclick] Starting on URL: {initial_url}")
             unresolved_url_checks = 0
-            
+
             # Helper to perform the click sequence via Playwright simulated clicks
             def do_click_sequence():
                 page = grabber.driver.page if grabber.driver else None
@@ -11922,7 +11902,7 @@ class MyFrame(wx.Frame):
                 time.sleep(0.020)
                 print("✅ In-Visit: Clicked 'Get Next Task' (Playwright)")
                 return True
-            
+
             while self.invisit_running:
                 try:
                     current_url = resolve_url()
@@ -11941,7 +11921,7 @@ class MyFrame(wx.Frame):
                             break
                     else:
                         unresolved_url_checks = 0
-                    
+
                     # Stop if URL changed
                     if initial_norm and current_norm != initial_norm:
                         print(f"[In-Visit Autoclick] URL changed, stopping...")
@@ -11952,94 +11932,97 @@ class MyFrame(wx.Frame):
                             self.clicker_status_text.SetForegroundColour(wx.Colour(255, 165, 0))
                         ))
                         wx.CallAfter(lambda url=display_url: self.update_url_display(url))
-                        wx.CallAfter(self.beep_sound)
+                        if self.notify_with_popup:
+                            wx.CallAfter(self.show_new_task_popup)
+                        else:
+                            wx.CallAfter(self.beep_sound)
                         self.invisit_running = False
                         break
-                    
+
                     # Perform click sequence synchronously (no additional threads)
                     do_click_sequence()
-                    
+
                     # Wait for interval before next click
                     time.sleep(interval)
-                    
+
                 except Exception as e:
                     print(f"⚠️ In-Visit monitor error: {e}")
                     time.sleep(interval)
-            
+
             print("[In-Visit Autoclick] Stopped")
-        
+
         self.invisit_thread = threading.Thread(target=monitor_and_click, daemon=True)
         self.invisit_thread.start()
-    
+
     def toggle_page_refresh(self):
         """Toggle page refresh that refreshes the page every 3 minutes ±30%"""
         if self.page_refresh_running:
             self.stop_page_refresh()
         else:
             self.start_page_refresh()
-    
+
     def stop_page_refresh(self):
         """Stop the page refresh"""
         self.page_refresh_running = False
         self.page_refresh_btn.SetLabel("Start Auto-Refresh Page")
         print("[Page Refresh] Stopped by user")
-    
+
     def start_page_refresh(self):
         """Start page refresh that refreshes page every 3 minutes ±30%"""
         if self.page_refresh_running:
             return
-        
+
         self.page_refresh_running = True
         self.page_refresh_btn.SetLabel("Stop Auto-Refresh Page")
-        
+
         def refresh_loop():
             import random
-            
+
             grabber = BrowserEMRGrabber()
             if not grabber.connect_to_chrome():
                 wx.CallAfter(lambda: print("❌ Could not connect to browser for page refresh"))
                 wx.CallAfter(self.stop_page_refresh)
                 return
-            
+
             print("[Page Refresh] Started - refreshing every 3 minutes ±30%")
-            
+
             while self.page_refresh_running:
                 try:
                     # Calculate random interval: 3 minutes ± 30% = 126-234 seconds
                     base_interval = 180  # 3 minutes in seconds
                     variance = base_interval * 0.3  # 30% variance
                     interval = random.uniform(base_interval - variance, base_interval + variance)
-                    
+
                     print(f"[Page Refresh] Next refresh in {interval:.1f} seconds ({interval/60:.1f} minutes)")
-                    
+
                     # Wait for the interval
                     time.sleep(interval)
-                    
+
                     if not self.page_refresh_running:
                         break
-                    
+
                     # Refresh the page via CDP
                     refresh_script = """
                         window.location.reload();
                         return { success: true };
                     """
-                    
+
                     result = grabber.driver.execute_script(refresh_script)
                     if result and result.get('success'):
                         print(f"✅ [Page Refresh] Page refreshed at {time.strftime('%H:%M:%S')}")
                     else:
                         print("⚠️ [Page Refresh] Refresh command sent but no confirmation")
-                    
+
                 except Exception as e:
                     print(f"⚠️ [Page Refresh] Error: {e}")
                     if self.page_refresh_running:
                         time.sleep(60)  # Wait 1 minute before retrying on error
-            
+
             print("[Page Refresh] Stopped")
-        
+
         self.page_refresh_thread = threading.Thread(target=refresh_loop, daemon=True)
         self.page_refresh_thread.start()
-    
+
     def quick_next_task(self):
         """Click floating action button, then click 'Get Next Task' menu item using CDP (with Playwright fallback)"""
         def _click_via_cdp(grabber):
@@ -12062,16 +12045,16 @@ class MyFrame(wx.Frame):
                     }
                     return { success: false };
                 """
-                
+
                 result = grabber.driver.execute_script(floating_script)
-                
+
                 if not result or not isinstance(result, dict) or not result.get('success'):
                     print("⚠️ CDP: Could not find floating button")
                     return False
-                
+
                 print(f"✅ CDP: Clicked floating button with: {result.get('selector')}")
                 time.sleep(0.8)  # Wait longer for menu animation to complete
-                
+
                 # Second click: Get Next Task menu item via CDP
                 menu_script = """
                     try {
@@ -12111,37 +12094,37 @@ class MyFrame(wx.Frame):
                         return { success: false, error: e.message };
                     }
                 """
-                
+
                 result = grabber.driver.execute_script(menu_script)
-                
+
                 if not result or not isinstance(result, dict):
                     print(f"⚠️ CDP: Menu script returned invalid result: {result}")
                     return False
-                
+
                 if not result.get('success'):
                     error = result.get('error', 'unknown')
                     print(f"⚠️ CDP: Could not find 'Get Next Task' menu item: {error}")
                     return False
-                
+
                 print(f"✅ CDP: Clicked 'Get Next Task' with: {result.get('selector')}")
                 return True
-                
+
             except Exception as e:
                 print(f"⚠️ CDP click failed: {e}")
                 return False
-        
+
         def _click_via_playwright(grabber):
             """Fallback to Playwright if CDP fails"""
             try:
                 print("🔄 Falling back to Playwright method...")
-                
+
                 # First click: Floating action button
                 floating_btn_selectors = [
                     '[data-testid="floatingActionButton"]',
                     'button[aria-label="Floating Action Button"]',
                     'button.rounded-full.bg-black.drop-shadow-md'
                 ]
-                
+
                 clicked_floating = False
                 for selector in floating_btn_selectors:
                     try:
@@ -12154,17 +12137,17 @@ class MyFrame(wx.Frame):
                             break
                     except Exception:
                         continue
-                
+
                 if not clicked_floating:
                     return False
-                
+
                 # Second click: Get Next Task menu item
                 menu_item_selectors = [
                     '[data-testid="menu-item-Get Next Task"]',
                     'div[role="button"]:has-text("Get Next Task")',
                     'div.css-1hj5o6h[data-testid="menu-item-Get Next Task"]'
                 ]
-                
+
                 clicked_menu = False
                 for selector in menu_item_selectors:
                     try:
@@ -12176,13 +12159,13 @@ class MyFrame(wx.Frame):
                             break
                     except Exception:
                         continue
-                
+
                 return clicked_menu
-                
+
             except Exception as e:
                 print(f"⚠️ Playwright click failed: {e}")
                 return False
-        
+
         def _click_sequence():
             try:
                 grabber = BrowserEMRGrabber()
@@ -12193,14 +12176,14 @@ class MyFrame(wx.Frame):
                         wx.ICON_WARNING
                     ))
                     return
-                
+
                 # Try CDP first (faster and more reliable)
                 success = _click_via_cdp(grabber)
-                
+
                 # Fall back to Playwright if CDP failed
                 if not success:
                     success = _click_via_playwright(grabber)
-                
+
                 if success:
                     wx.CallAfter(lambda: print("✅ Quick Next Task completed successfully"))
                 else:
@@ -12209,21 +12192,21 @@ class MyFrame(wx.Frame):
                         'Element Not Found',
                         wx.ICON_WARNING
                     ))
-                
+
             except Exception as e:
                 wx.CallAfter(lambda: wx.MessageBox(
                     f'Error during Quick Next Task: {e}',
                     'Error',
                     wx.ICON_ERROR
                 ))
-        
+
         # Run in thread to avoid blocking GUI
         threading.Thread(target=_click_sequence, daemon=True).start()
 
     def toggle_auto_clicker(self):
         """Toggle the auto clicker on/off"""
         auto_clicker_enabled[0] = not auto_clicker_enabled[0]
-        
+
         if auto_clicker_enabled[0]:
             # Update settings from UI
             try:
@@ -12234,17 +12217,17 @@ class MyFrame(wx.Frame):
                 wx.MessageBox("Invalid coordinates or interval values", "Error", wx.ICON_ERROR)
                 auto_clicker_enabled[0] = False
                 return
-            
+
             # Start clicker
             self.clicker_start_btn.SetLabel("Stop Clicking")
             self.clicker_status_text.SetLabel("Status: RUNNING")
             self.clicker_status_text.SetForegroundColour(wx.Colour(0, 128, 0))  # Green
-            
+
             # Start the clicker thread
             if auto_clicker_thread[0] is None or not auto_clicker_thread[0].is_alive():
                 auto_clicker_thread[0] = threading.Thread(target=self.auto_clicker_loop, daemon=True)
                 auto_clicker_thread[0].start()
-            
+
             print(f"Auto clicker started: ({auto_clicker_x[0]}, {auto_clicker_y[0]}) every {auto_clicker_interval[0]}s")
         else:
             # Stop clicker
@@ -12263,20 +12246,10 @@ class MyFrame(wx.Frame):
                 resp = requests.get(debug_url, timeout=1.2)
             resp.raise_for_status()
             tabs = resp.json()
-            
+
             if not isinstance(tabs, list):
                 return ""
-            
-            # Debug: print first few tabs
-            if len(tabs) > 0:
-                print(f"Found {len(tabs)} browser tabs")
-                for i, tab in enumerate(tabs[:3]):  # Show first 3 tabs
-                    if isinstance(tab, dict):
-                        url = tab.get("url", "")
-                        tab_type = tab.get("type", "")
-                        title = tab.get("title", "")[:50]
-                        print(f"  Tab {i}: type='{tab_type}', url='{url[:60]}...', title='{title}'")
-            
+
             # Build candidate list of real pages
             candidates = []
             for tab in tabs:
@@ -12295,27 +12268,24 @@ class MyFrame(wx.Frame):
             # Prefer EMR domain to stabilize selection
             for url in candidates:
                 if "emr.forhims.com" in url:
-                    print(f"Selected active URL (EMR): {url}")
                     return url
 
             # Fallback to first candidate
             if candidates:
-                print(f"Selected active URL (first candidate): {candidates[0]}")
                 return candidates[0]
-            
+
             # Fallback: first tab's URL if it's http/https
             if tabs:
                 url = tabs[0].get("url", "") or ""
                 if url.startswith(("http://", "https://")):
-                    print(f"Fallback URL: {url}")
                     return url
-                    
+
         except requests.exceptions.ConnectionError:
             print(f"Cannot connect to browser debugging API. Make sure Chrome or Thorium is running with --remote-debugging-port={CDP_DEBUG_PORT}")
             wx.CallAfter(self.show_chrome_error)
         except Exception as e:
             print(f"Chrome API error: {e}")
-        
+
         return ""
 
     def show_chrome_error(self):
@@ -12323,7 +12293,7 @@ class MyFrame(wx.Frame):
         if hasattr(self, '_chrome_error_shown'):
             return  # Don't spam error dialogs
         self._chrome_error_shown = True
-        
+
         msg = ("Cannot connect to Chrome Remote Debugging API.\n\n"
                "To enable URL monitoring:\n"
                "1. Close Chrome completely\n"
@@ -12333,14 +12303,18 @@ class MyFrame(wx.Frame):
         wx.MessageBox(msg, "Chrome Debugging Not Available", wx.ICON_WARNING)
 
     def beep_sound(self):
-        """Play a beep sound"""
-        try:
-            winsound.Beep(1000, 700)
-        except Exception:
+        """Play a beep sound (non-blocking to keep GUI responsive)"""
+
+        def _beep():
             try:
-                winsound.MessageBeep()
-            except:
-                print("🔔 URL Changed!")
+                winsound.Beep(1000, 700)
+            except Exception:
+                try:
+                    winsound.MessageBeep()
+                except Exception:
+                    print("🔔 URL Changed!")
+
+        threading.Thread(target=_beep, daemon=True).start()
 
     def auto_clicker_loop(self):
         """Main auto clicker loop"""
@@ -12367,6 +12341,24 @@ class MyFrame(wx.Frame):
 
         # Thread-local BrowserEMRGrabber for CDP/browser clicks
         grabber: Optional[BrowserEMRGrabber] = None
+        consecutive_errors = 0
+
+        def _teardown_grabber():
+            nonlocal grabber
+            if grabber is not None:
+                g = grabber
+                grabber = None
+
+                # Run shutdown in a separate thread with a timeout to prevent hanging
+                def _shutdown():
+                    try:
+                        g.shutdown_playwright()
+                    except Exception:
+                        pass
+
+                t = threading.Thread(target=_shutdown, daemon=True)
+                t.start()
+                t.join(timeout=3)  # Don't wait more than 3 seconds
 
         try:
             while auto_clicker_enabled[0]:
@@ -12381,6 +12373,7 @@ class MyFrame(wx.Frame):
                     if desired_method in ("browser", "cdp") and grabber is None:
                         try:
                             grabber = BrowserEMRGrabber()
+                            consecutive_errors = 0
                         except Exception as ge:
                             print(f"Failed to initialize browser grabber for {desired_method.upper()} clicks: {ge}")
                             grabber = None
@@ -12390,14 +12383,26 @@ class MyFrame(wx.Frame):
                         try:
                             if grabber.click_get_next_task():
                                 used_method = "browser"
+                                consecutive_errors = 0
                         except Exception as se:
                             print(f"Browser click attempt failed: {se}")
+                            consecutive_errors += 1
                     elif desired_method == "cdp" and grabber is not None:
                         try:
                             if grabber.click_get_next_task_cdp():
                                 used_method = "cdp"
+                                consecutive_errors = 0
                         except Exception as ce:
                             print(f"CDP click attempt failed: {ce}")
+                            consecutive_errors += 1
+
+                    # If too many consecutive errors, tear down grabber to force reconnect
+                    if consecutive_errors >= 3:
+                        print(
+                            f"⚠ {consecutive_errors} consecutive click errors; recycling browser connection"
+                        )
+                        _teardown_grabber()
+                        consecutive_errors = 0
 
                     if used_method is None:
                         if desired_method != "xy":
@@ -12441,10 +12446,16 @@ class MyFrame(wx.Frame):
                         auto_clicker_enabled[0] = False
                         if self.notify_with_popup:
                             wx.CallAfter(self.show_new_task_popup)
-                        wx.CallAfter(self.beep_sound)
+                        else:
+                            wx.CallAfter(self.beep_sound)
                         wx.CallAfter(self.update_clicker_stopped)
                         wx.CallAfter(self.update_url_display, post_url)
-                        wx.CallAfter(self.refresh_patient_location_async)
+                        # Delay location refresh to let Chrome finish loading the new chart
+                        wx.CallAfter(
+                            lambda: wx.CallLater(
+                                2000, self.refresh_patient_location_async
+                            )
+                        )
                         auto_clicker_last_url[0] = post_norm
                         break
 
@@ -12456,10 +12467,16 @@ class MyFrame(wx.Frame):
                         auto_clicker_enabled[0] = False
                         if self.notify_with_popup:
                             wx.CallAfter(self.show_new_task_popup)
-                        wx.CallAfter(self.beep_sound)
+                        else:
+                            wx.CallAfter(self.beep_sound)
                         wx.CallAfter(self.update_clicker_stopped)
                         wx.CallAfter(self.update_url_display, post_url)
-                        wx.CallAfter(self.refresh_patient_location_async)
+                        # Delay location refresh to let Chrome finish loading the new chart
+                        wx.CallAfter(
+                            lambda: wx.CallLater(
+                                2000, self.refresh_patient_location_async
+                            )
+                        )
                         auto_clicker_last_url[0] = post_norm
                         break
 
@@ -12488,15 +12505,16 @@ class MyFrame(wx.Frame):
 
                 except Exception as e:
                     print(f"❌ Auto clicker error: {e}")
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        print("⚠ Recycling browser connection after repeated errors")
+                        _teardown_grabber()
+                        consecutive_errors = 0
                     time.sleep(1)
 
             print(f"Auto clicker loop ended after {click_count} clicks")
         finally:
-            if grabber is not None:
-                try:
-                    grabber.shutdown_playwright()
-                except Exception:
-                    pass
+            _teardown_grabber()
 
     def update_clicker_stopped(self):
         """Update UI when clicker is stopped due to URL change"""
@@ -12668,7 +12686,7 @@ class MyFrame(wx.Frame):
         """Test connection to Chrome/Thorium debugging API"""
         print("Testing browser connection...")
         url = self.get_active_page_url()
-        
+
         if url:
             wx.MessageBox(f"✅ Browser connection successful!\n\nActive URL:\n{url}", 
                          "Browser Test Result", wx.ICON_INFORMATION)
@@ -12694,11 +12712,11 @@ class MyFrame(wx.Frame):
                 print(f"Quick Next Task hotkey registered ({QUICK_NEXT_TASK_HOTKEY})")
             else:
                 print("Quick Next Task hotkey disabled")
-            
+
             # Register Ctrl+Alt+I for In-Visit Autoclick
             keyboard.add_hotkey('ctrl+alt+i', lambda: wx.CallAfter(self.toggle_invisit_clicker))
             print("In-Visit Autoclick hotkey registered (Ctrl+Alt+I)")
-            
+
             # Register Ctrl+Shift+R for Page Refresh
             keyboard.add_hotkey('ctrl+shift+r', lambda: wx.CallAfter(self.toggle_page_refresh))
             print("Page Refresh hotkey registered (Ctrl+Shift+R)")
@@ -12712,24 +12730,32 @@ class MyFrame(wx.Frame):
                         self._gui_toggle_hotkey_id = wx.Window.NewControlId()
                     except Exception:
                         self._gui_toggle_hotkey_id = 9301
-                if self.RegisterHotKey(self._gui_toggle_hotkey_id, wx.MOD_CONTROL | wx.MOD_ALT, ord('H')):
+                if self.RegisterHotKey(
+                    self._gui_toggle_hotkey_id,
+                    self.GUI_TOGGLE_WX_MODIFIERS,
+                    self.GUI_TOGGLE_WX_KEYCODE,
+                ):
                     try:
                         self.Unbind(wx.EVT_HOTKEY, id=self._gui_toggle_hotkey_id)
                     except Exception:
                         pass
                     self.Bind(wx.EVT_HOTKEY, lambda evt: self.toggle_gui_visibility(), id=self._gui_toggle_hotkey_id)
                     self._gui_toggle_hotkey_method = 'wx'
-                    print("GUI toggle OS-level hotkey registered (Ctrl+Alt+H)")
+                    print(
+                        f"GUI toggle OS-level hotkey registered ({self.GUI_TOGGLE_HOTKEY_NAME.upper()})"
+                    )
                 else:
                     raise RuntimeError("RegisterHotKey returned False")
             except Exception as exc:
                 try:
                     self._gui_toggle_hotkey_handle = keyboard.add_hotkey(
-                        'ctrl+alt+h',
-                        lambda: wx.CallAfter(self.toggle_gui_visibility)
+                        self.GUI_TOGGLE_HOTKEY_NAME,
+                        lambda: wx.CallAfter(self.toggle_gui_visibility),
                     )
                     self._gui_toggle_hotkey_method = 'keyboard'
-                    print("GUI toggle hotkey registered via keyboard module (Ctrl+Alt+H)")
+                    print(
+                        f"GUI toggle hotkey registered via keyboard module ({self.GUI_TOGGLE_HOTKEY_NAME.upper()})"
+                    )
                 except Exception as fallback_exc:
                     self._gui_toggle_hotkey_handle = None
                     self._gui_toggle_hotkey_method = None
@@ -13084,7 +13110,7 @@ class MyFrame(wx.Frame):
         """Internal method to execute grab on main thread"""
         try:
             active_tab = self.notebook.GetSelection()
-            
+
             if active_tab == getattr(self, '_tab_index_t_def', 0):  # T Deficiency tab
                 grab_all_labs()
             elif active_tab == getattr(self, '_tab_index_hair_loss', 1):  # Hair Loss tab
@@ -13100,7 +13126,7 @@ class MyFrame(wx.Frame):
                 self.grab_performance_anxiety()
             elif active_tab == getattr(self, '_tab_index_birth_control', 6):
                 self.grab_birth_control()
-            
+
             print(f"F4 triggered grab for tab {active_tab}")
         except Exception as e:
             print(f"Error executing grab function: {e}")
@@ -13551,7 +13577,7 @@ class MyFrame(wx.Frame):
                 threading.Thread(target=_cleanup_grabber, daemon=True).start()
         except Exception:
             pass
-        
+
         # Continue with normal close
         try:
             self.Destroy()

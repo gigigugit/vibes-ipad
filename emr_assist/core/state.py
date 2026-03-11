@@ -73,6 +73,10 @@ def _build_emr_bridge_payload(extra: Optional[Dict[str, Any]] = None) -> Dict[st
         "td_satisfaction": td_satisfaction_value[0],
         "td_side_effects": td_side_effects_value[0],
         "ed": ed_value[0],
+        "response": td_satisfaction_value[0],
+        "side_effects": td_side_effects_value[0],
+        "ed_status": ed_value[0],
+        "pmh": build_pmh_text(),
     }
     payload.update(dict(grabbed_vars))
     if extra:

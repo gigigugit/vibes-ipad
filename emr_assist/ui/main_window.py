@@ -64,7 +64,7 @@ from ..core.config import (
     ENABLE_QUICK_NEXT_TASK_HOTKEY,
     QUICK_NEXT_TASK_HOTKEY,
     GUI_HIDDEN_VISIBLE_WIDTH,
-    AUTO_CLICKER_TAB_INDEX,
+    DASHBOARD_TAB_INDEX,
     AUTO_GRAB_DELAY_MS,
     LABS_CONFIG,
     VISIT_TAB_INDICES,
@@ -266,7 +266,7 @@ class MainWindow(QMainWindow):
         self._build_tab2_hair_loss()
         self._build_tab3_photoaging()
         self._build_tab4_sexual_health()
-        self._build_tab5_auto_clicker()
+        self._build_tab5_dashboard()
         self._build_tab6_performance_anxiety()
         self._build_tab7_birth_control()
 
@@ -313,7 +313,10 @@ class MainWindow(QMainWindow):
     def _build_tab1_t_deficiency(self):
         """Tab 1: T Deficiency / ED Labs"""
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setSpacing(4)
 
         # Grab row
@@ -431,12 +434,19 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         layout.addStretch()
+        scroll.setWidget(inner)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
         self.notebook.addTab(tab, "T Deficiency")
 
     def _build_tab2_hair_loss(self):
         """Tab 2: Hair Loss"""
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setSpacing(4)
 
         grab_btn = QPushButton("Grab Hair Data (F4)")
@@ -490,12 +500,19 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         layout.addStretch()
+        scroll.setWidget(inner)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
         self.notebook.addTab(tab, "Hair Loss")
 
     def _build_tab3_photoaging(self):
         """Tab 3: Photoaging"""
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setSpacing(4)
 
         grab_btn = QPushButton("Grab Photoaging Data (F4)")
@@ -541,6 +558,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(note_btn)
 
         layout.addStretch()
+        scroll.setWidget(inner)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
         self.notebook.addTab(tab, "Photoaging")
 
     def _build_tab4_sexual_health(self):
@@ -641,13 +662,16 @@ class MainWindow(QMainWindow):
         tab_layout.addWidget(scroll)
         self.notebook.addTab(tab, "Sexual Health")
 
-    def _build_tab5_auto_clicker(self):
-        """Tab 5: Auto Clicker"""
+    def _build_tab5_dashboard(self):
+        """Tab 5: Dashboard"""
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setSpacing(4)
 
-        layout.addWidget(QLabel("Auto Clicker / In-Visit Automation"))
+        layout.addWidget(QLabel("Dashboard / In-Visit Automation"))
 
         # Control buttons
         self.clicker_start_btn = QPushButton("Start Autoclick: Dashboard")
@@ -690,6 +714,11 @@ class MainWindow(QMainWindow):
         self.popup_toggle.stateChanged.connect(self.on_popup_toggle)
         layout.addWidget(self.popup_toggle)
 
+        # Location checking toggle (WI additional steps)
+        self.location_check_toggle = QCheckBox("Additional Location Checking (WI)")
+        self.location_check_toggle.setChecked(False)
+        layout.addWidget(self.location_check_toggle)
+
         # Settings group
         settings = QGroupBox("Settings")
         s_layout = QVBoxLayout(settings)
@@ -730,12 +759,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(url_group)
 
         layout.addStretch()
-        self.notebook.addTab(tab, "Auto Clicker")
+        scroll.setWidget(inner)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+        self.notebook.addTab(tab, "Dashboard")
 
     def _build_tab6_performance_anxiety(self):
         """Tab 6: Performance Anxiety"""
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setSpacing(4)
 
         grab_btn = QPushButton("Grab PA Data (F4)")
@@ -802,6 +838,10 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         layout.addStretch()
+        scroll.setWidget(inner)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
         self.notebook.addTab(tab, "Perf. Anxiety")
 
     def _build_tab7_birth_control(self):
@@ -998,6 +1038,11 @@ class MainWindow(QMainWindow):
     def refresh_patient_location_async(self) -> None:
         if self._location_worker and self._location_worker.is_alive():
             return
+        # Read toggle state on main thread before spawning worker
+        skip_wi = (
+            not getattr(self, "location_check_toggle", None)
+            or not self.location_check_toggle.isChecked()
+        )
         def worker():
             try:
                 grabber = BrowserEMRGrabber()
@@ -1009,7 +1054,9 @@ class MainWindow(QMainWindow):
                 if not grabber.connect_to_chrome():
                     print("Location refresh error: could not attach to Chrome")
                     return
-                summary = grabber.fetch_patient_location_summary(debug_print=True)
+                summary = grabber.fetch_patient_location_summary(
+                    debug_print=True, skip_wi_detail=skip_wi
+                )
                 print(f"[PATIENT LOCATION REFRESH] {summary}")
                 _on_main(lambda: self._update_patient_location_label(summary))
             except Exception as exc:
@@ -1036,7 +1083,7 @@ class MainWindow(QMainWindow):
             return False
         target_tab = VISIT_TAB_INDICES.get(canonical)
         if canonical == "EMR Dashboard":
-            target_tab = AUTO_CLICKER_TAB_INDEX
+            target_tab = DASHBOARD_TAB_INDEX
         if target_tab is None:
             return False
         def apply_switch():

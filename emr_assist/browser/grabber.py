@@ -52,7 +52,7 @@ from ..core.geocoding import geocode_address, get_chippewa_falls_coords, Nominat
 
 class BrowserEMRGrabber:
     """Playwright-based EMR data extraction for reliable element grabbing"""
-    
+
     def __init__(self):
         self.driver = None
         self.wait = None
@@ -77,7 +77,7 @@ class BrowserEMRGrabber:
         self._cdp_last_check: float = 0.0
         self._pw_thread_id = None
         self._driver_thread_id = None
-    
+
     def _reset_text_caches(self):
         """Clear per-page text caches to avoid stale reads between grabs."""
         self._cache_latest_segment = None
@@ -166,7 +166,7 @@ class BrowserEMRGrabber:
             except Exception:
                 continue
         return pages[0] if pages else None
-        
+
     def connect_to_chrome(self):
         """Connect to existing Chrome debugging session with retries for transient attach failures."""
         # Reuse existing driver when possible
@@ -233,7 +233,7 @@ class BrowserEMRGrabber:
         if last_error:
             print(f"❌ Chrome connection failed after retries: {last_error}")
         return False
-    
+
     def disconnect(self):
         """Cleanup - but don't close the browser session"""
         if self.driver:
@@ -286,7 +286,9 @@ class BrowserEMRGrabber:
             self._pw = None
             self._pw_thread_id = None
 
-    def fetch_patient_location_summary(self, debug_print=True) -> dict | None:
+    def fetch_patient_location_summary(
+        self, debug_print=True, skip_wi_detail=True
+    ) -> dict | None:
         summary: dict = {
             "state": None,
             "state_display": None,
@@ -392,6 +394,7 @@ class BrowserEMRGrabber:
             normalized = summary.get("state", None)
             if normalized in ("WI", "WISCONSIN"):
                 summary["state"] = "WI"
+            if normalized in ("WI", "WISCONSIN") and not skip_wi_detail:
                 address_row_xpath = "(//div[contains(@class,'py-3') and contains(@class,'text-xs') and contains(@class,'text-black')])[3]"
                 try:
                     edit_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button#editPatient")))
@@ -608,7 +611,7 @@ class BrowserEMRGrabber:
         except Exception as e:
             print(f"ensure_emr_tab error: {e}")
             return False
-    
+
     def _close_patient_edit_modal(self) -> None:
         """Exit the patient edit modal via the close icon (fallback to Escape)."""
         if not self.driver:
@@ -690,7 +693,7 @@ class BrowserEMRGrabber:
         if not self.driver:
             if not self.connect_to_chrome():
                 return None
-        
+
         try:
             # Ensure we're on an EMR tab before extracting
             if not self._ensure_emr_tab():
@@ -704,7 +707,7 @@ class BrowserEMRGrabber:
             overall_start = time.perf_counter()
             dprint("🔍 Starting browser-based Sexual Health grab…")
             dprint(f"📍 Current page: {self.driver.current_url}")
-            
+
             # Define EMR element selectors for Sexual Health data
             selectors = {
                 'medication_title': get_selector('sexual_health', 'medication', engine='selenium', selector_type='css') or '[data-testid="medication-title"]',
@@ -712,16 +715,16 @@ class BrowserEMRGrabber:
                 'treatment_plan': get_selector('sexual_health', 'treatment_plan', engine='selenium', selector_type='css') or '[data-testid="proposedTreatmentPlan"]',
                 'current_dose': get_selector('sexual_health', 'current_dose', engine='selenium', selector_type='css') or '[data-testid="treatmentPlan"]',
             }
-            
+
             # Additional selectors to try if main ones don't work
             fallback_selectors = {
                 'medication_alt1': '.medication-name, .med-name, [class*="medication"]',
                 'medication_alt2': '[class*="dose"], [class*="dosage"]',
                 'treatment_alt': '[class*="treatment"], [class*="plan"]',
             }
-            
+
             extracted_data = {}
-            
+
             # Try to extract medication information
             t0 = time.perf_counter()
             medication = self._extract_medication(selectors, fallback_selectors)
@@ -738,7 +741,7 @@ class BrowserEMRGrabber:
             intake_med_plain = self._strip_frequency_suffix(medication) if medication else ""
             if intake_med_plain:
                 extracted_data['intake_med_name'] = intake_med_plain
-            
+
             # Try to extract effectiveness information (prefer fast text parsing)
             t2 = time.perf_counter()
             # Keep text gathering fast: avoid iframe walks unless Hybrid mode is selected
@@ -753,14 +756,14 @@ class BrowserEMRGrabber:
             if effectiveness:
                 extracted_data['effectiveness'] = effectiveness
                 dprint(f"   ✅ Extracted effectiveness: '{effectiveness}' ({(time.perf_counter()-t2)*1000:.0f} ms)")
-            
+
             # Try to extract blood pressure
             t3 = time.perf_counter()
             blood_pressure = self._extract_blood_pressure()
             if blood_pressure:
                 extracted_data['blood_pressure'] = blood_pressure
                 dprint(f"   ✅ Extracted blood pressure: '{blood_pressure}' ({(time.perf_counter()-t3)*1000:.0f} ms)")
-            
+
             # Try to extract diagnoses from notes
             t4 = time.perf_counter()
             diagnoses = self._extract_diagnoses()
@@ -776,28 +779,28 @@ class BrowserEMRGrabber:
             if current_med_detail:
                 extracted_data['current_med_detail'] = current_med_detail
                 dprint(f"   ✅ Current detail: '{current_med_detail}'")
-            
+
             # Extract hair loss data if present
             t6 = time.perf_counter()
             hair_loss_location = self._extract_hair_loss_location()
             if hair_loss_location:
                 extracted_data['hair_loss_location'] = hair_loss_location
                 dprint(f"   ✅ Extracted hair loss location: '{hair_loss_location}' ({(time.perf_counter()-t6)*1000:.0f} ms)")
-            
+
             t7 = time.perf_counter()
             hair_loss_additional_sxx = self._extract_hair_loss_additional_sxx()
             if hair_loss_additional_sxx:
                 extracted_data['hair_loss_additional_sxx'] = hair_loss_additional_sxx
                 dprint(f"   ✅ Extracted hair loss additional sxx: '{hair_loss_additional_sxx}' ({(time.perf_counter()-t7)*1000:.0f} ms)")
-            
+
             # Get all text content as fallback for parsing
             full_text = self._get_page_text()
             if full_text:
                 extracted_data['full_text'] = full_text
-            
+
             dprint(f"✅ Browser grab completed in {(time.perf_counter()-overall_start)*1000:.0f} ms. Found {len(extracted_data)} data types.")
             return extracted_data
-            
+
         except Exception as e:
             print(f"❌ Browser grab error: {e}")
             return None
@@ -871,7 +874,7 @@ class BrowserEMRGrabber:
             return self._cache_latest_segment
         self._cache_latest_segment = page_text
         return self._cache_latest_segment
-    
+
     def _extract_medication(self, selectors, fallback_selectors):
         """Extract medication quickly via DOM queries with Playwright; fall back to text parsing when needed.
         The returned string appends a simple frequency suffix (", daily" or ", as-needed").
@@ -1118,7 +1121,7 @@ class BrowserEMRGrabber:
         except Exception as e:
             print(f"   ❌ Playwright connection/use error: {e}")
             return ""
-    
+
     def _extract_medication_detail_text(self) -> str:
         selector = '[data-testid="medication-text"]'
         try:
@@ -1375,7 +1378,7 @@ return null;
 
         except Exception as e:
             dprint(f"   ❌ Effectiveness extraction error: {e}")
-        
+
         return None
 
     def _extract_effectiveness_playwright(self) -> Optional[str]:
@@ -1688,7 +1691,7 @@ return null;
         try:
             if sync_playwright is None:
                 return False
-                
+
             with sync_playwright() as p:  # type: ignore
                 cdp_url = f"http://127.0.0.1:{CDP_DEBUG_PORT}"
                 browser = p.chromium.connect_over_cdp(cdp_url)
@@ -1722,7 +1725,7 @@ return null;
                     locator.first.click(timeout=3000)
                     print(f"   ✅ Playwright clicked 'Get next task' button using selector: {playwright_selector}")
                     return True
-                    
+
                 finally:
                     try:
                         browser.close()
@@ -1771,7 +1774,7 @@ return null;
         except Exception as e:
             print(f"click_get_next_task error: {e}")
             return False
-    
+
     def _extract_blood_pressure(self):
         """Extract blood pressure information from the provided CSS class.
         Prefer exact element text like '90-139/50-80' or a reading like '120/80'.
@@ -2104,7 +2107,7 @@ return null;
         except Exception:
             return None
         return None
-    
+
     def _extract_diagnoses(self):
         """Extract Sexual Health diagnoses with robust mapping and negation handling.
         Returns a list containing any of: 'ED', 'PE', 'PE-like ejaculatory dysfunction'.
@@ -2403,14 +2406,14 @@ return null;
         except Exception:
             return []
         return []
-    
+
     def _extract_hair_loss_location(self) -> str:
         """Extract hair loss location from the EMR page.
         Uses fallback selector to find the specific element for hair loss location.
         """
         try:
             self._switch_to_default()
-            
+
             # Possible hair loss location options
             location_patterns = [
                 "Thinning at the hairline",
@@ -2419,10 +2422,10 @@ return null;
                 "Redness and irritation found at sites of hair loss",
                 "I'll take a photo of my head instead"
             ]
-            
+
             # Try the specific fallback selector first
             fallback_selector = "div:nth-of-type(1) > div:nth-of-type(4) > div > div:nth-of-type(2) > div:nth-of-type(1) > div > div > div > div > div > div > div:nth-of-type(4) > div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(44) > div > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1)"
-            
+
             try:
                 element = self.driver.find_element(By.CSS_SELECTOR, fallback_selector)
                 text = (element.get_attribute('innerText') or element.text or '').strip()
@@ -2431,11 +2434,11 @@ return null;
                     return text
             except Exception as e:
                 print(f"   ⚠️ Fallback selector failed: {e}")
-            
+
             # If fallback fails, search all elements with the generic class
             elements = self.driver.find_elements(By.CSS_SELECTOR, "div.css-1rynq56.r-cqee49.r-b88u0q")
             print(f"   🔍 Searching {len(elements)} elements for hair loss location...")
-            
+
             # Collect all matching text
             matches = []
             for element in elements:
@@ -2446,13 +2449,13 @@ return null;
                         print(f"   ✅ Found match: '{text}'")
                 except Exception:
                     continue
-            
+
             if matches:
                 # Return comma-separated list of unique matches
                 result = ", ".join(sorted(set(matches)))
                 print(f"   ✅ Hair loss location extracted: '{result}'")
                 return result
-            
+
             print(f"   ⚠️ No hair loss location found")
             return ""
         except Exception as e:
@@ -2463,14 +2466,14 @@ return null;
                 self._switch_to_default()
             except Exception:
                 pass
-    
+
     def _extract_hair_loss_additional_sxx(self) -> str:
         """Extract additional hair loss symptoms from the EMR page.
         Uses fallback selector to find the specific element for hair loss additional symptoms.
         """
         try:
             self._switch_to_default()
-            
+
             # Possible additional symptom options
             symptom_patterns = [
                 "No, none of these",
@@ -2478,10 +2481,10 @@ return null;
                 "Patches of rough, scaly skin or scarring",
                 "Pustules or crusting"
             ]
-            
+
             # Try the specific fallback selector first
             fallback_selector = "div:nth-of-type(1) > div:nth-of-type(4) > div > div:nth-of-type(2) > div:nth-of-type(1) > div > div > div > div > div > div > div:nth-of-type(4) > div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(43) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div"
-            
+
             try:
                 element = self.driver.find_element(By.CSS_SELECTOR, fallback_selector)
                 text = (element.get_attribute('innerText') or element.text or '').strip()
@@ -2493,15 +2496,15 @@ return null;
                     return text
             except Exception as e:
                 print(f"   ⚠️ Fallback selector failed: {e}")
-            
+
             # If fallback fails, search all elements with the generic class
             elements = self.driver.find_elements(By.CSS_SELECTOR, "div.css-1rynq56.r-cqee49.r-b88u0q")
             print(f"   🔍 Searching {len(elements)} elements for hair loss additional sxx...")
-            
+
             # Special case: if "No, none of these" is found, return the special text
             none_of_these_found = False
             other_symptoms = []
-            
+
             for element in elements:
                 try:
                     text = (element.get_attribute('innerText') or element.text or '').strip()
@@ -2513,19 +2516,19 @@ return null;
                         print(f"   ✅ Found symptom: '{text}'")
                 except Exception:
                     continue
-            
+
             # If "No, none of these" was selected
             if none_of_these_found and not other_symptoms:
                 result = "none, denies burning, pain, patches of rough scaly skin, scarring, pustules, and crusting"
                 print(f"   ✅ Hair loss additional sxx extracted: '{result}'")
                 return result
-            
+
             # Otherwise return comma-separated list of symptoms
             if other_symptoms:
                 result = ", ".join(sorted(set(other_symptoms)))
                 print(f"   ✅ Hair loss additional sxx extracted: '{result}'")
                 return result
-            
+
             print(f"   ⚠️ No hair loss additional sxx found")
             return ""
         except Exception as e:
@@ -2536,7 +2539,7 @@ return null;
                 self._switch_to_default()
             except Exception:
                 pass
-    
+
     def _extract_medication_from_text(self, text: str) -> str:
         """Heuristic medication extractor for Sexual Health from plain text.
         Primary rule: pick the med line immediately after a header line that reads 'Treatment'.
@@ -2608,7 +2611,7 @@ return null;
             return f"{base_line}{infer_freq()}"
         except Exception:
             return ""
-    
+
     def _get_page_text(self):
         """Get all text content from the page as fallback"""
         if self._cache_body_text is not None:
@@ -4018,7 +4021,6 @@ return null;
         except Exception as exc:
             print(f"❌ Birth Control grab error: {exc}")
             return None
-
 
 
 # Legacy alias
