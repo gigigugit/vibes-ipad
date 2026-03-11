@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>TDeficiencyInfo</class>
+ <widget class="QWidget" name="TDeficiencyInfo">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>300</width><height>500</height></rect>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="leftMargin"><number>4</number></property>
+   <property name="topMargin"><number>4</number></property>
+   <property name="rightMargin"><number>4</number></property>
+   <property name="bottomMargin"><number>4</number></property>
+   <property name="spacing"><number>6</number></property>
+   <!-- Scores section -->
+   <item>
+    <widget class="QLabel" name="lbl_scores_section">
+     <property name="text"><string>SCORES</string></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="scoresLayout">
+     <property name="spacing"><number>6</number></property>
+     <item>
+      <widget class="EditableInfoCard" name="card_tdcs">
+       <property name="title" stdset="0"><string>TDCS</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="EditableInfoCard" name="card_tdcs_c">
+       <property name="title" stdset="0"><string>TDCS-C</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="EditableInfoCard" name="card_ed">
+       <property name="title" stdset="0"><string>ED</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <!-- Treatment section -->
+   <item>
+    <widget class="QLabel" name="lbl_treatment_section">
+     <property name="text"><string>TREATMENT</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_medication">
+     <property name="title" stdset="0"><string>Medication</string></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="treatmentRow">
+     <property name="spacing"><number>6</number></property>
+     <item>
+      <widget class="EditableInfoCard" name="card_response">
+       <property name="title" stdset="0"><string>Response</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="EditableInfoCard" name="card_side_effects">
+       <property name="title" stdset="0"><string>Side Effects</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QWidget" name="separator1">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Diagnoses section -->
+   <item>
+    <widget class="QLabel" name="lbl_diagnoses_section">
+     <property name="text"><string>DIAGNOSES</string></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="dxLayout">
+     <property name="spacing"><number>6</number></property>
+     <item>
+      <widget class="ToggleChip" name="chip_dx_td">
+       <property name="text"><string>Testosterone Deficiency</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="ToggleChip" name="chip_dx_ed">
+       <property name="text"><string>Erectile Dysfunction</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <!-- PMH section -->
+   <item>
+    <widget class="QLabel" name="lbl_pmh_section">
+     <property name="text"><string>PMH</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="ChipGroup" name="pmh_chips"/>
+   </item>
+   <item>
+    <spacer name="bottomSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>EditableInfoCard</class>
+   <extends>QWidget</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+  <customwidget>
+   <class>ToggleChip</class>
+   <extends>QPushButton</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+  <customwidget>
+   <class>ChipGroup</class>
+   <extends>QWidget</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>

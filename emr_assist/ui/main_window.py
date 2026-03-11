@@ -673,6 +673,17 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(QLabel("Dashboard / In-Visit Automation"))
 
+        # ── Open New Dashboard button ──
+        self.open_dashboard_btn = QPushButton("🚀  Open New Dashboard (PyQt6)")
+        self.open_dashboard_btn.setStyleSheet(
+            "QPushButton { background-color: #4fc3f7; color: #1a1a2e; "
+            "font-weight: bold; font-size: 14px; padding: 10px; "
+            "border-radius: 8px; }"
+            "QPushButton:hover { background-color: #29b6f6; }"
+        )
+        self.open_dashboard_btn.clicked.connect(self._open_new_dashboard)
+        layout.addWidget(self.open_dashboard_btn)
+
         # Control buttons
         self.clicker_start_btn = QPushButton("Start Autoclick: Dashboard")
         self.clicker_start_btn.clicked.connect(self.toggle_auto_clicker)
@@ -928,6 +939,43 @@ class MainWindow(QMainWindow):
         tab_layout.setContentsMargins(0, 0, 0, 0)
         tab_layout.addWidget(scroll)
         self.notebook.addTab(tab, "Birth Control")
+
+    # ==================================================================
+    # New Dashboard launcher
+    # ==================================================================
+    def _open_new_dashboard(self):
+        """Open the new .ui-file-driven Dashboard as a separate window."""
+        # Reuse existing window if it's still open
+        existing = getattr(self, "_dashboard_window", None)
+        if existing is not None:
+            try:
+                if existing.isVisible():
+                    existing.raise_()
+                    existing.activateWindow()
+                    return
+            except RuntimeError:
+                # C++ object already deleted
+                pass
+
+        try:
+            from emr_assist.ui.dashboard_window import DashboardWindow
+            from emr_assist.ui.theme import DARK_THEME_QSS
+
+            app = QApplication.instance()
+            if app:
+                app.setStyleSheet(DARK_THEME_QSS)
+
+            self._dashboard_window = DashboardWindow()
+            self._dashboard_window.show()
+            self._dashboard_window.raise_()
+            self._dashboard_window.activateWindow()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Dashboard Error",
+                f"Failed to open new dashboard:\n\n{exc}",
+            )
+
     # ==================================================================
     # Browser grabber helpers
     # ==================================================================

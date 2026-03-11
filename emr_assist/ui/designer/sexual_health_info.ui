@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>SexualHealthInfo</class>
+ <widget class="QWidget" name="SexualHealthInfo">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>300</width><height>550</height></rect>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="leftMargin"><number>4</number></property>
+   <property name="topMargin"><number>4</number></property>
+   <property name="rightMargin"><number>4</number></property>
+   <property name="bottomMargin"><number>4</number></property>
+   <property name="spacing"><number>6</number></property>
+   <!-- Treatment -->
+   <item>
+    <widget class="QLabel" name="lbl_treatment_section">
+     <property name="text"><string>TREATMENT</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_medication">
+     <property name="title" stdset="0"><string>Medication</string></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="treatmentRow">
+     <property name="spacing"><number>6</number></property>
+     <item>
+      <widget class="EditableInfoCard" name="card_effectiveness">
+       <property name="title" stdset="0"><string>Effectiveness</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="EditableInfoCard" name="card_bp">
+       <property name="title" stdset="0"><string>Blood Pressure</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QWidget" name="separator1">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Change / Plan -->
+   <item>
+    <widget class="QLabel" name="lbl_change_section">
+     <property name="text"><string>CHANGE / PLAN</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QComboBox" name="combo_plan">
+     <item><property name="text"><string>Continue present treatment</string></property></item>
+     <item><property name="text"><string>Change treatment to—</string></property></item>
+    </widget>
+   </item>
+   <item>
+    <widget class="QComboBox" name="combo_change">
+     <item><property name="text"><string>Cadence</string></property></item>
+     <item><property name="text"><string>Dose number</string></property></item>
+     <item><property name="text"><string>Medication</string></property></item>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_change_detail">
+     <property name="title" stdset="0"><string>Change Detail</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="separator2">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Diagnoses -->
+   <item>
+    <widget class="QLabel" name="lbl_diagnoses_section">
+     <property name="text"><string>DIAGNOSES</string></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="dxLayout">
+     <property name="spacing"><number>4</number></property>
+     <item>
+      <widget class="ToggleChip" name="chip_dx_ed">
+       <property name="text"><string>ED</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="ToggleChip" name="chip_dx_pe">
+       <property name="text"><string>PE</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="ToggleChip" name="chip_dx_pe_like">
+       <property name="text"><string>PE-like</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="ToggleChip" name="chip_dx_hair">
+       <property name="text"><string>Hair Loss</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QWidget" name="separator3">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Hair Loss Info -->
+   <item>
+    <widget class="QLabel" name="lbl_hair_section">
+     <property name="text"><string>HAIR LOSS INFO</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_hair_location">
+     <property name="title" stdset="0"><string>Hair Location</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_hair_sxx">
+     <property name="title" stdset="0"><string>Hair Symptoms</string></property>
+    </widget>
+   </item>
+   <item>
+    <spacer name="bottomSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>EditableInfoCard</class>
+   <extends>QWidget</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+  <customwidget>
+   <class>ToggleChip</class>
+   <extends>QPushButton</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>

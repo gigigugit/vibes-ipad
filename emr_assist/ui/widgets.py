@@ -65,7 +65,7 @@ class ToggleChip(QPushButton):
 
     def __init__(
         self,
-        label: str,
+        label: str = "",
         color_active: str = ACCENT_BLUE,
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -209,7 +209,7 @@ class ActionButton(QPushButton):
 
     def __init__(
         self,
-        label: str,
+        label: str = "",
         accent: str = "default",
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -267,7 +267,7 @@ class InfoCard(QFrame):
 
     def __init__(
         self,
-        key: str,
+        key: str = "",
         value: str = "—",
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -327,7 +327,7 @@ class EditableInfoCard(QFrame):
 
     def __init__(
         self,
-        key: str,
+        key: str = "",
         value: str = "",
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -400,7 +400,7 @@ class MultiLineInfoCard(QFrame):
 
     def __init__(
         self,
-        key: str,
+        key: str = "",
         value: str = "",
         max_height: int = 120,
         read_only: bool = False,
@@ -471,7 +471,7 @@ class CollapsibleSection(QWidget):
 
     def __init__(
         self,
-        title: str,
+        title: str = "",
         expanded: bool = False,
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -555,7 +555,7 @@ class LabValueRow(QFrame):
 
     def __init__(
         self,
-        lab_name: str,
+        lab_name: str = "",
         unit: str = "",
         normal_range: str = "",
         parent: Optional[QWidget] = None,
@@ -721,12 +721,14 @@ class ChipGroup(QFrame):
 
     def __init__(
         self,
-        label: str,
-        items: List[str],
+        label: str = "",
+        items: Optional[List[str]] = None,
         color_active: str = ACCENT_BLUE,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
+        if items is None:
+            items = []
         self.setStyleSheet(f"background: transparent; border: none;")
 
         layout = QVBoxLayout(self)

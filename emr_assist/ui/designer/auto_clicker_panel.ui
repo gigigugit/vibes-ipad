@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>AutoClickerPanel</class>
+ <widget class="QWidget" name="AutoClickerPanel">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>440</width>
+    <height>400</height>
+   </rect>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="leftMargin"><number>6</number></property>
+   <property name="topMargin"><number>6</number></property>
+   <property name="rightMargin"><number>6</number></property>
+   <property name="bottomMargin"><number>6</number></property>
+   <property name="spacing"><number>6</number></property>
+   <!-- Main toggle buttons -->
+   <item>
+    <widget class="ActionButton" name="btn_dashboard_clicker">
+     <property name="text"><string>Autoclick: Dashboard</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="ActionButton" name="btn_invisit_clicker">
+     <property name="text"><string>Autoclick: In-Visit</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="ActionButton" name="btn_page_refresh">
+     <property name="text"><string>Auto-Refresh Page</string></property>
+    </widget>
+   </item>
+   <!-- Separator -->
+   <item>
+    <widget class="QWidget" name="separator1">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Quick actions row -->
+   <item>
+    <layout class="QHBoxLayout" name="quickActionsLayout">
+     <property name="spacing"><number>4</number></property>
+     <item>
+      <widget class="ActionButton" name="btn_quick_next">
+       <property name="text"><string>Quick Next Task</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="ActionButton" name="btn_test_chrome">
+       <property name="text"><string>Test Chrome</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="ActionButton" name="btn_detect_visit">
+     <property name="text"><string>Detect Visit</string></property>
+    </widget>
+   </item>
+   <!-- Separator -->
+   <item>
+    <widget class="QWidget" name="separator2">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Status area -->
+   <item>
+    <widget class="StatusBadge" name="status_badge">
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="lbl_method">
+     <property name="text"><string>Click method: —</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="lbl_last_click">
+     <property name="text"><string>Last click: —</string></property>
+    </widget>
+   </item>
+   <!-- Toggles -->
+   <item>
+    <widget class="ToggleChip" name="chip_popup">
+     <property name="text"><string>Show popup on URL change</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="ToggleChip" name="chip_location_check">
+     <property name="text"><string>Additional Location Checking (WI)</string></property>
+    </widget>
+   </item>
+   <!-- Separator -->
+   <item>
+    <widget class="QWidget" name="separator3">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Settings -->
+   <item>
+    <widget class="QLabel" name="lbl_settings_header">
+     <property name="text"><string>Settings</string></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="coordLayout">
+     <property name="spacing"><number>4</number></property>
+     <item><widget class="QLabel" name="lbl_x"><property name="text"><string>X:</string></property></widget></item>
+     <item>
+      <widget class="QLineEdit" name="txt_x">
+       <property name="text"><string>2600</string></property>
+       <property name="maximumSize"><size><width>60</width><height>16777215</height></size></property>
+      </widget>
+     </item>
+     <item><widget class="QLabel" name="lbl_y"><property name="text"><string>Y:</string></property></widget></item>
+     <item>
+      <widget class="QLineEdit" name="txt_y">
+       <property name="text"><string>400</string></property>
+       <property name="maximumSize"><size><width>60</width><height>16777215</height></size></property>
+      </widget>
+     </item>
+     <item><widget class="QLabel" name="lbl_interval"><property name="text"><string>Interval:</string></property></widget></item>
+     <item>
+      <widget class="QLineEdit" name="txt_interval">
+       <property name="text"><string>3</string></property>
+       <property name="maximumSize"><size><width>50</width><height>16777215</height></size></property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="coordSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer>
+     </item>
+    </layout>
+   </item>
+   <!-- Click method chips -->
+   <item>
+    <layout class="QHBoxLayout" name="methodLayout">
+     <property name="spacing"><number>4</number></property>
+     <item>
+      <widget class="ToggleChip" name="chip_cdp">
+       <property name="text"><string>CDP</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="ToggleChip" name="chip_browser">
+       <property name="text"><string>Browser</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="ToggleChip" name="chip_xy">
+       <property name="text"><string>X/Y Screen</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <!-- URL Monitor -->
+   <item>
+    <widget class="QLabel" name="lbl_url_header">
+     <property name="text"><string>URL Monitor</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="lbl_url">
+     <property name="text"><string>Current URL: —</string></property>
+     <property name="wordWrap"><bool>true</bool></property>
+    </widget>
+   </item>
+   <item>
+    <spacer name="bottomSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>ActionButton</class>
+   <extends>QPushButton</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+  <customwidget>
+   <class>StatusBadge</class>
+   <extends>QWidget</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+  <customwidget>
+   <class>ToggleChip</class>
+   <extends>QPushButton</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>

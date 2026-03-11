@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>BirthControlInfo</class>
+ <widget class="QWidget" name="BirthControlInfo">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>300</width><height>550</height></rect>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="leftMargin"><number>4</number></property>
+   <property name="topMargin"><number>4</number></property>
+   <property name="rightMargin"><number>4</number></property>
+   <property name="bottomMargin"><number>4</number></property>
+   <property name="spacing"><number>6</number></property>
+   <!-- Visit Type Toggle -->
+   <item>
+    <widget class="QLabel" name="lbl_visit_type_section">
+     <property name="text"><string>VISIT TYPE</string></property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="visitTypeRow">
+     <property name="spacing"><number>6</number></property>
+     <item>
+      <widget class="ToggleChip" name="chip_initial">
+       <property name="text"><string>Initial</string></property>
+      </widget>
+     </item>
+     <item>
+      <widget class="ToggleChip" name="chip_followup">
+       <property name="text"><string>Follow-up</string></property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QWidget" name="separator1">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Treatment -->
+   <item>
+    <widget class="QLabel" name="lbl_treatment_section">
+     <property name="text"><string>TREATMENT</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_medication">
+     <property name="title" stdset="0"><string>Medication</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_lmp">
+     <property name="title" stdset="0"><string>LMP</string></property>
+    </widget>
+   </item>
+   <!-- Vitals -->
+   <item>
+    <widget class="QLabel" name="lbl_vitals_section">
+     <property name="text"><string>VITALS</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_bp">
+     <property name="title" stdset="0"><string>BP</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="separator2">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- Side Effects -->
+   <item>
+    <widget class="QLabel" name="lbl_side_effects_section">
+     <property name="text"><string>SIDE EFFECTS</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="MultiLineInfoCard" name="card_side_effects">
+     <property name="title" stdset="0"><string>Side Effects</string></property>
+    </widget>
+   </item>
+   <!-- History -->
+   <item>
+    <widget class="QLabel" name="lbl_history_section">
+     <property name="text"><string>HISTORY</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_history_changes">
+     <property name="title" stdset="0"><string>History Changes</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="separator3">
+     <property name="maximumSize"><size><width>16777215</width><height>1</height></size></property>
+     <property name="styleSheet"><string>background-color: #2e4066;</string></property>
+    </widget>
+   </item>
+   <!-- PMH -->
+   <item>
+    <widget class="QLabel" name="lbl_pmh_section">
+     <property name="text"><string>PAST MEDICAL HISTORY</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="ChipGroup" name="pmh_chips"/>
+   </item>
+   <item>
+    <widget class="EditableInfoCard" name="card_pmh_other">
+     <property name="title" stdset="0"><string>PMH Other</string></property>
+    </widget>
+   </item>
+   <item>
+    <spacer name="bottomSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>EditableInfoCard</class>
+   <extends>QWidget</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+  <customwidget>
+   <class>ToggleChip</class>
+   <extends>QPushButton</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+  <customwidget>
+   <class>ChipGroup</class>
+   <extends>QWidget</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+  <customwidget>
+   <class>MultiLineInfoCard</class>
+   <extends>QWidget</extends>
+   <header>emr_assist.ui.widgets</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
