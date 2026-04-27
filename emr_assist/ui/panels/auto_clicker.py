@@ -74,10 +74,6 @@ class AutoClickerPanel(QWidget):
         self.chip_popup = ToggleChip("Show popup on URL change", ACCENT_ORANGE)
         layout.addWidget(self.chip_popup)
 
-        # ── Location checking toggle (WI additional steps) ──
-        self.chip_location_check = ToggleChip("Additional Location Checking (WI)", ACCENT_ORANGE)
-        layout.addWidget(self.chip_location_check)
-
         layout.addWidget(_separator())
 
         # ── Collapsible Settings ──

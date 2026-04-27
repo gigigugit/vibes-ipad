@@ -586,8 +586,7 @@ class VoiceAssistWindow(QMainWindow):
     # ==================================================================
 
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(self._on_generate)
-        QShortcut(QKeySequence("Escape"), self).activated.connect(self._on_stop)
+        return
 
     # ==================================================================
     # Backend management

@@ -64,12 +64,10 @@ from ..core.config import (
     ENABLE_QUICK_NEXT_TASK_HOTKEY,
     QUICK_NEXT_TASK_HOTKEY,
     GUI_HIDDEN_VISIBLE_WIDTH,
-    DASHBOARD_TAB_INDEX,
+    AUTO_CLICKER_TAB_INDEX,
     AUTO_GRAB_DELAY_MS,
-    LABS_CONFIG,
     VISIT_TAB_INDICES,
     VISIT_TYPE_FALLBACK_KEYWORDS,
-    TEMPLATE_BUTTONS,
     PMH_OPTIONS,
     BIRTH_CONTROL_PMH_OPTIONS,
     PA_SITUATION_OPTIONS,
@@ -77,24 +75,17 @@ from ..core.config import (
     dprint,
 )
 from ..core.parsers import (
-    extract_lab_value_simple,
-    parse_tdcs_score,
-    parse_tdcsc_score,
-    parse_ed_status,
-    parse_treatment_satisfaction,
-    parse_side_effects_response,
-    detect_td_diagnosis,
+    allow_hair_loss_diagnosis,
     detect_medication_from_text,
+    extract_hair_medication_from_text,
+    extract_hair_symptoms_from_text,
+    medication_implies_hair_loss,
+    normalize_blood_pressure_value,
 )
 from ..core.templates import load_templates_from_file as load_templates
 from ..core import state
 from ..core.state import (
     grabbed_vars,
-    tdcs_value,
-    tdcs_c_value,
-    ed_value,
-    td_satisfaction_value,
-    td_side_effects_value,
     diagnoses,
     medication_value,
     selected_template,
@@ -262,11 +253,10 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.notebook, 1)
 
         # Build all tabs
-        self._build_tab1_t_deficiency()
         self._build_tab2_hair_loss()
         self._build_tab3_photoaging()
         self._build_tab4_sexual_health()
-        self._build_tab5_dashboard()
+        self._build_tab5_auto_clicker()
         self._build_tab6_performance_anxiety()
         self._build_tab7_birth_control()
 
@@ -310,136 +300,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Tab builders
     # ------------------------------------------------------------------
-    def _build_tab1_t_deficiency(self):
-        """Tab 1: T Deficiency / ED Labs"""
-        tab = QWidget()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        inner = QWidget()
-        layout = QVBoxLayout(inner)
-        layout.setSpacing(4)
-
-        # Grab row
-        grab_row = QHBoxLayout()
-        grab_btn = QPushButton("Grab All Labs (F4)")
-        grab_btn.clicked.connect(lambda: self.grab_all_labs())
-        clear_btn = QPushButton("Clear All")
-        clear_btn.clicked.connect(self.clear_all)
-        grab_row.addWidget(grab_btn)
-        grab_row.addWidget(clear_btn)
-        layout.addLayout(grab_row)
-
-        # TDCS / TDCS-C / ED row
-        scores_row = QHBoxLayout()
-        scores_row.addWidget(QLabel("TDCS:"))
-        self.tdcs_text = QLineEdit("\u2014")
-        self.tdcs_text.setMaximumWidth(50)
-        scores_row.addWidget(self.tdcs_text)
-        scores_row.addWidget(QLabel("TDCS-C:"))
-        self.tdcs_c_text = QLineEdit("\u2014")
-        self.tdcs_c_text.setMaximumWidth(50)
-        scores_row.addWidget(self.tdcs_c_text)
-        scores_row.addWidget(QLabel("ED:"))
-        self.ed_text = QLineEdit("\u2014")
-        self.ed_text.setMaximumWidth(50)
-        scores_row.addWidget(self.ed_text)
-        scores_row.addStretch()
-        layout.addLayout(scores_row)
-
-        # Lab rows
-        for lab_name, lab_config in LABS_CONFIG.items():
-            var = lab_config["var"]
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"{lab_name} ({lab_config['unit']}):"))
-            txt = QLineEdit()
-            txt.setMaximumWidth(100)
-            row.addWidget(txt)
-            high_cb = QCheckBox("H")
-            low_cb = QCheckBox("L")
-            row.addWidget(high_cb)
-            row.addWidget(low_cb)
-            row.addStretch()
-            layout.addLayout(row)
-            self.text_ctrls[var] = txt
-            self.check_ctrls[var] = (high_cb, low_cb)
-
-        # Medication text field
-        med_row = QHBoxLayout()
-        med_row.addWidget(QLabel("Medication:"))
-        self.td_med_text = QLineEdit()
-        med_row.addWidget(self.td_med_text, 1)
-        layout.addLayout(med_row)
-
-        # Treatment response field (visible & editable)
-        response_row = QHBoxLayout()
-        response_row.addWidget(QLabel("Response:"))
-        self.td_response_text = QLineEdit()
-        self.td_response_text.setPlaceholderText("e.g. feeling better, no improvement...")
-        response_row.addWidget(self.td_response_text, 1)
-        layout.addLayout(response_row)
-
-        # Side effects field (visible & editable)
-        se_row = QHBoxLayout()
-        se_row.addWidget(QLabel("Side Effects:"))
-        self.td_side_effects_text = QLineEdit("No side effects reported")
-        se_row.addWidget(self.td_side_effects_text, 1)
-        layout.addLayout(se_row)
-
-        # Diagnosis checkboxes + isolated display
-        dx_row = QHBoxLayout()
-        dx_row.addWidget(QLabel("Dx:"))
-        self.dx_td_cb = QCheckBox("Testosterone Deficiency")
-        self.dx_ed_cb = QCheckBox("ED")
-        self.dx_td_cb.stateChanged.connect(self.on_dx_checkbox)
-        self.dx_ed_cb.stateChanged.connect(self.on_dx_checkbox)
-        dx_row.addWidget(self.dx_td_cb)
-        dx_row.addWidget(self.dx_ed_cb)
-        dx_row.addStretch()
-        layout.addLayout(dx_row)
-
-        # PMH selector
-        pmh_row = QHBoxLayout()
-        pmh_btn = QPushButton("Select PMH...")
-        pmh_btn.clicked.connect(self.open_pmh_dialog)
-        self.pmh_summary = QLabel("Current: none (noncontributory)")
-        pmh_row.addWidget(pmh_btn)
-        pmh_row.addWidget(self.pmh_summary, 1)
-        layout.addLayout(pmh_row)
-
-        # Template buttons
-        btn_row = QHBoxLayout()
-        for btn_cfg in TEMPLATE_BUTTONS:
-            b = QPushButton(btn_cfg["label"])
-            if btn_cfg.get("clear_all"):
-                b.clicked.connect(lambda checked: self.clear_all())
-            elif btn_cfg.get("show_matrix"):
-                b.clicked.connect(lambda checked: self.show_clinical_matrix())
-            elif btn_cfg.get("template_name"):
-                tname = btn_cfg["template_name"]
-                if tname == "Testosterone Deficiency Follow-up":
-                    b.clicked.connect(lambda checked: self.insert_td_followup_note())
-                elif tname == "Testosterone Follow-up Labs":
-                    b.clicked.connect(lambda checked: self.insert_td_followup_labs())
-                else:
-                    b.clicked.connect(lambda checked, t=tname: self.insert_specific_template(t))
-            elif btn_cfg.get("dynamic_labs"):
-                b.clicked.connect(lambda checked: self.insert_labs_note())
-            elif btn_cfg.get("rx_note"):
-                b.clicked.connect(lambda checked: self.insert_rx_note())
-            elif btn_cfg.get("referral_note"):
-                b.clicked.connect(lambda checked: self.insert_referral_note())
-            elif btn_cfg.get("lab_message"):
-                b.clicked.connect(lambda checked: self.insert_lab_message())
-            btn_row.addWidget(b)
-        layout.addLayout(btn_row)
-
-        layout.addStretch()
-        scroll.setWidget(inner)
-        tab_layout = QVBoxLayout(tab)
-        tab_layout.setContentsMargins(0, 0, 0, 0)
-        tab_layout.addWidget(scroll)
-        self.notebook.addTab(tab, "T Deficiency")
-
     def _build_tab2_hair_loss(self):
         """Tab 2: Hair Loss"""
         tab = QWidget()
@@ -662,8 +522,8 @@ class MainWindow(QMainWindow):
         tab_layout.addWidget(scroll)
         self.notebook.addTab(tab, "Sexual Health")
 
-    def _build_tab5_dashboard(self):
-        """Tab 5: Dashboard"""
+    def _build_tab5_auto_clicker(self):
+        """Tab 5: Auto Clicker"""
         tab = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -671,18 +531,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(inner)
         layout.setSpacing(4)
 
-        layout.addWidget(QLabel("Dashboard / In-Visit Automation"))
-
-        # ── Open New Dashboard button ──
-        self.open_dashboard_btn = QPushButton("🚀  Open New Dashboard (PyQt6)")
-        self.open_dashboard_btn.setStyleSheet(
-            "QPushButton { background-color: #4fc3f7; color: #1a1a2e; "
-            "font-weight: bold; font-size: 14px; padding: 10px; "
-            "border-radius: 8px; }"
-            "QPushButton:hover { background-color: #29b6f6; }"
-        )
-        self.open_dashboard_btn.clicked.connect(self._open_new_dashboard)
-        layout.addWidget(self.open_dashboard_btn)
+        layout.addWidget(QLabel("Auto Clicker / In-Visit Automation"))
 
         # Control buttons
         self.clicker_start_btn = QPushButton("Start Autoclick: Dashboard")
@@ -724,11 +573,6 @@ class MainWindow(QMainWindow):
         self.popup_toggle = QCheckBox("Show popup on URL change")
         self.popup_toggle.stateChanged.connect(self.on_popup_toggle)
         layout.addWidget(self.popup_toggle)
-
-        # Location checking toggle (WI additional steps)
-        self.location_check_toggle = QCheckBox("Additional Location Checking (WI)")
-        self.location_check_toggle.setChecked(False)
-        layout.addWidget(self.location_check_toggle)
 
         # Settings group
         settings = QGroupBox("Settings")
@@ -774,7 +618,7 @@ class MainWindow(QMainWindow):
         tab_layout = QVBoxLayout(tab)
         tab_layout.setContentsMargins(0, 0, 0, 0)
         tab_layout.addWidget(scroll)
-        self.notebook.addTab(tab, "Dashboard")
+        self.notebook.addTab(tab, "Auto Clicker")
 
     def _build_tab6_performance_anxiety(self):
         """Tab 6: Performance Anxiety"""
@@ -939,43 +783,6 @@ class MainWindow(QMainWindow):
         tab_layout.setContentsMargins(0, 0, 0, 0)
         tab_layout.addWidget(scroll)
         self.notebook.addTab(tab, "Birth Control")
-
-    # ==================================================================
-    # New Dashboard launcher
-    # ==================================================================
-    def _open_new_dashboard(self):
-        """Open the new .ui-file-driven Dashboard as a separate window."""
-        # Reuse existing window if it's still open
-        existing = getattr(self, "_dashboard_window", None)
-        if existing is not None:
-            try:
-                if existing.isVisible():
-                    existing.raise_()
-                    existing.activateWindow()
-                    return
-            except RuntimeError:
-                # C++ object already deleted
-                pass
-
-        try:
-            from emr_assist.ui.dashboard_window import DashboardWindow
-            from emr_assist.ui.theme import DARK_THEME_QSS
-
-            app = QApplication.instance()
-            if app:
-                app.setStyleSheet(DARK_THEME_QSS)
-
-            self._dashboard_window = DashboardWindow()
-            self._dashboard_window.show()
-            self._dashboard_window.raise_()
-            self._dashboard_window.activateWindow()
-        except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "Dashboard Error",
-                f"Failed to open new dashboard:\n\n{exc}",
-            )
-
     # ==================================================================
     # Browser grabber helpers
     # ==================================================================
@@ -997,10 +804,6 @@ class MainWindow(QMainWindow):
             "photoaging": "Photoaging",
             "performance anxiety": "Performance Anxiety",
             "birth control": "Birth Control",
-            "testosterone": "T Deficiency",
-            "td": "T Deficiency",
-            "t deficiency": "T Deficiency",
-            "ed": "T Deficiency",
             "emr dashboard": "EMR Dashboard",
         }
         low = raw.strip().lower()
@@ -1086,11 +889,6 @@ class MainWindow(QMainWindow):
     def refresh_patient_location_async(self) -> None:
         if self._location_worker and self._location_worker.is_alive():
             return
-        # Read toggle state on main thread before spawning worker
-        skip_wi = (
-            not getattr(self, "location_check_toggle", None)
-            or not self.location_check_toggle.isChecked()
-        )
         def worker():
             try:
                 grabber = BrowserEMRGrabber()
@@ -1102,9 +900,7 @@ class MainWindow(QMainWindow):
                 if not grabber.connect_to_chrome():
                     print("Location refresh error: could not attach to Chrome")
                     return
-                summary = grabber.fetch_patient_location_summary(
-                    debug_print=True, skip_wi_detail=skip_wi
-                )
+                summary = grabber.fetch_patient_location_summary(debug_print=True)
                 print(f"[PATIENT LOCATION REFRESH] {summary}")
                 _on_main(lambda: self._update_patient_location_label(summary))
             except Exception as exc:
@@ -1131,7 +927,7 @@ class MainWindow(QMainWindow):
             return False
         target_tab = VISIT_TAB_INDICES.get(canonical)
         if canonical == "EMR Dashboard":
-            target_tab = DASHBOARD_TAB_INDEX
+            target_tab = AUTO_CLICKER_TAB_INDEX
         if target_tab is None:
             return False
         def apply_switch():
@@ -1166,8 +962,6 @@ class MainWindow(QMainWindow):
                     self.grab_performance_anxiety()
                 elif canonical == "Birth Control":
                     self.grab_birth_control()
-                else:
-                    self.grab_all_labs()
             except Exception as exc:
                 print(f"[CDP MONITOR] Auto grab error for {canonical}: {exc}")
         _on_main(lambda: QTimer.singleShot(AUTO_GRAB_DELAY_MS, dispatch))
@@ -1175,106 +969,6 @@ class MainWindow(QMainWindow):
     # ==================================================================
     # Grab methods
     # ==================================================================
-    def grab_all_labs(self):
-        """Grab all lab values from EMR page."""
-        finished = [False]
-        def do_grab():
-            original = ""
-            try:
-                try:
-                    original = pyperclip.paste()
-                except Exception:
-                    original = ""
-                pyperclip.copy("CLEARED_BY_METHOD_2")
-                time.sleep(0.3)
-                sw, sh = pyautogui.size()
-                cx, cy = sw // 2, sh // 2
-                pyautogui.click(cx, cy)
-                time.sleep(0.5)
-                pyautogui.hotkey("ctrl", "a")
-                time.sleep(0.5)
-                pyautogui.hotkey("ctrl", "c")
-                time.sleep(0.8)
-                new_content = pyperclip.paste()
-                if not (new_content and new_content != "CLEARED_BY_METHOD_2" and new_content != original and len(new_content) > 50):
-                    try:
-                        g = BrowserEMRGrabber()
-                        if g.connect_to_chrome():
-                            fb = g._get_page_text() or ""
-                            if len(fb) > 50:
-                                new_content = fb
-                    except Exception:
-                        pass
-                if new_content and new_content != "CLEARED_BY_METHOD_2" and new_content != original and len(new_content) > 50:
-                    clear_text_selection(self)
-                    for lab_name, lab_config in LABS_CONFIG.items():
-                        result = extract_lab_value_simple(lab_config, new_content)
-                        var = lab_config["var"]
-                        grabbed_vars[var] = result["raw_value"] if result["found"] else ""
-                    tdcs_value[0] = str(parse_tdcs_score(new_content))
-                    tdcs_c = parse_tdcsc_score(new_content)
-                    tdcs_c_value[0] = str(tdcs_c) if tdcs_c is not None else "\u2014"
-                    ed_status = parse_ed_status(new_content)
-                    ed_value[0] = "He reports symptoms consistent with ED." if ed_status == "Yes" else "He denies symptoms of ED." if ed_status == "No" else "\u2014"
-                    td_satisfaction_value[0] = parse_treatment_satisfaction(new_content)
-                    td_side_effects_value[0] = parse_side_effects_response(new_content)
-                    try:
-                        if detect_td_diagnosis(new_content):
-                            diagnoses[0] = "Testosterone Deficiency"
-                            _on_main(lambda: self.dx_td_cb.setChecked(True))
-                    except Exception:
-                        pass
-                    detected_med = detect_medication_from_text(new_content)
-                    if detected_med:
-                        medication_value[0] = detected_med
-                    _on_main(self._update_ui_after_labs_grab)
-                    emit_emr_bridge({"context": "labs"})
-                    try:
-                        pyperclip.copy(original)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        pyperclip.copy(original)
-                    except Exception:
-                        pass
-                    _on_main(lambda: QMessageBox.warning(self, "Error", "Failed to grab text from EMR."))
-                    _on_main(lambda: (self.show(), self.raise_(), self.activateWindow()))
-            except Exception as e:
-                try:
-                    pyperclip.copy(original)
-                except Exception:
-                    pass
-                _on_main(lambda: QMessageBox.critical(self, "Error", f"Error during grab: {e}"))
-                _on_main(lambda: (self.show(), self.raise_(), self.activateWindow()))
-            finally:
-                finished[0] = True
-        self.hide()
-        time.sleep(0.1)
-        def _watchdog():
-            if not finished[0]:
-                _on_main(lambda: (self.show(), self.raise_(), self.activateWindow()))
-                _on_main(lambda: QMessageBox.warning(self, "Timeout", "Grab took too long."))
-        timer = threading.Timer(7.0, _watchdog)
-        timer.daemon = True
-        timer.start()
-        threading.Thread(target=do_grab, daemon=True).start()
-
-    def _update_ui_after_labs_grab(self):
-        for lab_name, lab_config in LABS_CONFIG.items():
-            var = lab_config["var"]
-            if var in self.text_ctrls:
-                self.text_ctrls[var].setText(grabbed_vars[var])
-        self.tdcs_text.setText(str(tdcs_value[0]))
-        self.tdcs_c_text.setText(str(tdcs_c_value[0]))
-        self.ed_text.setText("Yes" if "symptoms consistent with ED" in ed_value[0] else "No" if "denies symptoms of ED" in ed_value[0] else "\u2014")
-        self.td_med_text.setText(medication_value[0])
-        self.td_response_text.setText(td_satisfaction_value[0] if td_satisfaction_value[0] != "\u2014" else "")
-        self.td_side_effects_text.setText(td_side_effects_value[0])
-        self.show()
-        self.raise_()
-        self.activateWindow()
-
     def grab_hair(self):
         """Grab hair loss data from EMR."""
         self.hide()
@@ -1341,64 +1035,8 @@ class MainWindow(QMainWindow):
                                 if freq_candidate and frequency_hint_re.search(freq_candidate):
                                     treatment_frequency_hint = freq_candidate
                         break
-                # HSX symptoms
-                hsx_symptoms = []
-                specific_symptoms = [
-                    r'general thinning or shedding', r'thinning at temples',
-                    r'thinning at the hairline', r'thinning on the top of the head',
-                    r'bald patches, smooth and hairless not at the top of the head',
-                    r'redness and irritation found at sites of hair loss',
-                    r"i'll take a photo of my head instead"
-                ]
-                for line in lines:
-                    line_clean = line.strip()
-                    if line_clean and not line_clean.startswith('Patient selected'):
-                        for pattern in specific_symptoms:
-                            m = re.search(pattern, line_clean, re.IGNORECASE)
-                            if m and m.group(0) not in hsx_symptoms:
-                                hsx_symptoms.append(m.group(0))
-                hsx = ', '.join(hsx_symptoms)
-                # Med extraction
-                def find_next_med_like(start_idx, lookahead=8):
-                    for k in range(start_idx, min(start_idx + lookahead, len(lines))):
-                        candidate = lines[k].strip()
-                        if not candidate: continue
-                        if header_pattern.match(candidate): continue
-                        if med_keywords_re.search(candidate) or '%' in candidate:
-                            return candidate
-                        if len(candidate.split()) >= 3 and re.search(r'[A-Za-z0-9]', candidate):
-                            return candidate
-                    return None
-                for i, ln in enumerate(lines):
-                    if treatment_header_re.search(ln):
-                        candidate = find_next_med_like(i + 1, 8)
-                        if candidate:
-                            med = candidate.strip().strip('*').strip()
-                        break
-                if not med:
-                    for i, ln in enumerate(lines):
-                        if re.search(r'^(treatment|medication|current treatment|meds)[:\-\s]', ln, re.IGNORECASE):
-                            candidate = find_next_med_like(i + 1, 6)
-                            if candidate:
-                                med = candidate.strip().strip('*').strip()
-                            break
-                if not med:
-                    for ln in lines:
-                        if re.search(r'finasteride|minoxidil|dutasteride|spironolactone|topical', ln, re.IGNORECASE):
-                            med = ln; break
-                if treatment_line:
-                    med = treatment_line.strip().strip('*').strip()
-                if med and header_pattern.search(med):
-                    for k in range(lines.index(med) + 1, len(lines)):
-                        if not header_pattern.search(lines[k]):
-                            med = lines[k]; break
-                append_daily = True
-                if med and frequency_hint_re.search(med):
-                    append_daily = False
-                if append_daily and treatment_frequency_hint and frequency_hint_re.search(treatment_frequency_hint):
-                    append_daily = False
-                if append_daily and med:
-                    med = med.rstrip(' .') + ' daily'
+                hsx = extract_hair_symptoms_from_text(new_content)
+                med = extract_hair_medication_from_text(new_content)
                 # Response
                 for i, ln in enumerate(lines):
                     if re.search(r'how has your treatment affected your hair loss', ln, re.IGNORECASE):
@@ -1485,9 +1123,8 @@ class MainWindow(QMainWindow):
                 if not retinoid_history:
                     for ln in lines:
                         if re.search(r'over-the-counter.*product|men.*skin.*cream|skincare', ln, re.IGNORECASE):
-                            retinoid_history = "Has used OTC skincare products"; break
-                if med and not re.search(r'\b(daily|bi-monthly|monthly|weekly)\b', med, re.IGNORECASE):
-                    med = med.rstrip(' .') + ' daily'
+                            retinoid_history = "Has used OTC skincare products"
+                            break
                 _on_main(lambda: self.photoaging_med_text.setText(med))
                 _on_main(lambda: self.photoaging_goals_text.setText(skin_goals))
                 _on_main(lambda: self.photoaging_retinoid_text.setText(retinoid_history))
@@ -1645,7 +1282,7 @@ class MainWindow(QMainWindow):
                     _on_main(lambda: self.sexual_health_hair_sxx_text.setText(hair_sxx))
                     grabbed_vars['hair_loss_location'] = hair_loc
                     grabbed_vars['hair_loss_additional_sxx'] = hair_sxx
-                    if med and ('finasteride' in med.lower() or 'minoxidil' in med.lower()):
+                    if medication_implies_hair_loss(med):
                         if 'Hair Loss' not in detected_diagnoses:
                             detected_diagnoses.append('Hair Loss')
                     self._apply_sexual_health_diagnoses(detected_diagnoses)
@@ -1664,7 +1301,7 @@ class MainWindow(QMainWindow):
         threading.Thread(target=do_grab, daemon=True).start()
 
     def _normalize_sexual_health_bp(self, bp_value: Optional[str]) -> str:
-        text = (bp_value or '').strip()
+        text = normalize_blood_pressure_value(bp_value)
         if not text:
             return 'not required'
         if text.lower() in ('nr', 'n/r', 'not required'):
@@ -1680,6 +1317,11 @@ class MainWindow(QMainWindow):
             for c in canonical_order:
                 if low == c.lower() and c not in normalized:
                     normalized.append(c); break
+        normalized = [
+            dx
+            for dx in normalized
+            if dx != "Hair Loss" or self._should_autoselect_hair_loss_from_medication()
+        ]
         def _apply():
             try:
                 self._suppress_sexual_health_dx_event = True
@@ -1695,7 +1337,6 @@ class MainWindow(QMainWindow):
         _on_main(_apply)
 
     def _should_autoselect_hair_loss_from_medication(self) -> bool:
-        kw = ("finasteride", "minoxidil")
         candidates = []
         try:
             candidates.append(self.sexual_health_med_text.text())
@@ -1703,7 +1344,7 @@ class MainWindow(QMainWindow):
             pass
         candidates.append(medication_value[0])
         for text in candidates:
-            if text and any(k in text.lower() for k in kw):
+            if allow_hair_loss_diagnosis("Sexual Health", text):
                 return True
         return False
 
@@ -1904,7 +1545,14 @@ class MainWindow(QMainWindow):
             parts.append("PE")
         if self.sexual_health_dx_pe_like.isChecked():
             parts.append("PE-like ejaculatory dysfunction")
-        if self.sexual_health_dx_hair_loss.isChecked():
+        med_text = ""
+        try:
+            med_text = self.sexual_health_med_text.text()
+        except Exception:
+            pass
+        if self.sexual_health_dx_hair_loss.isChecked() and allow_hair_loss_diagnosis(
+            "Sexual Health", med_text
+        ):
             parts.append("Hair Loss")
         return ", ".join(parts)
 
@@ -2019,232 +1667,13 @@ class MainWindow(QMainWindow):
             type_template_text(tpl)
             QTimer.singleShot(500, self.show)
 
-    def _get_td_diagnoses_text(self) -> str:
-        """Build T Deficiency diagnosis string from T-tab checkboxes only."""
-        parts = []
-        if self.dx_td_cb.isChecked():
-            parts.append("Testosterone Deficiency")
-        if self.dx_ed_cb.isChecked():
-            parts.append("ED")
-        return ", ".join(parts)
-
-    def _get_td_ed_status_sentence(self) -> str:
-        """Convert the ED field display value to the full sentence for templates."""
-        ed_val = self.ed_text.text().strip()
-        if ed_val == "Yes":
-            return "He reports symptoms consistent with ED."
-        elif ed_val == "No":
-            return "He denies symptoms of ED."
-        return "\u2014"
-
-    def _build_lab_values_formatted(self) -> str:
-        """Build formatted lab values string from T-tab widgets."""
-        lines = []
-        for lab_name, lab_config in LABS_CONFIG.items():
-            var_name = lab_config["var"]
-            ctrl = self.text_ctrls.get(var_name)
-            value = ctrl.text().strip() if ctrl else ""
-            if value:
-                suffix = ""
-                high_cb = self.check_ctrls.get(var_name, (None, None))[0]
-                low_cb = self.check_ctrls.get(var_name, (None, None))[1]
-                if high_cb and high_cb.isChecked():
-                    suffix = " (high)"
-                elif low_cb and low_cb.isChecked():
-                    suffix = " (low)"
-                lines.append(f"{lab_name}: {value} {lab_config['unit']}{suffix}")
-        return "\n".join(lines) if lines else "(none grabbed)"
-
-    def insert_td_followup_note(self):
-        """Insert Testosterone Deficiency Follow-up template with variable substitution."""
-        templates = load_templates()
-        tpl = templates.get("Testosterone Deficiency Follow-up")
-        if tpl:
-            try:
-                text = tpl.format(
-                    response=self.td_response_text.text().strip(),
-                    side_effects=self.td_side_effects_text.text().strip(),
-                    tdcs_c=self.tdcs_c_text.text().strip(),
-                    total_testosterone=self.text_ctrls.get('total_testosterone', QLineEdit()).text().strip(),
-                    psa=self.text_ctrls.get('psa', QLineEdit()).text().strip(),
-                    estradiol=self.text_ctrls.get('estradiol', QLineEdit()).text().strip(),
-                    hematocrit=self.text_ctrls.get('hematocrit', QLineEdit()).text().strip(),
-                    diagnoses=self._get_td_diagnoses_text(),
-                    medication=self.td_med_text.text().strip(),
-                )
-            except KeyError as e:
-                QMessageBox.warning(self, "Template Error", f"Missing variable: {e}")
-                return
-        else:
-            text = "Testosterone Deficiency Follow-up template missing"
-        self.hide()
-        time.sleep(0.15)
-        type_template_text(text)
-        QTimer.singleShot(500, self.show)
-
-    def insert_td_followup_labs(self):
-        """Insert Testosterone Follow-up Labs template with variable substitution."""
-        templates = load_templates()
-        tpl = templates.get("Testosterone Follow-up Labs")
-        if tpl:
-            try:
-                text = tpl.format(
-                    total_testosterone=self.text_ctrls.get('total_testosterone', QLineEdit()).text().strip(),
-                    estradiol=self.text_ctrls.get('estradiol', QLineEdit()).text().strip(),
-                    hematocrit=self.text_ctrls.get('hematocrit', QLineEdit()).text().strip(),
-                    psa=self.text_ctrls.get('psa', QLineEdit()).text().strip(),
-                    medication=self.td_med_text.text().strip(),
-                )
-            except KeyError as e:
-                QMessageBox.warning(self, "Template Error", f"Missing variable: {e}")
-                return
-        else:
-            text = "Testosterone Follow-up Labs template missing"
-        self.hide()
-        time.sleep(0.15)
-        type_template_text(text)
-        QTimer.singleShot(500, self.show)
-
-    def insert_labs_note(self):
-        """Insert formatted lab values."""
-        templates = load_templates()
-        tpl = templates.get("Insert Labs")
-        if tpl:
-            text = tpl.format(lab_values_formatted=self._build_lab_values_formatted())
-        else:
-            text = "Labs: (template missing)"
-        self.hide()
-        time.sleep(0.15)
-        type_template_text(text)
-        QTimer.singleShot(500, self.show)
-
-    def insert_rx_note(self):
-        """Insert Rx Note template with lab values and diagnosis info."""
-        templates = load_templates()
-        tpl = templates.get("Rx Note")
-        if tpl:
-            text = tpl.format(
-                tdcs=self.tdcs_text.text().strip(),
-                tdcs_c=self.tdcs_c_text.text().strip(),
-                ed_status=self._get_td_ed_status_sentence(),
-                pmh=build_pmh_text(),
-                lab_values_formatted=self._build_lab_values_formatted(),
-                diagnoses=self._get_td_diagnoses_text(),
-                medication=self.td_med_text.text().strip(),
-            )
-        else:
-            text = "Rx Note template missing"
-        self.hide()
-        time.sleep(0.15)
-        type_template_text(text)
-        QTimer.singleShot(500, self.show)
-
-    def insert_referral_note(self):
-        """Insert Referral Note template."""
-        templates = load_templates()
-        tpl = templates.get("Referral Note") or templates.get("Referral note")
-        if tpl:
-            try:
-                text = tpl.format(
-                    tdcs=self.tdcs_text.text().strip(),
-                    ed_status=self._get_td_ed_status_sentence(),
-                    pmh=build_pmh_text(),
-                    lab_values_formatted=self._build_lab_values_formatted(),
-                    diagnoses=self._get_td_diagnoses_text(),
-                    medication=self.td_med_text.text().strip(),
-                )
-            except KeyError as e:
-                QMessageBox.warning(self, "Template Error", f"Missing variable: {e}")
-                return
-        else:
-            text = "Referral Note template missing"
-        self.hide()
-        time.sleep(0.15)
-        type_template_text(text)
-        QTimer.singleShot(500, self.show)
-
-    def insert_lab_message(self):
-        """Insert Lab Message template."""
-        templates = load_templates()
-        tpl = templates.get("Lab Message")
-        if tpl:
-            text = tpl.format(
-                total_testosterone=self.text_ctrls.get('total_testosterone', QLineEdit()).text().strip(),
-                free_testosterone=self.text_ctrls.get('free_testosterone', QLineEdit()).text().strip(),
-                medication=self.td_med_text.text().strip(),
-            )
-        else:
-            text = "Lab Message template missing"
-        self.hide()
-        time.sleep(0.15)
-        type_template_text(text)
-        QTimer.singleShot(500, self.show)
-
     # ==================================================================
     # UI event handlers for state management
     # ==================================================================
-    def on_dx_checkbox(self, state):
-        # T-tab diagnosis is now read directly from checkboxes via
-        # _get_td_diagnoses_text() at insert time.  We still update
-        # the shared diagnoses[0] for backwards compat with EMR bridge,
-        # but template inserts no longer read it.
-        parts = []
-        if self.dx_td_cb.isChecked():
-            parts.append("Testosterone Deficiency")
-        if self.dx_ed_cb.isChecked():
-            parts.append("ED")
-        diagnoses[0] = ", ".join(parts)
-
     def on_sexual_health_dx_checkbox(self, state):
         if getattr(self, '_suppress_sexual_health_dx_event', False):
             return
         diagnoses[0] = self._get_sh_dx_text()
-
-    def open_pmh_dialog(self):
-        from .dialogs.pmh_dialog import PMHDialog
-        dlg = PMHDialog(PMH_OPTIONS, pmh_selected, parent=self)
-        if dlg.exec():
-            pmh_selected.clear()
-            pmh_selected.extend(dlg.get_selected())
-            self.update_pmh_summary()
-
-    def update_pmh_summary(self):
-        if pmh_selected:
-            self.pmh_summary.setText(", ".join(pmh_selected))
-        else:
-            self.pmh_summary.setText("None selected")
-
-    def clear_all(self):
-        """Clear all T Deficiency tab fields only."""
-        for var_name, ctrl in self.text_ctrls.items():
-            ctrl.setText("")
-            grabbed_vars[var_name] = ""
-        self.tdcs_text.setText("")
-        self.tdcs_c_text.setText("")
-        self.ed_text.setText("")
-        tdcs_value[0] = ""
-        tdcs_c_value[0] = ""
-        ed_value[0] = ""
-        td_satisfaction_value[0] = ""
-        td_side_effects_value[0] = ""
-        self.td_med_text.setText("")
-        self.td_response_text.setText("")
-        self.td_side_effects_text.setText("No side effects reported")
-        medication_value[0] = ""
-        self.dx_td_cb.setChecked(False)
-        self.dx_ed_cb.setChecked(False)
-        diagnoses[0] = ""
-        pmh_selected.clear()
-        self.update_pmh_summary()
-
-    def show_clinical_matrix(self):
-        templates = load_templates()
-        tpl = templates.get("Clinical Matrix")
-        if tpl:
-            self.hide()
-            time.sleep(0.15)
-            type_template_text(tpl)
-            QTimer.singleShot(500, self.show)
 
     def update_ui_after_grab(self, data: dict):
         """Update all UI fields from a data dictionary."""
@@ -2304,8 +1733,6 @@ class MainWindow(QMainWindow):
                     canonical = "Performance Anxiety"
                 elif 'birth' in url.lower() or 'contracepti' in url.lower():
                     canonical = "Birth Control"
-                elif 'testosterone' in url.lower() or 'trt' in url.lower():
-                    canonical = "T Deficiency"
                 if not canonical:
                     for label, idx in VISIT_TAB_INDICES.items():
                         if label.lower() in text.lower():
@@ -2320,16 +1747,14 @@ class MainWindow(QMainWindow):
         """Grab data appropriate for the current tab."""
         tab = self.notebook.currentIndex()
         if tab == 0:
-            self.grab_all_labs()
-        elif tab == 1:
             self.grab_hair()
-        elif tab == 2:
+        elif tab == 1:
             self.grab_photoaging()
-        elif tab == 3:
+        elif tab == 2:
             self.grab_sexual_health()
-        elif tab == 5:
+        elif tab == 4:
             self.grab_performance_anxiety()
-        elif tab == 6:
+        elif tab == 5:
             self.grab_birth_control()
 
     def background_emr_grab(self):
@@ -2742,8 +2167,6 @@ class MainWindow(QMainWindow):
                 ("photoaging", "Photoaging"),
                 ("performance anxiety", "Performance Anxiety"),
                 ("birth control", "Birth Control"),
-                ("testosterone", "T Deficiency"),
-                ("trt", "T Deficiency"),
                 ("dashboard", "EMR Dashboard"),
             ]
             for pattern, canonical in patterns:
@@ -2757,17 +2180,7 @@ class MainWindow(QMainWindow):
     # Hotkey system (keyboard module only)
     # ==================================================================
     def setup_global_hotkeys(self):
-        try:
-            keyboard.unhook_all()
-        except Exception:
-            pass
-        try:
-            keyboard.add_hotkey('ctrl+shift+g', self.trigger_appropriate_grab)
-            keyboard.add_hotkey('ctrl+shift+h', self.toggle_gui_visibility)
-            keyboard.add_hotkey('ctrl+shift+n', self.quick_next_task)
-            self._register_tab_specific_hotkeys()
-        except Exception as e:
-            print(f"Hotkey setup error: {e}")
+        print("Alternate PyQt window hotkeys disabled")
 
     def trigger_appropriate_grab(self):
         _on_main(self._do_appropriate_grab)
@@ -2775,16 +2188,14 @@ class MainWindow(QMainWindow):
     def _do_appropriate_grab(self):
         tab = self.notebook.currentIndex()
         if tab == 0:
-            self.grab_all_labs()
-        elif tab == 1:
             self.grab_hair()
-        elif tab == 2:
+        elif tab == 1:
             self.grab_photoaging()
-        elif tab == 3:
+        elif tab == 2:
             self.grab_sexual_health()
-        elif tab == 5:
+        elif tab == 4:
             self.grab_performance_anxiety()
-        elif tab == 6:
+        elif tab == 5:
             self.grab_birth_control()
 
     def _on_tab_changed(self, index: int):
@@ -2794,12 +2205,10 @@ class MainWindow(QMainWindow):
         tab = self.notebook.currentIndex()
         self._clear_tab_hotkeys()
         if tab == 0:
-            self._register_tab1_hotkeys()
-        elif tab == 1:
             self._register_tab2_hotkeys()
-        elif tab == 3:
+        elif tab == 2:
             self._register_tab4_hotkeys()
-        elif tab == 6:
+        elif tab == 5:
             self._register_tab7_hotkeys()
 
     def _clear_tab_hotkeys(self):
@@ -2811,17 +2220,6 @@ class MainWindow(QMainWindow):
                 keyboard.remove_hotkey(hk)
             except (KeyError, ValueError):
                 pass
-
-    def _register_tab1_hotkeys(self):
-        try:
-            keyboard.add_hotkey('ctrl+shift+1', lambda: _on_main(self.insert_labs_note))
-            keyboard.add_hotkey('ctrl+shift+2', lambda: _on_main(self.insert_rx_note))
-            keyboard.add_hotkey('ctrl+shift+3', lambda: _on_main(self.insert_referral_note))
-            keyboard.add_hotkey('ctrl+shift+4', lambda: _on_main(self.insert_lab_message))
-            keyboard.add_hotkey('ctrl+shift+5', lambda: _on_main(self.insert_td_followup_labs))
-            keyboard.add_hotkey('ctrl+shift+6', lambda: _on_main(self.insert_td_followup_note))
-        except Exception as e:
-            print(f"Tab1 hotkey error: {e}")
 
     def _register_tab2_hotkeys(self):
         try:
@@ -2859,8 +2257,6 @@ class MainWindow(QMainWindow):
         _on_main(self.grab_hair)
     def _trigger_bc_grab(self):
         _on_main(self.grab_birth_control)
-    def _trigger_td_grab(self):
-        _on_main(self.grab_all_labs)
 
     # ==================================================================
     # Custom CDP hotkeys
@@ -2875,25 +2271,7 @@ class MainWindow(QMainWindow):
 
     def _register_custom_cdp_hotkeys(self, hotkey_map: Optional[Dict[str, str]] = None):
         self._clear_custom_cdp_hotkeys()
-        if hotkey_map is None:
-            # Use class-level CUSTOM_CDP_HOTKEYS config
-            for entry in self.CUSTOM_CDP_HOTKEYS:
-                hk = entry.get("hotkey")
-                css_list = entry.get("css", [])
-                if not hk or not css_list:
-                    continue
-                try:
-                    keyboard.add_hotkey(hk, lambda selectors=css_list: self._execute_custom_cdp_click_chain(selectors))
-                    self._custom_cdp_hotkeys.append(hk)
-                except Exception as e:
-                    print(f"Custom CDP hotkey '{hk}' error: {e}")
-            return
-        for hk, selector in hotkey_map.items():
-            try:
-                keyboard.add_hotkey(hk, lambda s=selector: self._execute_custom_cdp_click(s))
-                self._custom_cdp_hotkeys.append(hk)
-            except Exception as e:
-                print(f"Custom CDP hotkey '{hk}' error: {e}")
+        print("Alternate PyQt custom click hotkeys disabled")
 
     def _execute_custom_cdp_click_chain(self, selectors: List[str]):
         """Try multiple CSS selectors in order until one succeeds."""

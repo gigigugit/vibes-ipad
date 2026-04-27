@@ -84,12 +84,6 @@ CDP_VISIT_TYPE_KEYWORDS = [
     ("premature ejaculation", "Sexual Health"),
     ("birth control", "Birth Control"),
     ("contraception", "Birth Control"),
-    ("testosterone", "Testosterone"),
-    ("t deficiency", "T Deficiency"),
-    ("testosterone deficiency", "T Deficiency"),
-    ("low t", "Testosterone"),
-    ("hypogonadism", "Testosterone"),
-    ("androgen deficiency", "T Deficiency"),
     ("hair loss", "Hair Loss"),
     ("photoaging", "Photoaging"),
     ("acne", "Acne"),
@@ -104,13 +98,6 @@ VISIT_TYPE_FALLBACK_KEYWORDS = [
     ("performance anxiety", "Performance Anxiety"),
     ("sexual health", "Sexual Health"),
     ("premature ejaculation", "Sexual Health"),
-    ("testosterone deficiency", "T Deficiency"),
-    ("t deficiency", "T Deficiency"),
-    ("td/ed", "T Deficiency"),
-    ("td/ed labs", "T Deficiency"),
-    ("td labs", "T Deficiency"),
-    ("low t", "T Deficiency"),
-    ("testosterone", "T Deficiency"),
     ("hair loss", "Hair Loss"),
     ("photoaging", "Photoaging"),
     ("birth control", "Birth Control"),
@@ -217,15 +204,14 @@ _CDP_VISIT_HEADER_SCRIPT = (
 # Tab ↔ visit type mapping
 # ---------------------------------------------------------------------------
 VISIT_TAB_INDICES: Dict[str, int] = {
-    "T Deficiency": 0,
-    "Hair Loss": 1,
-    "Photoaging": 2,
-    "Sexual Health": 3,
-    "Performance Anxiety": 5,
-    "Birth Control": 6,
+    "Hair Loss": 0,
+    "Photoaging": 1,
+    "Sexual Health": 2,
+    "Performance Anxiety": 4,
+    "Birth Control": 5,
 }
 
-DASHBOARD_TAB_INDEX = 4
+AUTO_CLICKER_TAB_INDEX = 3
 
 # ---------------------------------------------------------------------------
 # Intake form selectors
@@ -248,65 +234,6 @@ GUI_HIDDEN_VISIBLE_WIDTH = 65
 
 AUTO_CLICKER_DEBUG = False
 
-# ---------------------------------------------------------------------------
-# Lab configuration
-# ---------------------------------------------------------------------------
-LABS_CONFIG: Dict[str, Dict[str, Any]] = {
-    "Total PSA": {
-        "unit": "ng/mL",
-        "normal_range": "0-4",
-        "patterns": ["Total PSA", "PSA Total", "PSA", "Prostate Specific Antigen", "PSA, Total"],
-        "var": "psa",
-    },
-    "FSH": {
-        "unit": "mIU/mL",
-        "normal_range": "1.5-12.4",
-        "patterns": ["FSH", "Follicle Stimulating Hormone", "Follicle-Stimulating Hormone", "FSH, Serum"],
-        "var": "fsh",
-    },
-    "LH": {
-        "unit": "mIU/mL",
-        "normal_range": "1.7-8.6",
-        "patterns": ["LH", "Luteinizing Hormone", "Luteinizing-Hormone", "LH, Serum"],
-        "var": "lh",
-    },
-    "Albumin": {
-        "unit": "g/dL",
-        "normal_range": "3.5-5.0",
-        "patterns": ["Albumin", "Albumin, Serum", "Serum Albumin"],
-        "var": "albumin",
-    },
-    "Estradiol": {
-        "unit": "pg/mL",
-        "normal_range": "7.6-42.6",
-        "patterns": ["Estradiol", "E2", "Estradiol, Serum", "17-Beta Estradiol"],
-        "var": "estradiol",
-    },
-    "Free Testosterone": {
-        "unit": "ng/dL",
-        "normal_range": "9.3-26.5",
-        "patterns": ["Free Testosterone", "Free T", "Testosterone Free", "Testosterone, Free", "Free Testosterone, Serum"],
-        "var": "free_testosterone",
-    },
-    "SHBG": {
-        "unit": "nmol/L",
-        "normal_range": "16.5-55.9",
-        "patterns": ["SHBG", "Sex Hormone Binding Globulin", "Sex Hormone-Binding Globulin", "SHBG, Serum"],
-        "var": "shbg",
-    },
-    "Total Testosterone": {
-        "unit": "ng/dL",
-        "normal_range": "264-916",
-        "patterns": ["Total Testosterone", "Total T", "Testosterone Total", "Testosterone", "Testosterone, Total", "Testosterone, Serum"],
-        "var": "total_testosterone",
-    },
-    "Hematocrit": {
-        "unit": "%",
-        "normal_range": "37.5-51.0",
-        "patterns": ["Hematocrit", "HCT", "Hct", "Hematocrit %"],
-        "var": "hematocrit",
-    },
-}
 
 MEDICATION_CHOICES: List[str] = [
     "Enclomiphene 12.5 mg daily",
@@ -369,19 +296,6 @@ PA_SYMPTOM_KEYWORDS: List[str] = [
     'chest', 'flushed', 'hot', 'chills',
 ]
 
-# ---------------------------------------------------------------------------
-# Template button definitions (Tab 1)
-# ---------------------------------------------------------------------------
-TEMPLATE_BUTTONS: List[Dict[str, Any]] = [
-    {"label": "Insert Labs", "dynamic_labs": True},
-    {"label": "Rx Note", "rx_note": True},
-    {"label": "Referral note", "referral_note": True},
-    {"label": "Lab Message", "lab_message": True},
-    {"label": "T Follow-up Labs", "template_name": "Testosterone Follow-up Labs"},
-    {"label": "TD Follow-up Note", "template_name": "Testosterone Deficiency Follow-up"},
-    {"label": "Clinical Matrix", "show_matrix": True},
-    {"label": "Clear All", "clear_all": True},
-]
 
 # ---------------------------------------------------------------------------
 # PMH options (Rx note)

@@ -145,14 +145,6 @@ def _all_vars_context(vars_dict: Dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 _SECTION_KEYS: Dict[str, Dict[str, list]] = {
-    "T Deficiency": {
-        "subjective": [
-            "tdcs", "tdcs_c", "ed_status", "response", "side_effects",
-        ],
-        "plan": [
-            "medication", "diagnoses", "pmh",
-        ],
-    },
     "Hair Loss": {
         "subjective": [
             "hair_med", "hsx", "hvar", "hair_loss_location",
@@ -263,63 +255,6 @@ def get_prompt(visit_type: str, vars_dict: Dict[str, str]) -> List[dict]:
     return builder(vars_dict)
 
 
-def _prompt_t_deficiency_initial(v: Dict[str, str]) -> List[dict]:
-    labs = _format_lab_context(v)
-    ctx = _format_vars_context(v, ["tdcs", "ed_status", "medication", "diagnoses", "pmh"])
-    return [
-        {"role": "system", "content": _SYSTEM_BASE},
-        {"role": "user", "content": (
-            "Write a patient-facing lab results message for a new testosterone deficiency patient. "
-            "This is the initial visit — explain the lab results and whether they qualify for treatment. "
-            "Use a warm but professional tone. Keep it under 150 words.\n\n"
-            f"Lab Results:\n{labs}\n\n"
-            f"Clinical Context:\n{ctx}\n\n"
-            "Structure: Greeting → lab summary → qualification statement → what to expect next."
-        )},
-    ]
-
-
-def _prompt_t_deficiency_followup(v: Dict[str, str]) -> List[dict]:
-    labs = _format_lab_context(v)
-    ctx = _format_vars_context(v, [
-        "tdcs_c", "response", "side_effects", "medication", "diagnoses",
-    ])
-    return [
-        {"role": "system", "content": _SYSTEM_BASE},
-        {"role": "user", "content": (
-            "Write a patient-facing follow-up message for a testosterone deficiency patient. "
-            "Compare current labs to expected ranges, address their reported response and side effects, "
-            "and provide a brief recommendation. Keep under 150 words.\n\n"
-            f"Lab Results:\n{labs}\n\n"
-            f"Clinical Context:\n{ctx}\n\n"
-            "Structure: Greeting → lab review → response acknowledgment → recommendation."
-        )},
-    ]
-
-
-def _prompt_t_deficiency_soap(v: Dict[str, str]) -> List[dict]:
-    labs = _format_lab_context(v)
-    ctx = _format_vars_context(v, [
-        "tdcs", "tdcs_c", "ed_status", "response", "side_effects",
-        "medication", "diagnoses", "pmh",
-    ])
-    return [
-        {"role": "system", "content": _SYSTEM_BASE},
-        {"role": "user", "content": (
-            "Write a clinical SOAP note for a testosterone deficiency follow-up visit. "
-            "Fill in narrative phrasing around the provided data points. "
-            "Be concise — this is a chart note, not a patient message.\n\n"
-            f"Lab Results:\n{labs}\n\n"
-            f"Clinical Context:\n{ctx}\n\n"
-            "Format:\n"
-            "S: [subjective — patient's reported response and side effects]\n"
-            "O: [objective — lab values with interpretations]\n"
-            "A: [assessment — diagnosis, clinical reasoning]\n"
-            "P: [plan — medication continuation/change, follow-up timing]"
-        )},
-    ]
-
-
 def _prompt_hair_loss(v: Dict[str, str]) -> List[dict]:
     ctx = _format_vars_context(v, [
         "hair_med", "hsx", "hvar", "hair_loss_location",
@@ -427,9 +362,6 @@ def _prompt_custom(v: Dict[str, str]) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 _PROMPT_BUILDERS = {
-    "T Deficiency - Initial": _prompt_t_deficiency_initial,
-    "T Deficiency - Follow-up": _prompt_t_deficiency_followup,
-    "T Deficiency - SOAP": _prompt_t_deficiency_soap,
     "Hair Loss": _prompt_hair_loss,
     "Sexual Health": _prompt_sexual_health,
     "Performance Anxiety": _prompt_performance_anxiety,

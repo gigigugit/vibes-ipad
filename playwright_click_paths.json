@@ -1,0 +1,74 @@
+{
+  "paths": [
+    {
+      "id": "quick_next_task",
+      "hotkey": "ctrl+shift+enter",
+      "description": "Open floating menu and click Get Next Task or Get New Visit",
+      "enabled": true,
+      "auto_hide": true,
+      "suppress": true,
+      "trigger_on_release": true,
+      "steps": [
+        {
+          "selectors": [
+            "testid:floatingActionButton",
+            "role:button|Floating Action Button",
+            "css:button[aria-label=\"Floating Action Button\"]",
+            "css:button.rounded-full.bg-black.drop-shadow-md"
+          ],
+          "timeout_ms": 4000,
+          "wait_after_ms": 800
+        },
+        {
+          "selectors": [
+            "testid:menu-item-Get Next Task",
+            "role:button|Get Next Task",
+            "text:Get Next Task",
+            "css:div[role=\"button\"][data-testid=\"menu-item-Get Next Task\"]",
+            "testid:menu-item-Get New Visit",
+            "role:button|Get New Visit",
+            "text:Get New Visit",
+            "css:div.css-1hj5o6h[data-testid=\"menu-item-Get Next Task\"]"
+          ],
+          "timeout_ms": 4000,
+          "wait_after_ms": 0
+        }
+      ]
+    },
+    {
+      "id": "quick_next_task_ctrl2",
+      "hotkey": "ctrl+2",
+      "description": "Open floating menu and click Get Next Task or Get New Visit",
+      "enabled": true,
+      "auto_hide": true,
+      "suppress": true,
+      "trigger_on_release": true,
+      "steps": [
+        {
+          "selectors": [
+            "testid:floatingActionButton",
+            "role:button|Floating Action Button",
+            "css:button[aria-label=\"Floating Action Button\"]",
+            "css:button.rounded-full.bg-black.drop-shadow-md"
+          ],
+          "timeout_ms": 4000,
+          "wait_after_ms": 800
+        },
+        {
+          "selectors": [
+            "testid:menu-item-Get Next Task",
+            "role:button|Get Next Task",
+            "text:Get Next Task",
+            "css:div[role=\"button\"][data-testid=\"menu-item-Get Next Task\"]",
+            "testid:menu-item-Get New Visit",
+            "role:button|Get New Visit",
+            "text:Get New Visit",
+            "css:div.css-1hj5o6h[data-testid=\"menu-item-Get Next Task\"]"
+          ],
+          "timeout_ms": 4000,
+          "wait_after_ms": 0
+        }
+      ]
+    }
+  ]
+}

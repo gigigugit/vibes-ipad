@@ -122,8 +122,7 @@ class BridgeReader:
             return "Unknown"
 
         # Check for visit-type-specific markers
-        if d.get("tdcs") and d.get("tdcs") != "—":
-            return "T Deficiency"
+
         if d.get("bc_med") or d.get("bc_lmp"):
             return "Birth Control"
         if d.get("pa_situations") or d.get("pa_symptoms"):
@@ -135,9 +134,5 @@ class BridgeReader:
         if d.get("photoaging_med") or d.get("photoaging_retinoid"):
             return "Photoaging"
 
-        # Check if any lab values present → likely T Deficiency
-        lab_keys = {"total_testosterone", "free_testosterone", "psa", "estradiol", "hematocrit"}
-        if any(d.get(k) and d.get(k) != "" for k in lab_keys):
-            return "T Deficiency"
 
         return "Unknown"

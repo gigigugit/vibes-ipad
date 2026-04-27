@@ -1,5 +1,7 @@
 [SH Initial]
 
+
+
 CC/HPI: {age} presents for {visit_type}
 
 Pt reports {rapidity_of_onset} onset {frequency} {ed_description} characterized by {ed_characterization}
@@ -23,6 +25,8 @@ Prescription written, follow-up per routine.
 
 [SH Follow-up]
 
+
+
 S: Reports {response_text} to treatment without side effects.
 O: BP {bp}
 A: {diagnoses}
@@ -30,10 +34,14 @@ P: {action_text} with {medication}.
 Prescription written, follow-up per routine.
 
 [SH Plan]
+
+
  Start treatment with {medication}
 Prescription written, follow-up per routine.
 
 [SH Change Cadence]
+
+
 
 S: The patient wishes to change the cadence of their prescription. No health changes or side effects are reported.
 O: BP not required
@@ -43,6 +51,8 @@ Prescription written, follow-up per routine.
 
 [SH Change Number]
 
+
+
 S: The patient wishes to change the dose number of their prescription. No health changes or side effects are reported.
 O: BP not required
 A: {diagnoses}
@@ -51,8 +61,15 @@ Prescription written, follow-up per routine.
 
 [SH Change Medication]
 
+
+
 S: The patient requests to change the medication they are taking to try to get a stronger effect. No health changes or side effects are reported.
 O: BP not required
 A: {diagnoses}
 P: Change treatment to {medication} as-needed.
 Prescription written, follow-up per routine.
+
+[SH Hair Loss blurb]
+
+He reports hair loss described as 'hair_loss_location'.
+Other scalp symptoms: 'hair_loss_additional__sxx'

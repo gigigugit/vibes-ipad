@@ -1,0 +1,47 @@
+Template files overview
+
+Where templates live
+- Template metadata (what appears in the UI lists) is stored in `template_config/*.json` (for example `template_config/hair_templates.json`).
+- The actual template text bodies are stored in `templates/templates_***.txt` (for example `templates/templates_hair.txt`).
+- `templates.txt` exists as a legacy single-file fallback; most code now prefers the per-tab files.
+
+How to add a new template (step-by-step)
+1. Open the correct JSON config for the tab under `template_config/` and add the template entry to the `templates` array. Typical fields:
+   - `name` (display name shown in dropdown)
+   - `key` or `id` (optional identifier used in code)
+   - `description` (optional short help text)
+   Example fragment:
+   {
+     "name": "New Hair Template",
+     "key": "new_hair_template",
+     "description": "Brief description shown in UI"
+   }
+
+2. Open the corresponding text file in `templates/` (e.g., `templates/templates_hair.txt`) and add the template body in the expected format. The loader expects a header line containing the template name (exact match with JSON `name`) followed by the body. Typical format used by the project:
+
+[New Hair Template]
+Template body text goes here. Use any placeholders the app supports.
+
+(If your repo uses a different delimiter/format, match the other entries in the same file.)
+
+3. Save both files and restart the app (or trigger the UI reload) so the new template appears in the dropdown and has body content.
+
+What is displayed in the UI
+- The JSON `templates` list controls what shows up in the dropdowns/menus (labels, ordering, and descriptions).
+- When a template is selected, the app looks up the template name/key and finds the matching template body in the `templates/*.txt` file.
+- If a JSON entry exists but no matching body is found, the UI may show the name but selecting it will produce an empty or missing body.
+- If a body exists in the `.txt` but there is no JSON entry, the template will typically not be listed in the UI.
+
+Tips and troubleshooting
+- Keep `name` values consistent between the JSON and the text file header — exact matches avoid lookup issues.
+- Check `input_GUI_w_fixed_autoclick_closed_loop.pyw` for `TEMPLATE_CONFIG` and loader functions if behavior is unexpected.
+- Use the per-tab JSON + text files rather than `templates.txt` for new templates.
+- If templates don't appear after edits, restart the app or inspect the `load_templates` / `load_all_templates_unified` functions for caching or merge behavior.
+
+Example
+- To add "New Hair Template":
+  - Add entry to `template_config/hair_templates.json` with `name: "New Hair Template"`.
+  - Add a section in `templates/templates_hair.txt` starting with `[New Hair Template]` then the template body.
+
+Contact
+- If you want, I can add a tiny helper script to automate adding the JSON entry and text block together.

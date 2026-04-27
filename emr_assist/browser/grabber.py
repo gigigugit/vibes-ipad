@@ -27,7 +27,12 @@ from .adapters import PlaywrightDriverAdapter, WebDriverWait, EC
 import sys as _sys
 import os as _os
 _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..', '..'))
-from grab_points import get_selector, get_selector_list
+from grab_points import (
+    get_ranked_playwright_selectors,
+    get_selector,
+    get_selector_list,
+    get_variable_selector_spec,
+)
 
 from ..core.config import (
     CDP_DEBUG_PORT,
@@ -48,6 +53,15 @@ from ..core.config import (
     dprint,
 )
 from ..core.geocoding import geocode_address, get_chippewa_falls_coords, Nominatim, geodesic
+from ..core.parsers import (
+    extract_hair_medication_from_text,
+    extract_hair_response_from_text,
+    extract_hair_symptoms_from_text,
+    extract_hair_loss_additional_sxx_from_text,
+    extract_hair_loss_location_from_text,
+    infer_medication_frequency_suffix_from_text,
+    normalize_blood_pressure_value,
+)
 
 
 class BrowserEMRGrabber:
@@ -286,9 +300,7 @@ class BrowserEMRGrabber:
             self._pw = None
             self._pw_thread_id = None
 
-    def fetch_patient_location_summary(
-        self, debug_print=True, skip_wi_detail=True
-    ) -> dict | None:
+    def fetch_patient_location_summary(self, debug_print=True) -> dict | None:
         summary: dict = {
             "state": None,
             "state_display": None,
@@ -394,7 +406,6 @@ class BrowserEMRGrabber:
             normalized = summary.get("state", None)
             if normalized in ("WI", "WISCONSIN"):
                 summary["state"] = "WI"
-            if normalized in ("WI", "WISCONSIN") and not skip_wi_detail:
                 address_row_xpath = "(//div[contains(@class,'py-3') and contains(@class,'text-xs') and contains(@class,'text-black')])[3]"
                 try:
                     edit_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button#editPatient")))
@@ -708,29 +719,21 @@ class BrowserEMRGrabber:
             dprint("🔍 Starting browser-based Sexual Health grab…")
             dprint(f"📍 Current page: {self.driver.current_url}")
 
-            # Define EMR element selectors for Sexual Health data
-            selectors = {
-                'medication_title': get_selector('sexual_health', 'medication', engine='selenium', selector_type='css') or '[data-testid="medication-title"]',
-                'medication_text': get_selector('sexual_health', 'medication_detail', engine='selenium', selector_type='css') or '[data-testid="medication-text"]',
-                'treatment_plan': get_selector('sexual_health', 'treatment_plan', engine='selenium', selector_type='css') or '[data-testid="proposedTreatmentPlan"]',
-                'current_dose': get_selector('sexual_health', 'current_dose', engine='selenium', selector_type='css') or '[data-testid="treatmentPlan"]',
-            }
-
-            # Additional selectors to try if main ones don't work
-            fallback_selectors = {
-                'medication_alt1': '.medication-name, .med-name, [class*="medication"]',
-                'medication_alt2': '[class*="dose"], [class*="dosage"]',
-                'treatment_alt': '[class*="treatment"], [class*="plan"]',
-            }
-
             extracted_data = {}
 
-            # Try to extract medication information
+            # Ranked Playwright narrow selector pilot for Sexual Health.
             t0 = time.perf_counter()
-            medication = self._extract_medication(selectors, fallback_selectors)
+            medication, medication_source, _ = self._resolve_ranked_playwright_value(
+                "sexual_health",
+                "medication",
+                "sexual_health_med",
+                lambda raw: self._extract_medication_from_text(raw) or "",
+            )
             if medication:
                 extracted_data['medication'] = medication
-                dprint(f"   ✅ Extracted medication: '{medication}' ({(time.perf_counter()-t0)*1000:.0f} ms)")
+                dprint(
+                    f"   ✅ Extracted medication: '{medication}' via {medication_source} ({(time.perf_counter()-t0)*1000:.0f} ms)"
+                )
 
             t1 = time.perf_counter()
             med_detail = self._extract_medication_detail_text()
@@ -742,27 +745,37 @@ class BrowserEMRGrabber:
             if intake_med_plain:
                 extracted_data['intake_med_name'] = intake_med_plain
 
-            # Try to extract effectiveness information (prefer fast text parsing)
             t2 = time.perf_counter()
-            # Keep text gathering fast: avoid iframe walks unless Hybrid mode is selected
-            try:
-                if USE_PLAYWRIGHT_FOR_SH:
-                    pre_text = self._get_all_text_across_frames(max_frames=4)
-                else:
-                    pre_text = self._get_page_text() or ""
-            except Exception:
-                pre_text = self._get_page_text() or ""
-            effectiveness = self._extract_effectiveness(full_text=pre_text)
+            effectiveness, effectiveness_source, _ = (
+                self._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "effectiveness",
+                    "sexual_health_effectiveness",
+                    lambda raw: self._extract_effectiveness(full_text=raw) or "",
+                )
+            )
             if effectiveness:
                 extracted_data['effectiveness'] = effectiveness
-                dprint(f"   ✅ Extracted effectiveness: '{effectiveness}' ({(time.perf_counter()-t2)*1000:.0f} ms)")
+                dprint(
+                    f"   ✅ Extracted effectiveness: '{effectiveness}' via {effectiveness_source} ({(time.perf_counter()-t2)*1000:.0f} ms)"
+                )
 
-            # Try to extract blood pressure
             t3 = time.perf_counter()
-            blood_pressure = self._extract_blood_pressure()
+            blood_pressure, blood_pressure_source, _ = (
+                self._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "blood_pressure",
+                    "sexual_health_bp",
+                    lambda raw: normalize_blood_pressure_value(raw) or "",
+                )
+            )
+            if not blood_pressure:
+                blood_pressure = "nr"
             if blood_pressure:
                 extracted_data['blood_pressure'] = blood_pressure
-                dprint(f"   ✅ Extracted blood pressure: '{blood_pressure}' ({(time.perf_counter()-t3)*1000:.0f} ms)")
+                dprint(
+                    f"   ✅ Extracted blood pressure: '{blood_pressure}' via {blood_pressure_source} ({(time.perf_counter()-t3)*1000:.0f} ms)"
+                )
 
             # Try to extract diagnoses from notes
             t4 = time.perf_counter()
@@ -780,21 +793,38 @@ class BrowserEMRGrabber:
                 extracted_data['current_med_detail'] = current_med_detail
                 dprint(f"   ✅ Current detail: '{current_med_detail}'")
 
-            # Extract hair loss data if present
             t6 = time.perf_counter()
-            hair_loss_location = self._extract_hair_loss_location()
+            hair_loss_location, hair_loss_location_source, _ = (
+                self._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "hair_loss_location",
+                    "hair_loss_location",
+                    lambda raw: extract_hair_loss_location_from_text(raw) or "",
+                )
+            )
             if hair_loss_location:
                 extracted_data['hair_loss_location'] = hair_loss_location
-                dprint(f"   ✅ Extracted hair loss location: '{hair_loss_location}' ({(time.perf_counter()-t6)*1000:.0f} ms)")
+                dprint(
+                    f"   ✅ Extracted hair loss location: '{hair_loss_location}' via {hair_loss_location_source} ({(time.perf_counter()-t6)*1000:.0f} ms)"
+                )
 
             t7 = time.perf_counter()
-            hair_loss_additional_sxx = self._extract_hair_loss_additional_sxx()
+            hair_loss_additional_sxx, hair_loss_additional_sxx_source, _ = (
+                self._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "hair_loss_additional_sxx",
+                    "hair_loss_additional_sxx",
+                    lambda raw: extract_hair_loss_additional_sxx_from_text(raw) or "",
+                )
+            )
             if hair_loss_additional_sxx:
                 extracted_data['hair_loss_additional_sxx'] = hair_loss_additional_sxx
-                dprint(f"   ✅ Extracted hair loss additional sxx: '{hair_loss_additional_sxx}' ({(time.perf_counter()-t7)*1000:.0f} ms)")
+                dprint(
+                    f"   ✅ Extracted hair loss additional sxx: '{hair_loss_additional_sxx}' via {hair_loss_additional_sxx_source} ({(time.perf_counter()-t7)*1000:.0f} ms)"
+                )
 
             # Get all text content as fallback for parsing
-            full_text = self._get_page_text()
+            full_text = self._get_sh_wide_fallback_text()
             if full_text:
                 extracted_data['full_text'] = full_text
 
@@ -803,6 +833,80 @@ class BrowserEMRGrabber:
 
         except Exception as e:
             print(f"❌ Browser grab error: {e}")
+            return None
+
+    def grab_hair_loss_data(self) -> Optional[Dict[str, Any]]:
+        """Browser-driven Hair Loss extraction using ranked Playwright selectors first."""
+        if not self.driver:
+            if not self.connect_to_chrome():
+                return None
+
+        try:
+            if not self._ensure_emr_tab():
+                print(
+                    f"❌ No EMR tab found. Please open https://emr.forhims.com in your browser (debugging port {CDP_DEBUG_PORT}) and try again."
+                )
+                print(f"📍 Current page: {self.driver.current_url}")
+                return None
+
+            self._reset_text_caches()
+
+            overall_start = time.perf_counter()
+            dprint("🔍 Starting browser-based Hair Loss grab…")
+            dprint(f"📍 Current page: {self.driver.current_url}")
+
+            extracted_data: Dict[str, Any] = {}
+
+            t0 = time.perf_counter()
+            medication, medication_source, _ = self._resolve_ranked_playwright_value(
+                "hair_loss",
+                "medication",
+                "hair_medication",
+                lambda raw: extract_hair_medication_from_text(raw) or "",
+            )
+            if medication:
+                extracted_data["medication"] = medication
+                dprint(
+                    f"   ✅ Extracted medication: '{medication}' via {medication_source} ({(time.perf_counter()-t0)*1000:.0f} ms)"
+                )
+
+            t1 = time.perf_counter()
+            response, response_source, _ = self._resolve_ranked_playwright_value(
+                "hair_loss",
+                "response",
+                "hair_response",
+                lambda raw: extract_hair_response_from_text(raw) or "",
+            )
+            if response:
+                extracted_data["response"] = response
+                dprint(
+                    f"   ✅ Extracted response: '{response}' via {response_source} ({(time.perf_counter()-t1)*1000:.0f} ms)"
+                )
+
+            t2 = time.perf_counter()
+            symptoms, symptoms_source, _ = self._resolve_ranked_playwright_value(
+                "hair_loss",
+                "symptoms",
+                "hair_symptoms",
+                lambda raw: extract_hair_symptoms_from_text(raw) or "",
+            )
+            if symptoms:
+                extracted_data["symptoms"] = symptoms
+                dprint(
+                    f"   ✅ Extracted symptoms: '{symptoms}' via {symptoms_source} ({(time.perf_counter()-t2)*1000:.0f} ms)"
+                )
+
+            full_text = self._get_sh_wide_fallback_text()
+            if full_text:
+                extracted_data["full_text"] = full_text
+
+            dprint(
+                f"✅ Hair Loss browser grab completed in {(time.perf_counter()-overall_start)*1000:.0f} ms. Found {len(extracted_data)} data types."
+            )
+            return extracted_data
+
+        except Exception as e:
+            print(f"❌ Hair Loss browser grab error: {e}")
             return None
 
     def _parse_intake_timestamp(self, text: str) -> Optional[datetime]:
@@ -911,60 +1015,41 @@ class BrowserEMRGrabber:
             if full_text:
                 # Normalize NBSP and build lines
                 norm_text = full_text.replace('\xa0', ' ')
-                lines = [line.strip() for line in norm_text.split('\n') if line.strip()]
-                # Regex detector for doses per month
-                doses_re = re.compile(r"(\d+)\s*doses?\s*per\s*month", re.IGNORECASE)
-                # Global flag and value based on any instance of the phrase in the element
-                doses_match_elem = doses_re.search(norm_text)
-                doses_in_elem = int(doses_match_elem.group(1)) if doses_match_elem else None
-                print(f"      ⏱ doses_in_elem: {doses_in_elem}")
+                lines = [line.strip() for line in norm_text.split("\n") if line.strip()]
 
                 # Also try to inspect a nearby container (parent) for the frequency line
-                doses_in_container = None
+                container_text = ""
                 try:
                     container = element.find_element(By.XPATH, "ancestor::*[self::div or self::section or self::article][1]")
-                    container_text = (container.get_attribute('innerText') or container.text or '').replace('\xa0', ' ')
-                    dm = doses_re.search(container_text)
-                    doses_in_container = int(dm.group(1)) if dm else None
-                    print(f"      ⏱ doses_in_container: {doses_in_container}")
+                    container_text = (
+                        container.get_attribute("innerText") or container.text or ""
+                    ).replace("\xa0", " ")
                 except Exception as ce:
                     print(f"      ⚠️ Container scan failed: {ce}")
 
                 # Fallback to page body if needed
-                doses_in_body = None
-                if doses_in_elem is None and doses_in_container is None:
-                    try:
-                        source = latest_segment if latest_segment else (self._get_page_text() or '')
-                        body_text = source.replace('\xa0', ' ')
-                        dm_body = doses_re.search(body_text)
-                        doses_in_body = int(dm_body.group(1)) if dm_body else None
-                        print(f"      ⏱ doses_in_body: {doses_in_body}")
-                    except Exception as be:
-                        print(f"      ⚠️ Body scan failed: {be}")
+                body_text = ""
+                try:
+                    source = (
+                        latest_segment
+                        if latest_segment
+                        else (self._get_page_text() or "")
+                    )
+                    body_text = source.replace("\xa0", " ")
+                except Exception as be:
+                    print(f"      ⚠️ Body scan failed: {be}")
 
                 # Decide frequency from the best-available value
                 def compute_frequency(next_line: str) -> str:
-                    nl = (next_line or '').lower()
-                    # Next-line probe
-                    next_line_val = None
-                    try:
-                        m = doses_re.search(nl)
-                        next_line_val = int(m.group(1)) if m else None
-                    except Exception:
-                        next_line_val = None
-                    # Prefer element value, then container, then next-line, then body
-                    for v, src in [
-                        (doses_in_elem, 'elem'),
-                        (doses_in_container, 'container'),
-                        (next_line_val, 'next-line'),
-                        (doses_in_body, 'body'),
-                    ]:
-                        if v is not None:
-                            print(f"      🔎 frequency source: {src} -> {v} doses/month")
-                            return ", daily" if v >= 30 else ", as-needed"
-                    # Default if nothing detected
-                    print("      🔎 frequency source: none -> default as-needed")
-                    return ", as-needed"
+                    suffix = infer_medication_frequency_suffix_from_text(
+                        norm_text,
+                        container_text,
+                        next_line,
+                        body_text,
+                        group=group,
+                    )
+                    print(f"      🔎 frequency suffix inferred: {suffix}")
+                    return suffix
 
                 def with_frequency(base_line: str, idx: int) -> str:
                     # Use computed frequency from multiple scopes
@@ -1052,9 +1137,10 @@ class BrowserEMRGrabber:
         """Use Playwright (connected to existing Chrome via CDP) to read
         [data-testid="medication-title"]. Returns an empty string if not found.
 
-        Also attempts to infer frequency from nearby text: if "30 doses per month"
-        appears in the medication text block or page content, appends ", daily",
-        otherwise appends ", as-needed".
+        For Sexual Health and Performance Anxiety only, also attempts to infer
+        frequency from nearby text: if "30 doses per month" appears in the
+        medication text block or page content, appends ", daily", otherwise
+        appends ", as-needed".
         """
         try:
             if sync_playwright is None:
@@ -1099,13 +1185,24 @@ class BrowserEMRGrabber:
                     try:
                         detail_sel = get_selector(group, 'medication_detail', engine='playwright', selector_type='css') or '[data-testid="medication-text"]'
                         med_text_loc = target_page.locator(detail_sel)
-                        med_text_lower = ""
+                        med_text = ""
                         try:
-                            med_text_lower = (med_text_loc.first.inner_text(timeout=800) or "").lower()
+                            med_text = med_text_loc.first.inner_text(timeout=800) or ""
                         except Exception:
-                            med_text_lower = (target_page.content() or "").lower()
-                        if "30 doses per month" in med_text_lower:
-                            freq_suffix = ", daily"
+                            med_text = ""
+                        page_text = ""
+                        try:
+                            page_text = (
+                                target_page.inner_text("body", timeout=800) or ""
+                            )
+                        except Exception:
+                            page_text = target_page.content() or ""
+                        freq_suffix = infer_medication_frequency_suffix_from_text(
+                            text_val,
+                            med_text,
+                            page_text,
+                            group=group,
+                        )
                     except Exception:
                         pass
 
@@ -1786,8 +1883,6 @@ return null;
                 if not text:
                     return None
                 sentinel = "None of the above - Patient is not required to report BP"
-                if sentinel in text:
-                    return 'nr'
                 # Plausible BP regexes
                 dash = r"[-\u2012\u2013\u2014\u2212]"
                 range_pat = re.compile(rf"\b(\d{{2,3}})\s*{dash}\s*(\d{{2,3}})\s*/\s*(\d{{2,3}})\s*{dash}\s*(\d{{2,3}})\b")
@@ -1799,6 +1894,35 @@ return null;
                 for i, l in enumerate(low):
                     if ('blood pressure' in l) or (' bp' in l) or ('bp:' in l) or ('blood-pressure' in l):
                         anchors.append(i)
+                # First, prefer the first valid BP line immediately following the question.
+                for anchor_idx in anchors:
+                    for j in range(anchor_idx + 1, min(len(lines), anchor_idx + 6)):
+                        candidate = lines[j].strip()
+                        if not candidate:
+                            continue
+                        if candidate == sentinel:
+                            return "nr"
+                        if candidate.lower().startswith("show unselected answers"):
+                            break
+                        m = range_pat.search(candidate)
+                        if m:
+                            s1, s2, d1, d2 = map(int, m.groups())
+                            if (
+                                70 <= s1 <= 250
+                                and 70 <= s2 <= 250
+                                and 30 <= d1 <= 150
+                                and 30 <= d2 <= 150
+                                and s1 <= s2
+                                and d1 <= d2
+                            ):
+                                return f"{s1}-{s2}/{d1}-{d2}"
+                        m = single_pat.search(candidate)
+                        if m:
+                            s, d = map(int, m.groups())
+                            if 70 <= s <= 250 and 30 <= d <= 150 and s > d:
+                                return f"{s}/{d}"
+                if sentinel in text and not anchors:
+                    return "nr"
                 windows = []
                 for a in anchors or [0]:
                     windows.append((max(0, a), min(len(lines), a + 80)))
@@ -1814,6 +1938,24 @@ return null;
                         s, d = map(int, m.groups())
                         if 70 <= s <= 250 and 30 <= d <= 150 and s > d:
                             return f"{s}/{d}"
+                # If there was no BP anchor, fall back to scanning the full text once.
+                m = range_pat.search(text)
+                if m:
+                    s1, s2, d1, d2 = map(int, m.groups())
+                    if (
+                        70 <= s1 <= 250
+                        and 70 <= s2 <= 250
+                        and 30 <= d1 <= 150
+                        and 30 <= d2 <= 150
+                        and s1 <= s2
+                        and d1 <= d2
+                    ):
+                        return f"{s1}-{s2}/{d1}-{d2}"
+                m = single_pat.search(text)
+                if m:
+                    s, d = map(int, m.groups())
+                    if 70 <= s <= 250 and 30 <= d <= 150 and s > d:
+                        return f"{s}/{d}"
                 return None
 
             if FAST_MODE_BP:
@@ -2599,14 +2741,9 @@ return null;
             def infer_freq() -> str:
                 # Prefer next few lines near the chosen index
                 nearby = "\n".join(lines[chosen_idx+1: chosen_idx+4]) if chosen_idx >= 0 else ''
-                m = doses_re.search(nearby) or doses_re.search(text)
-                if m:
-                    try:
-                        v = int(m.group(1))
-                        return ", daily" if v >= 30 else ", as-needed"
-                    except Exception:
-                        return ", as-needed"
-                return ", as-needed"
+                return infer_medication_frequency_suffix_from_text(
+                    nearby, text, group=group
+                )
             base_line = self._sanitize_medication_line(chosen) or chosen.strip()
             return f"{base_line}{infer_freq()}"
         except Exception:
@@ -2770,6 +2907,201 @@ return null;
             return None
         except Exception:
             return None
+
+    @staticmethod
+    def _preview_narrow_grab_text(value: Optional[str], limit: int = 120) -> str:
+        text = str(value or "").replace("\n", " ").strip()
+        if len(text) > limit:
+            return text[: limit - 3] + "..."
+        return text
+
+    def _log_narrow_grab(self, var_id: str, message: str) -> None:
+        print(f"[NARROW GRAB] {var_id} | {message}")
+
+    def _get_ranked_playwright_raw_texts(
+        self, selector: str, limit: int = 3
+    ) -> List[str]:
+        selector = (selector or "").strip()
+        if not selector:
+            return []
+        page = self._get_cdp_emr_page()
+        if page is None:
+            return []
+        contexts: List[Any] = [page]
+        try:
+            contexts.extend(frame for frame in page.frames if frame != page.main_frame)
+        except Exception:
+            pass
+        texts: List[str] = []
+
+        def collect(require_visible: bool) -> bool:
+            for context in contexts:
+                try:
+                    locator = context.locator(selector)
+                    count = min(locator.count(), max(limit, 1))
+                except Exception:
+                    continue
+                for idx in range(count):
+                    try:
+                        item = locator.nth(idx)
+                        if require_visible:
+                            try:
+                                if not item.is_visible(timeout=400):
+                                    continue
+                            except Exception:
+                                pass
+                        try:
+                            raw_text = (item.inner_text(timeout=500) or "").strip()
+                        except Exception:
+                            raw_text = ""
+                        if not raw_text:
+                            try:
+                                raw_text = (
+                                    item.text_content(timeout=500) or ""
+                                ).strip()
+                            except Exception:
+                                raw_text = ""
+                        raw_text = raw_text.replace("\xa0", " ").strip()
+                        if raw_text and raw_text not in texts:
+                            texts.append(raw_text)
+                            if len(texts) >= limit:
+                                return True
+                    except Exception:
+                        continue
+            return bool(texts)
+
+        if collect(require_visible=True):
+            return texts
+        collect(require_visible=False)
+        return texts
+
+    def _get_sh_wide_fallback_text(self) -> str:
+        try:
+            text = self._get_all_text_across_frames(max_frames=4) or ""
+        except Exception:
+            text = ""
+        if text:
+            return text
+        try:
+            text = self._get_page_text() or ""
+            if text:
+                return text
+        except Exception:
+            pass
+        return (
+            self._cache_all_text
+            or self._cache_body_text
+            or self._cache_latest_segment
+            or ""
+        )
+
+    def _resolve_ranked_playwright_value(
+        self,
+        group: str,
+        key: str,
+        var_id: str,
+        parser,
+        accept=None,
+    ) -> Tuple[str, str, str]:
+        selectors = get_ranked_playwright_selectors(group, key)
+        accept_fn = accept or (lambda value: bool(str(value or "").strip()))
+        for idx, selector in enumerate(selectors, start=1):
+            self._log_narrow_grab(
+                var_id, f"trying selector {idx}/{len(selectors)} | selector={selector}"
+            )
+            raw_candidates = self._get_ranked_playwright_raw_texts(selector, limit=6)
+            if not raw_candidates:
+                self._log_narrow_grab(
+                    var_id, f"selector {idx} produced no visible text"
+                )
+                continue
+            for candidate_idx, raw_text in enumerate(raw_candidates, start=1):
+                self._log_narrow_grab(
+                    var_id,
+                    f"selector {idx} candidate {candidate_idx}/{len(raw_candidates)} raw={self._preview_narrow_grab_text(raw_text)}",
+                )
+                try:
+                    parsed_value = parser(raw_text)
+                except Exception as exc:
+                    self._log_narrow_grab(
+                        var_id,
+                        f"selector {idx} candidate {candidate_idx} parser error: {exc}",
+                    )
+                    continue
+                accepted = False
+                try:
+                    accepted = bool(accept_fn(parsed_value))
+                except Exception:
+                    accepted = False
+                status = "accepted" if accepted else "rejected"
+                self._log_narrow_grab(
+                    var_id,
+                    f"selector {idx} candidate {candidate_idx} parser {status} | parsed={self._preview_narrow_grab_text(parsed_value)}",
+                )
+                if accepted:
+                    self._log_narrow_grab(
+                        var_id,
+                        f"accepted from ranked selector #{idx} candidate #{candidate_idx}",
+                    )
+                    return (
+                        str(parsed_value or ""),
+                        f"ranked selector #{idx} candidate #{candidate_idx}",
+                        raw_text,
+                    )
+
+            if len(raw_candidates) > 1:
+                combined_text = "\n".join(raw_candidates).strip()
+                if combined_text:
+                    self._log_narrow_grab(
+                        var_id,
+                        f"selector {idx} combined raw={self._preview_narrow_grab_text(combined_text)}",
+                    )
+                    try:
+                        parsed_value = parser(combined_text)
+                    except Exception as exc:
+                        self._log_narrow_grab(
+                            var_id, f"selector {idx} combined parser error: {exc}"
+                        )
+                    else:
+                        accepted = False
+                        try:
+                            accepted = bool(accept_fn(parsed_value))
+                        except Exception:
+                            accepted = False
+                        status = "accepted" if accepted else "rejected"
+                        self._log_narrow_grab(
+                            var_id,
+                            f"selector {idx} combined parser {status} | parsed={self._preview_narrow_grab_text(parsed_value)}",
+                        )
+                        if accepted:
+                            self._log_narrow_grab(
+                                var_id,
+                                f"accepted from ranked selector #{idx} combined text",
+                            )
+                            return (
+                                str(parsed_value or ""),
+                                f"ranked selector #{idx} combined",
+                                combined_text,
+                            )
+
+        self._log_narrow_grab(var_id, "falling back to wide data grab")
+        wide_text = self._get_sh_wide_fallback_text()
+        try:
+            parsed_value = parser(wide_text)
+        except Exception as exc:
+            self._log_narrow_grab(var_id, f"wide parser error: {exc}")
+            return "", "wide data grab", wide_text
+        accepted = False
+        try:
+            accepted = bool(accept_fn(parsed_value))
+        except Exception:
+            accepted = False
+        status = "accepted" if accepted else "rejected"
+        self._log_narrow_grab(
+            var_id,
+            f"wide parser {status} | parsed={self._preview_narrow_grab_text(parsed_value)}",
+        )
+        return str(parsed_value or ""), "wide data grab", wide_text
 
     def _parse_pa_options_from_text(self, text: str, question_substring: str, options: list[str]) -> list[str]:
         """Given full page text and a question substring, collect matching options that appear nearby.
@@ -3827,13 +4159,10 @@ return null;
             return None
         low = txt.strip().lower()
         mapping = {
-            'hair loss': 'Hair Loss',
-            'sexual health': 'Sexual Health',
-            'testosterone': 'T Deficiency',
-            'photoaging': 'Photoaging',
-            'performance anxiety': 'Performance Anxiety',
-            't deficiency': 'T Deficiency',
-            'td/ed': 'T Deficiency',
+            "hair loss": "Hair Loss",
+            "sexual health": "Sexual Health",
+            "photoaging": "Photoaging",
+            "performance anxiety": "Performance Anxiety",
         }
         for key, val in mapping.items():
             if key in low:
@@ -3896,6 +4225,138 @@ return null;
                             pass
                 return ""
 
+            def _birth_control_bp_strategy_order() -> List[str]:
+                default_order = [
+                    "combined_selector",
+                    "split_selector",
+                    "generic_extractor",
+                ]
+                try:
+                    spec = get_variable_selector_spec("Birth Control", var_id="bc_bp")
+                except Exception:
+                    spec = {}
+                raw_rules = spec.get("parser_rules") if isinstance(spec, dict) else []
+                if not isinstance(raw_rules, list):
+                    return default_order
+
+                mapping = {
+                    "combined": "combined_selector",
+                    "combined_selector": "combined_selector",
+                    "blood_pressure": "combined_selector",
+                    "blood_pressure_selector": "combined_selector",
+                    "split": "split_selector",
+                    "split_selector": "split_selector",
+                    "systolic_diastolic": "split_selector",
+                    "pair": "split_selector",
+                    "pair_selector": "split_selector",
+                    "generic": "generic_extractor",
+                    "generic_extractor": "generic_extractor",
+                    "page": "generic_extractor",
+                    "page_extractor": "generic_extractor",
+                }
+                normalized: List[str] = []
+                for rule in raw_rules:
+                    if isinstance(rule, str):
+                        candidate = rule.strip().lower()
+                    elif isinstance(rule, dict):
+                        candidate = (
+                            str(
+                                rule.get("strategy")
+                                or rule.get("source")
+                                or rule.get("mode")
+                                or ""
+                            )
+                            .strip()
+                            .lower()
+                        )
+                    else:
+                        continue
+                    strategy = mapping.get(candidate)
+                    if strategy and strategy not in normalized:
+                        normalized.append(strategy)
+                return normalized or default_order
+
+            def _birth_control_bp_from_combined_selector() -> str:
+                parsed_value, _, _ = self._resolve_ranked_playwright_value(
+                    "birth_control",
+                    "blood_pressure",
+                    "bc_bp",
+                    lambda raw: normalize_blood_pressure_value(raw) or "",
+                    accept=lambda value: bool(value and value != "nr"),
+                )
+                if parsed_value:
+                    return normalize_blood_pressure_value(parsed_value)
+                raw_text = _read_text_for_selectors(
+                    _get_selector_candidates("birth_control", "blood_pressure")
+                )
+                return normalize_blood_pressure_value(raw_text)
+
+            def _birth_control_bp_from_split_selectors() -> str:
+                systolic_value, _, _ = self._resolve_ranked_playwright_value(
+                    "birth_control",
+                    "systolic_bp",
+                    "bc_systolic_bp",
+                    lambda raw: (
+                        re.search(r"\b(\d{2,3})\b", raw or "").group(1)
+                        if re.search(r"\b(\d{2,3})\b", raw or "")
+                        else ""
+                    ),
+                )
+                diastolic_value, _, _ = self._resolve_ranked_playwright_value(
+                    "birth_control",
+                    "diastolic_bp",
+                    "bc_diastolic_bp",
+                    lambda raw: (
+                        re.search(r"\b(\d{2,3})\b", raw or "").group(1)
+                        if re.search(r"\b(\d{2,3})\b", raw or "")
+                        else ""
+                    ),
+                )
+                if not systolic_value:
+                    systolic_text = _read_text_for_selectors(
+                        _get_selector_candidates("birth_control", "systolic_bp")
+                    )
+                    systolic_match = re.search(r"\b(\d{2,3})\b", systolic_text or "")
+                    systolic_value = systolic_match.group(1) if systolic_match else ""
+                if not diastolic_value:
+                    diastolic_text = _read_text_for_selectors(
+                        _get_selector_candidates("birth_control", "diastolic_bp")
+                    )
+                    diastolic_match = re.search(r"\b(\d{2,3})\b", diastolic_text or "")
+                    diastolic_value = (
+                        diastolic_match.group(1) if diastolic_match else ""
+                    )
+                systolic_match = re.search(r"\b(\d{2,3})\b", systolic_value or "")
+                diastolic_match = re.search(r"\b(\d{2,3})\b", diastolic_value or "")
+                if not systolic_match or not diastolic_match:
+                    return ""
+                systolic = int(systolic_match.group(1))
+                diastolic = int(diastolic_match.group(1))
+                if (
+                    70 <= systolic <= 250
+                    and 30 <= diastolic <= 150
+                    and systolic > diastolic
+                ):
+                    return f"{systolic}/{diastolic}"
+                return ""
+
+            def _extract_birth_control_bp() -> str:
+                for strategy in _birth_control_bp_strategy_order():
+                    candidate = ""
+                    try:
+                        if strategy == "combined_selector":
+                            candidate = _birth_control_bp_from_combined_selector()
+                        elif strategy == "split_selector":
+                            candidate = _birth_control_bp_from_split_selectors()
+                        elif strategy == "generic_extractor":
+                            candidate = self._extract_blood_pressure() or ""
+                    except Exception:
+                        candidate = ""
+                    normalized = normalize_blood_pressure_value(candidate)
+                    if normalized and normalized != "nr":
+                        return normalized
+                return "nr"
+
             try:
                 med = self._extract_medication({'group': 'birth_control'}, {}) or ''
             except Exception:
@@ -3921,22 +4382,7 @@ return null;
             except Exception:
                 pass
 
-            try:
-                bp_val = self._extract_blood_pressure() or 'nr'
-            except Exception:
-                bp_val = 'nr'
-
-            try:
-                systolic_text = _read_text_for_selectors(_get_selector_candidates('birth_control', 'systolic_bp'))
-                diastolic_text = _read_text_for_selectors(_get_selector_candidates('birth_control', 'diastolic_bp'))
-                systolic = re.search(r"\b(\d{2,3})\b", systolic_text or '')
-                diastolic = re.search(r"\b(\d{2,3})\b", diastolic_text or '')
-                if systolic and diastolic:
-                    bp_val = f"{systolic.group(1)}/{diastolic.group(1)}"
-            except Exception:
-                pass
-
-            data['blood_pressure'] = bp_val or 'nr'
+            data["blood_pressure"] = _extract_birth_control_bp()
 
             try:
                 full_text = self._get_all_text_across_frames()

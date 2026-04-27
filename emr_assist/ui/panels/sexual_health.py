@@ -6,6 +6,7 @@ from typing import Optional
 
 from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QVBoxLayout, QWidget
 
+from ...core.parsers import allow_hair_loss_diagnosis
 from ..widgets import ActionButton, EditableInfoCard, ToggleChip
 from ..theme import ACCENT_BLUE, ACCENT_ORANGE, BG_INPUT, BORDER_SUBTLE, TEXT_PRIMARY
 from . import _section_label, _separator
@@ -124,7 +125,7 @@ class SexualHealthInfo(QWidget):
 
         layout.addStretch()
 
-    def get_diagnoses_text(self) -> str:
+    def get_diagnoses_text(self, medication_text: str = "") -> str:
         parts = []
         if self.chip_dx_ed.active:
             parts.append("Erectile Dysfunction")
@@ -132,7 +133,7 @@ class SexualHealthInfo(QWidget):
             parts.append("Premature Ejaculation")
         if self.chip_dx_pe_like.active:
             parts.append("PE-like symptoms")
-        if self.chip_dx_hair.active:
+        if self.chip_dx_hair.active and allow_hair_loss_diagnosis("Sexual Health", medication_text):
             parts.append("Hair Loss")
         return ", ".join(parts) if parts else ""
 

@@ -14,15 +14,8 @@ import pyautogui
 import pyperclip
 import pygetwindow as gw
 
-from ..core.config import LABS_CONFIG, dprint
+from ..core.config import dprint
 from ..core.parsers import (
-    extract_lab_value_simple,
-    parse_tdcs_score,
-    parse_tdcsc_score,
-    parse_ed_status,
-    parse_treatment_satisfaction,
-    parse_side_effects_response,
-    detect_td_diagnosis,
     detect_medication_from_text,
 )
 from ..core import state

@@ -25,18 +25,7 @@ class SignalBridge(QObject):
     set_clicker_last = pyqtSignal(str)          # last click time text
     set_url_display = pyqtSignal(str)           # current URL
 
-    # --- Tab 1: T Deficiency ---
-    set_tdcs = pyqtSignal(str)
-    set_tdcs_c = pyqtSignal(str)
-    set_ed = pyqtSignal(str)
-    set_lab_value = pyqtSignal(str, str)        # var_name, value
-    set_lab_flags = pyqtSignal(str, bool, bool) # var_name, high, low
-    set_med_choice = pyqtSignal(int)            # index
-    set_dx_td = pyqtSignal(bool)
-    set_dx_ed = pyqtSignal(bool)
-    set_pmh_summary = pyqtSignal(str)
-
-    # --- Tab 2: Hair Loss ---
+    # --- Tab 1: Hair Loss ---
     set_hair_med = pyqtSignal(str)
     set_hair_hsx = pyqtSignal(str)
     set_hair_hvar = pyqtSignal(str)

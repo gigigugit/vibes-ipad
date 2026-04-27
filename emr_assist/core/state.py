@@ -12,20 +12,14 @@ import os
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
-from .config import LABS_CONFIG
 
 # ---------------------------------------------------------------------------
-# Grabbed lab / clinical values
+# Grabbed clinical values
 # ---------------------------------------------------------------------------
-grabbed_vars: Dict[str, str] = {cfg["var"]: "" for cfg in LABS_CONFIG.values()}
+grabbed_vars: Dict[str, str] = {}
 grabbed_vars['hair_loss_additional_sxx'] = ""
 grabbed_vars['hair_loss_location'] = ""
 
-tdcs_value = ["—"]
-tdcs_c_value = ["—"]
-ed_value = ["—"]
-td_satisfaction_value = ["—"]
-td_side_effects_value = ["No side effects reported"]
 diagnoses = [""]
 medication_value = ["Enclomiphene 12.5 mg daily"]
 selected_template = [""]
@@ -66,16 +60,8 @@ def _build_emr_bridge_payload(extra: Optional[Dict[str, Any]] = None) -> Dict[st
     payload: Dict[str, Any] = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "grabbed_vars": dict(grabbed_vars),
-        "tdcs": tdcs_value[0],
-        "tdcs_c": tdcs_c_value[0],
         "diagnoses": diagnoses[0],
         "medication": medication_value[0],
-        "td_satisfaction": td_satisfaction_value[0],
-        "td_side_effects": td_side_effects_value[0],
-        "ed": ed_value[0],
-        "response": td_satisfaction_value[0],
-        "side_effects": td_side_effects_value[0],
-        "ed_status": ed_value[0],
         "pmh": build_pmh_text(),
     }
     payload.update(dict(grabbed_vars))

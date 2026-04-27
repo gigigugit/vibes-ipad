@@ -16,19 +16,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from emr_assist.browser.grabber import BrowserEMRGrabber
-from emr_assist.core.config import LABS_CONFIG
-from emr_assist.core.parsers import (
-    detect_td_diagnosis,
-    extract_lab_value_simple,
-    parse_ed_status,
-    parse_tdcs_score,
-    parse_tdcsc_score,
-)
+from emr_assist.core.parsers import extract_hair_medication_from_text, normalize_blood_pressure_value
 
 
 TAB_ALIASES = {
-    "testosterone deficiency": "Testosterone Deficiency",
-    "t deficiency": "Testosterone Deficiency",
     "hair loss": "Hair Loss",
     "sexual health": "Sexual Health",
     "performance anxiety": "Performance Anxiety",
@@ -37,8 +28,6 @@ TAB_ALIASES = {
 }
 
 DETECTED_TO_CANONICAL = {
-    "T Deficiency": "Testosterone Deficiency",
-    "Testosterone": "Testosterone Deficiency",
     "Hair Loss": "Hair Loss",
     "Sexual Health": "Sexual Health",
     "Performance Anxiety": "Performance Anxiety",
@@ -70,13 +59,6 @@ QUESTION_KEYWORDS = {
     "dvt_pe": ["dvt", "blood clot", "pulmonary embol", "pe history"],
     "side_effects": ["side effects", "experienced side effects", "adverse effect"],
     "pmh": ["past medical history", "pmh", "medical history"],
-}
-
-LAB_VAR_MAP = {
-    "psa": "psa",
-    "free_t": "free_testosterone",
-    "hct": "hematocrit",
-    "total_t": "total_testosterone",
 }
 
 
@@ -188,15 +170,16 @@ def build_common_fields(grabber: BrowserEMRGrabber, full_text: str, tab_name: st
     summary = safe_call(lambda: grabber.fetch_patient_location_summary(debug_print=False), {}) or {}
     out["patient_state"] = str(summary.get("state_display") or summary.get("state") or "")
 
-    bp_val = safe_call(lambda: grabber._extract_blood_pressure(), "") or ""
+    bp_val = normalize_blood_pressure_value(safe_call(lambda: grabber._extract_blood_pressure(), "") or "")
     if not bp_val:
-        bp_match = re.search(r"\b\d{2,3}/\d{2,3}\b", full_text)
-        bp_val = bp_match.group(0) if bp_match else ""
+        bp_val = normalize_blood_pressure_value(full_text)
     out["bp"] = str(bp_val)
 
     med_val = safe_call(lambda: grabber._extract_medication({}, {}), "") or ""
     if not med_val:
-        med_val = safe_call(lambda: grabber._extract_medication_from_text(full_text), "") or ""
+        med_val = extract_hair_medication_from_text(full_text) if tab_name == "Hair Loss" else (
+            safe_call(lambda: grabber._extract_medication_from_text(full_text), "") or ""
+        )
     out["current_dose"] = str(med_val)
 
     diagnoses = safe_call(lambda: grabber._extract_diagnoses(), []) or []
@@ -220,21 +203,7 @@ def extract_for_tab(grabber: BrowserEMRGrabber, tab_name: str, variables: List[s
 
     result = build_common_fields(grabber, full_text, tab_name)
 
-    if tab_name == "Testosterone Deficiency":
-        for csv_var, lab_var in LAB_VAR_MAP.items():
-            cfg = next((config for config in LABS_CONFIG.values() if config.get("var") == lab_var), None)
-            if cfg:
-                parsed = extract_lab_value_simple(cfg, full_text)
-                result[csv_var] = parsed.get("raw_value", "") if parsed.get("found") else ""
-        result["tdcs_score"] = str(parse_tdcs_score(full_text)) if full_text else ""
-        tdcsc_val = parse_tdcsc_score(full_text) if full_text else None
-        result["tdcs_c_score"] = "" if tdcsc_val is None else str(tdcsc_val)
-        result["ed_status"] = parse_ed_status(full_text) if full_text else ""
-        result["bmi"] = extract_bmi(full_text)
-        if not result.get("dx") and detect_td_diagnosis(full_text):
-            result["dx"] = "Testosterone Deficiency"
-
-    elif tab_name == "Hair Loss":
+    if tab_name == "Hair Loss":
         result["hair_pattern"] = extract_next_answer(full_text, QUESTION_KEYWORDS["hair_pattern"])
         result["hair_duration"] = extract_next_answer(full_text, QUESTION_KEYWORDS["hair_duration"])
         result["hair_previous_tx"] = extract_next_answer(full_text, QUESTION_KEYWORDS["hair_previous_tx"])
@@ -245,7 +214,7 @@ def extract_for_tab(grabber: BrowserEMRGrabber, tab_name: str, variables: List[s
         if sh_data.get("medication"):
             result["current_dose"] = str(sh_data.get("medication"))
         if sh_data.get("blood_pressure"):
-            result["bp"] = str(sh_data.get("blood_pressure"))
+            result["bp"] = normalize_blood_pressure_value(str(sh_data.get("blood_pressure")))
         if sh_data.get("diagnoses"):
             result["dx"] = join_list(sh_data.get("diagnoses"))
             low_dx = result["dx"].lower()
@@ -265,7 +234,7 @@ def extract_for_tab(grabber: BrowserEMRGrabber, tab_name: str, variables: List[s
         if pa_data.get("medication"):
             result["current_dose"] = str(pa_data.get("medication"))
         if pa_data.get("blood_pressure"):
-            result["bp"] = str(pa_data.get("blood_pressure"))
+            result["bp"] = normalize_blood_pressure_value(str(pa_data.get("blood_pressure")))
         if pa_data.get("situations_text"):
             result["pa_triggers"] = str(pa_data.get("situations_text"))
         if pa_data.get("symptoms_text"):
@@ -286,7 +255,7 @@ def extract_for_tab(grabber: BrowserEMRGrabber, tab_name: str, variables: List[s
         if bc_data.get("medication"):
             result["current_dose"] = str(bc_data.get("medication"))
         if bc_data.get("blood_pressure"):
-            result["bp"] = str(bc_data.get("blood_pressure"))
+            result["bp"] = normalize_blood_pressure_value(str(bc_data.get("blood_pressure")))
         if bc_data.get("lmp"):
             result["menstrual"] = str(bc_data.get("lmp"))
         if bc_data.get("med_history_changes"):

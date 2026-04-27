@@ -437,10 +437,7 @@ class AIAssistWindow(QMainWindow):
     # ==================================================================
 
     def _setup_shortcuts(self) -> None:
-        QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(self._on_generate_all)
-        QShortcut(QKeySequence("Ctrl+1"), self).activated.connect(lambda: self._on_generate_single(0))
-        QShortcut(QKeySequence("Ctrl+2"), self).activated.connect(lambda: self._on_generate_single(1))
-        QShortcut(QKeySequence("Escape"), self).activated.connect(self._on_stop)
+        return
 
     # ==================================================================
     # Output 2 collapse

@@ -45,8 +45,6 @@ from emr_assist.core.config import (
     CDP_DEBUG_PORT,
     CDP_POLL_INTERVAL_SEC,
     AUTO_GRAB_DELAY_MS,
-    LABS_CONFIG,
-    TEMPLATE_BUTTONS,
     PMH_OPTIONS,
     dprint,
 )
@@ -54,11 +52,6 @@ from emr_assist.core.templates import load_templates_from_file as load_templates
 from emr_assist.core import state
 from emr_assist.core.state import (
     grabbed_vars,
-    tdcs_value,
-    tdcs_c_value,
-    ed_value,
-    td_satisfaction_value,
-    td_side_effects_value,
     diagnoses,
     medication_value,
     pmh_selected,
@@ -72,14 +65,10 @@ from emr_assist.core.state import (
     emit_emr_bridge,
 )
 from emr_assist.core.parsers import (
-    extract_lab_value_simple,
-    parse_tdcs_score,
-    parse_tdcsc_score,
-    parse_ed_status,
-    parse_treatment_satisfaction,
-    parse_side_effects_response,
-    detect_td_diagnosis,
+    allow_hair_loss_diagnosis,
     detect_medication_from_text,
+    extract_hair_medication_from_text,
+    normalize_blood_pressure_value,
 )
 from emr_assist.browser.grabber import BrowserEMRGrabber
 
@@ -90,7 +79,6 @@ from emr_assist.ui.theme import DARK_THEME_QSS, ACCENT_BLUE, ACCENT_GREEN, ACCEN
 from emr_assist.ui.widgets import ActionButton, StatusBadge, InfoCard
 
 # Panel imports
-from emr_assist.ui.panels.t_deficiency import TDeficiencyActions, TDeficiencyInfo, TDeficiencyLabs
 from emr_assist.ui.panels.hair_loss import HairLossActions, HairLossInfo
 from emr_assist.ui.panels.photoaging import PhotoagingActions, PhotoagingInfo
 from emr_assist.ui.panels.sexual_health import SexualHealthActions, SexualHealthInfo
@@ -112,7 +100,6 @@ def _on_main(fn):
 # Visit type constants
 # ---------------------------------------------------------------------------
 VISIT_TYPES = [
-    "T Deficiency",
     "Hair Loss",
     "Photoaging",
     "Sexual Health",
@@ -166,7 +153,6 @@ class Dashboard(QMainWindow):
         self._build_status_bar()
         self._build_action_dock()
         self._build_info_dock()
-        self._build_labs_dock()
         self._build_clicker_dock()
 
         # ── Load templates ────────────────────────────────────────────
@@ -198,7 +184,7 @@ class Dashboard(QMainWindow):
         # Row 1: visit type + connection
         row1 = QHBoxLayout()
         row1.setSpacing(8)
-        self.badge_visit = StatusBadge("T Deficiency", ACCENT_BLUE)
+        self.badge_visit = StatusBadge("Hair Loss", ACCENT_BLUE)
         self.badge_connection = StatusBadge("Chrome: ?", "#888")
         row1.addWidget(self.badge_visit)
         row1.addStretch()
@@ -220,7 +206,7 @@ class Dashboard(QMainWindow):
         row3 = QHBoxLayout()
         row3.setSpacing(4)
         self._visit_btns: List[ActionButton] = []
-        short_labels = ["TD", "Hair", "Photo", "SH", "PA", "BC"]
+        short_labels = ["Hair", "Photo", "SH", "PA", "BC"]
         for i, (full, short) in enumerate(zip(VISIT_TYPES, short_labels)):
             btn = ActionButton(short, accent="blue")
             btn.setMaximumHeight(24)
@@ -238,7 +224,6 @@ class Dashboard(QMainWindow):
         """Left dock: stacked action panels per visit type."""
         self.action_stack = QStackedWidget()
 
-        self.td_actions = TDeficiencyActions()
         self.hair_actions = HairLossActions()
         self.photo_actions = PhotoagingActions()
         self.sh_actions = SexualHealthActions()
@@ -246,7 +231,7 @@ class Dashboard(QMainWindow):
         self.bc_actions = BirthControlActions()
 
         for widget in [
-            self.td_actions, self.hair_actions, self.photo_actions,
+            self.hair_actions, self.photo_actions,
             self.sh_actions, self.pa_actions, self.bc_actions,
         ]:
             self.action_stack.addWidget(widget)
@@ -264,7 +249,6 @@ class Dashboard(QMainWindow):
         """Center dock: stacked info panels per visit type."""
         self.info_stack = QStackedWidget()
 
-        self.td_info = TDeficiencyInfo()
         self.hair_info = HairLossInfo()
         self.photo_info = PhotoagingInfo()
         self.sh_info = SexualHealthInfo()
@@ -272,7 +256,7 @@ class Dashboard(QMainWindow):
         self.bc_info = BirthControlInfo()
 
         for widget in [
-            self.td_info, self.hair_info, self.photo_info,
+            self.hair_info, self.photo_info,
             self.sh_info, self.pa_info, self.bc_info,
         ]:
             self.info_stack.addWidget(widget)
@@ -286,22 +270,10 @@ class Dashboard(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.info_dock = dock
 
-    def _build_labs_dock(self) -> None:
-        """Right dock: lab values (visible only for T Deficiency)."""
-        self.td_labs = TDeficiencyLabs()
-        dock = QDockWidget("Labs", self)
-        dock.setWidget(self.td_labs)
-        dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        self.labs_dock = dock
-
     def _build_clicker_dock(self) -> None:
         """Bottom dock: auto-clicker panel (detachable)."""
         self.clicker_panel = AutoClickerPanel()
-        dock = QDockWidget("MainDashboard", self)
+        dock = QDockWidget("Auto Clicker", self)
         dock.setWidget(self.clicker_panel)
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
@@ -325,13 +297,6 @@ class Dashboard(QMainWindow):
         signals.call_on_main.connect(_safe_call)
         signals.set_status.connect(self.lbl_status.setText)
         signals.set_visit_type.connect(lambda t: self.badge_visit.set_text(f"  {t}"))
-
-        # T Deficiency signals
-        signals.set_tdcs.connect(lambda v: self.td_info.card_tdcs.set_value(v))
-        signals.set_tdcs_c.connect(lambda v: self.td_info.card_tdcs_c.set_value(v))
-        signals.set_ed.connect(lambda v: self.td_info.card_ed.set_value(v))
-        signals.set_lab_value.connect(self._on_lab_value)
-        signals.set_lab_flags.connect(self._on_lab_flags)
 
         # Hair Loss signals
         signals.set_hair_med.connect(lambda v: self.hair_info.card_medication.set_value(v))
@@ -385,15 +350,6 @@ class Dashboard(QMainWindow):
 
     def _connect_buttons(self) -> None:
         """Wire action-panel buttons to grab/insert methods."""
-        # T Deficiency
-        self.td_actions.btn_grab.clicked.connect(self.grab_all_labs)
-        self.td_actions.btn_insert_labs.clicked.connect(self.insert_labs_note)
-        self.td_actions.btn_rx_note.clicked.connect(self.insert_rx_note)
-        self.td_actions.btn_referral.clicked.connect(self.insert_referral_note)
-        self.td_actions.btn_lab_message.clicked.connect(self.insert_lab_message)
-        self.td_actions.btn_td_followup.clicked.connect(self.insert_td_followup_note)
-        self.td_actions.btn_td_followup_labs.clicked.connect(self.insert_td_followup_labs)
-
         # Hair Loss
         self.hair_actions.btn_grab.clicked.connect(self.grab_hair)
         self.hair_actions.btn_initial.clicked.connect(
@@ -472,8 +428,6 @@ class Dashboard(QMainWindow):
             self.action_stack.setCurrentIndex(index)
             self.info_stack.setCurrentIndex(index)
             self.badge_visit.set_text(f"  {self._current_visit}")
-            # Labs dock only visible for T Deficiency
-            self.labs_dock.setVisible(index == 0)
             # Highlight active visit button
             for i, btn in enumerate(self._visit_btns):
                 btn.setProperty("accent", "green" if i == index else "blue")
@@ -491,15 +445,12 @@ class Dashboard(QMainWindow):
     def _deferred_startup(self) -> None:
         self._setup_global_hotkeys()
         self._start_cdp_visit_monitor()
-        # Default to T Deficiency
+        # Default to Hair Loss
         self._switch_visit(0)
 
     def _setup_global_hotkeys(self) -> None:
-        """Register F4 as global grab hotkey."""
-        try:
-            keyboard.add_hotkey("F4", self._f4_grab_dispatch)
-        except Exception as e:
-            print(f"Hotkey registration error: {e}")
+        """Alternate dashboard hotkeys are intentionally disabled."""
+        print("Alternate dashboard hotkeys disabled")
 
     def _f4_grab_dispatch(self) -> None:
         """F4 dispatches grab based on current visit type."""
@@ -507,9 +458,7 @@ class Dashboard(QMainWindow):
 
     def _do_grab_for_current_visit(self) -> None:
         vt = self._current_visit
-        if vt == "T Deficiency":
-            self.grab_all_labs()
-        elif vt == "Hair Loss":
+        if vt == "Hair Loss":
             self.grab_hair()
         elif vt == "Photoaging":
             self.grab_photoaging()
@@ -535,126 +484,6 @@ class Dashboard(QMainWindow):
     # Grab Methods
     # ==================================================================
 
-    def grab_all_labs(self) -> None:
-        """Grab all T Deficiency labs from browser via copy-paste + parsing."""
-        def do_grab():
-            original = ""
-            try:
-                original = pyperclip.paste()
-            except Exception:
-                pass
-            signals.set_status.emit("Grabbing labs…")
-            try:
-                pyperclip.copy("CLEARED_BY_GRAB")
-                time.sleep(0.3)
-                sw, sh = pyautogui.size()
-                cx, cy = sw // 2, sh // 2
-                pyautogui.click(cx, cy)
-                time.sleep(0.5)
-                pyautogui.hotkey("ctrl", "a")
-                time.sleep(0.5)
-                pyautogui.hotkey("ctrl", "c")
-                time.sleep(0.8)
-                new_content = pyperclip.paste()
-                if not (new_content and new_content != "CLEARED_BY_GRAB" and len(new_content) > 50):
-                    # Fallback to CDP page text
-                    grabber = self._ensure_grabber()
-                    if grabber and grabber.connect_to_chrome():
-                        fb = grabber._get_page_text() or ""
-                        if len(fb) > 50:
-                            new_content = fb
-                if new_content and new_content != "CLEARED_BY_GRAB" and len(new_content) > 50:
-                    clear_text_selection(self)
-                    # Parse labs
-                    for lab_name, lab_config in LABS_CONFIG.items():
-                        result = extract_lab_value_simple(lab_config, new_content)
-                        var = lab_config["var"]
-                        grabbed_vars[var] = result["raw_value"] if result["found"] else ""
-                        signals.set_lab_value.emit(var, grabbed_vars[var])
-                    # Parse scores
-                    tdcs_value[0] = str(parse_tdcs_score(new_content))
-                    signals.set_tdcs.emit(tdcs_value[0])
-                    tdcs_c = parse_tdcsc_score(new_content)
-                    tdcs_c_value[0] = str(tdcs_c) if tdcs_c is not None else "—"
-                    signals.set_tdcs_c.emit(tdcs_c_value[0])
-                    ed_status = parse_ed_status(new_content)
-                    ed_value[0] = (
-                        "He reports symptoms consistent with ED." if ed_status == "Yes"
-                        else "He denies symptoms of ED." if ed_status == "No"
-                        else "—"
-                    )
-                    signals.set_ed.emit(ed_value[0])
-                    td_satisfaction_value[0] = parse_treatment_satisfaction(new_content)
-                    td_side_effects_value[0] = parse_side_effects_response(new_content)
-                    # Diagnosis
-                    try:
-                        if detect_td_diagnosis(new_content):
-                            diagnoses[0] = "Testosterone Deficiency"
-                    except Exception:
-                        pass
-                    # Medication
-                    detected_med = detect_medication_from_text(new_content)
-                    if detected_med:
-                        medication_value[0] = detected_med
-                        _on_main(lambda: self.lbl_medication.setText(f"Medication: {detected_med}"))
-                    emit_emr_bridge({"context": "labs"})
-                    signals.set_status.emit("Labs grabbed ✓")
-                else:
-                    signals.set_status.emit("Failed to grab text from EMR")
-            except Exception as exc:
-                signals.set_status.emit(f"Grab error: {exc}")
-            finally:
-                try:
-                    pyperclip.copy(original)
-                except Exception:
-                    pass
-                _on_main(lambda: (self.show(), self.raise_(), self.activateWindow()))
-        self.hide()
-        time.sleep(0.1)
-        threading.Thread(target=do_grab, daemon=True).start()
-
-    def _process_td_grab(self, raw: Dict[str, Any]) -> None:
-        """Parse raw grab dict and emit signals to update TD panels."""
-        # Questionnaire scores
-        if "tdcs_score" in raw:
-            v = str(raw["tdcs_score"])
-            tdcs_value[0] = v
-            signals.set_tdcs.emit(v)
-        if "tdcs_c_score" in raw:
-            v = str(raw["tdcs_c_score"])
-            tdcs_c_value[0] = v
-            signals.set_tdcs_c.emit(v)
-        if "ed_status" in raw:
-            v = str(raw["ed_status"])
-            ed_value[0] = v
-            signals.set_ed.emit(v)
-
-        # Lab values
-        for name, cfg in LABS_CONFIG.items():
-            var = cfg["var"]
-            if var in raw:
-                val = str(raw[var])
-                grabbed_vars[var] = val
-                signals.set_lab_value.emit(var, val)
-
-        # Medication detection
-        page_text = raw.get("page_text", "")
-        if page_text:
-            med = detect_medication_from_text(page_text)
-            if med:
-                medication_value[0] = med
-                _on_main(lambda: self.lbl_medication.setText(f"Medication: {med}"))
-
-        # Satisfaction / side effects
-        if "satisfaction" in raw:
-            td_satisfaction_value[0] = raw["satisfaction"]
-        if "side_effects" in raw:
-            td_side_effects_value[0] = raw["side_effects"]
-
-        # Diagnosis
-        if "diagnoses" in raw:
-            diagnoses[0] = raw["diagnoses"]
-
     def grab_hair(self) -> None:
         """Grab hair loss data from browser via copy-paste."""
         def do_grab():
@@ -677,24 +506,7 @@ class Dashboard(QMainWindow):
                     signals.set_status.emit("Failed to grab hair loss text")
                     return
                 clear_text_selection(self)
-                # Parse — simple line-based extraction (matches main_window logic)
-                import re as _re
-                lines = [ln.strip() for ln in new_content.splitlines() if ln.strip()]
-                med = ""
-                treatment_re = _re.compile(r"^treatment\s*[:\-]\s*(.+)$", _re.IGNORECASE)
-                treatment_header_re = _re.compile(r"^treatment\s*[:\-]*$", _re.IGNORECASE)
-                for idx, ln in enumerate(lines):
-                    m = treatment_re.match(ln)
-                    if m:
-                        med = m.group(1).strip()
-                        break
-                    if treatment_header_re.match(ln):
-                        for j in range(idx + 1, min(len(lines), idx + 4)):
-                            candidate = lines[j].strip()
-                            if candidate and not _re.match(r"^(photos|notes|click|intake)", candidate, _re.IGNORECASE):
-                                med = candidate
-                                break
-                        break
+                med = extract_hair_medication_from_text(new_content)
                 if med:
                     signals.set_hair_med.emit(med)
                 emit_emr_bridge()
@@ -784,10 +596,9 @@ class Dashboard(QMainWindow):
                         signals.set_sh_med.emit(str(raw["medication"]))
                     if "effectiveness" in raw:
                         signals.set_sh_effectiveness.emit(str(raw["effectiveness"]))
-                    bp = raw.get("blood_pressure", "")
+                    bp = normalize_blood_pressure_value(raw.get("blood_pressure", ""))
                     if bp:
-                        bp_text = bp if bp.lower() not in ("nr", "n/r") else "not required"
-                        signals.set_sh_bp.emit(bp_text)
+                        signals.set_sh_bp.emit(bp)
                     if "hair_loss_location" in raw:
                         signals.set_sh_hair_location.emit(str(raw["hair_loss_location"]))
                     if "hair_loss_additional_sxx" in raw:
@@ -892,37 +703,9 @@ class Dashboard(QMainWindow):
         """Collect all current widget values into a template variable dict."""
         v: Dict[str, str] = {}
 
-        # Labs — build dict from individual lab values
-        lab_vals: Dict[str, str] = {}
-        if hasattr(self, 'td_labs'):
-            for name, cfg in LABS_CONFIG.items():
-                var = cfg["var"]
-                val = self.td_labs.get_lab_value(var)
-                if val:
-                    lab_vals[var] = val
-        v.update(lab_vals)
-        v["lab_values_formatted"] = self._build_lab_values_formatted()
-
-        # TD scores
-        v["tdcs"] = self.td_info.card_tdcs.value()
-        v["tdcs_c"] = self.td_info.card_tdcs_c.value()
-        v["ed_status"] = self.td_info.card_ed.value()
         v["diagnoses"] = diagnoses[0]
         v["medication"] = medication_value[0]
         v["pmh"] = build_pmh_text()
-        v["response"] = td_satisfaction_value[0]
-        v["side_effects"] = td_side_effects_value[0]
-
-        # Lab individual values for templates
-        v["total_testosterone"] = grabbed_vars.get("total_testosterone", "")
-        v["free_testosterone"] = grabbed_vars.get("free_testosterone", "")
-        v["psa"] = grabbed_vars.get("psa", "")
-        v["estradiol"] = grabbed_vars.get("estradiol", "")
-        v["hematocrit"] = grabbed_vars.get("hematocrit", "")
-        v["fsh"] = grabbed_vars.get("fsh", "")
-        v["lh"] = grabbed_vars.get("lh", "")
-        v["albumin"] = grabbed_vars.get("albumin", "")
-        v["shbg"] = grabbed_vars.get("shbg", "")
 
         # Hair loss
         v["hair_medication"] = self.hair_info.card_medication.value()
@@ -940,7 +723,7 @@ class Dashboard(QMainWindow):
         v["sh_medication"] = self.sh_info.card_medication.value()
         v["sh_effectiveness"] = self.sh_info.card_effectiveness.value()
         v["sh_bp"] = self.sh_info.card_bp.value()
-        v["sh_diagnoses"] = self.sh_info.get_diagnoses_text()
+        v["sh_diagnoses"] = self.sh_info.get_diagnoses_text(v["sh_medication"])
         v["hair_location"] = self.sh_info.card_hair_location.value()
         v["hair_sxx"] = self.sh_info.card_hair_sxx.value()
 
@@ -960,67 +743,12 @@ class Dashboard(QMainWindow):
 
         return v
 
-    def _build_lab_values_formatted(self) -> str:
-        """Build formatted lab string for templates."""
-        lines: List[str] = []
-        for name, cfg in LABS_CONFIG.items():
-            var = cfg["var"]
-            val = grabbed_vars.get(var, "").strip()
-            if val:
-                unit = cfg.get("unit", "")
-                lines.append(f"{name}: {val} {unit}".strip())
-        return "\n".join(lines) if lines else "No lab values available"
-
     def _do_insert(self, text: str) -> None:
         """Hide window, paste text, show window."""
         self.hide()
         time.sleep(0.15)
         type_template_text(text)
         QTimer.singleShot(500, self.show)
-
-    # Specific insert methods for T Deficiency (they do custom formatting)
-
-    def insert_labs_note(self) -> None:
-        tpl = self.templates.get("Insert Labs")
-        if tpl:
-            text = tpl.format(lab_values_formatted=self._build_lab_values_formatted())
-        else:
-            text = f"Labs:\n{self._build_lab_values_formatted()}"
-        self._do_insert(text)
-
-    def insert_rx_note(self) -> None:
-        self._insert_template("Rx Note")
-
-    def insert_referral_note(self) -> None:
-        self._insert_template("Referral Note")
-
-    def insert_lab_message(self) -> None:
-        self._insert_template("Lab Message")
-
-    def insert_td_followup_note(self) -> None:
-        self._insert_template("Testosterone Deficiency Follow-up")
-
-    def insert_td_followup_labs(self) -> None:
-        self._insert_template("Testosterone Follow-up Labs")
-
-    # ==================================================================
-    # Lab-value signal handlers
-    # ==================================================================
-
-    def _on_lab_value(self, var_name: str, value: str) -> None:
-        """Update the Labs dock when a lab value signal arrives."""
-        self.td_labs.set_lab_value(var_name, value)
-
-    def _on_lab_flags(self, var_name: str, high: bool, low: bool) -> None:
-        """Update high/low flags on the Labs dock."""
-        row = self.td_labs.lab_rows.get(var_name)
-        if row:
-            if high:
-                row.set_status("high")
-            elif low:
-                row.set_status("low")
-            else:
-                row.set_status("normal")
 
     def _on_bc_initial_visit(self, is_initial: bool) -> None:
         """Toggle Birth Control initial/follow-up chips."""
@@ -1246,8 +974,6 @@ class Dashboard(QMainWindow):
                 ("photoaging", "Photoaging"),
                 ("performance anxiety", "Performance Anxiety"),
                 ("birth control", "Birth Control"),
-                ("testosterone", "T Deficiency"),
-                ("trt", "T Deficiency"),
             ]
             for pattern, canonical in patterns:
                 if pattern in combined:

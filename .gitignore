@@ -4,4 +4,4 @@ __pycache__/
 .env
 *.tmp
 *.bak
-output.txt
+ad_hoc_selector_log.jsonl
