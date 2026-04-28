@@ -20,6 +20,10 @@
 from __future__ import annotations
 
 import wx
+try:
+    import wx.adv as wxadv
+except Exception:
+    wxadv = None
 import wx.lib.scrolledpanel as scrolled
 import pyperclip
 import pyautogui
@@ -30,7 +34,7 @@ import queue
 from functools import partial
 import re
 import os
-from typing import Dict, Any, Optional, List, Tuple, Callable
+from typing import Dict, Any, Optional, List, Tuple, Callable, Set
 import json
 import requests
 import winsound
@@ -47,9 +51,31 @@ from datetime import datetime
 import importlib
 from grab_points import (
     GRAB_POINTS,
+    add_ranked_playwright_selector,
+    delete_custom_variable,
+    get_variable_selector_specs,
     get_preferred_method,
+    get_ranked_playwright_selectors,
+    get_variable_selector_spec,
+    get_selector_workbench_state,
+    move_ranked_playwright_selector,
+    remove_ranked_playwright_selector,
+    save_builtin_variable_settings,
+    save_custom_variable,
+    save_selector_override,
+    save_selector_workbench_window_state,
     get_selector,
     get_selector_list,
+)
+from emr_assist.core.parsers import (
+    allow_hair_loss_diagnosis,
+    extract_hair_medication_from_text,
+    extract_hair_response_from_text,
+    extract_hair_symptoms_from_text,
+    extract_hair_loss_additional_sxx_from_text,
+    extract_hair_loss_location_from_text,
+    infer_medication_frequency_suffix_from_text,
+    normalize_blood_pressure_value,
 )
 
 # Playwright support for EMR interaction via Chrome DevTools Protocol
@@ -332,6 +358,12 @@ class PlaywrightDriverAdapter:
 # --- Performance/debug controls ---
 PERF_DEBUG = False
 FAST_MODE_BP = True
+# Disable keyboard-module global hooks by default because they can interfere with
+# AutoHotkey hotkeys running in parallel. wx.RegisterHotKey paths still remain active.
+ENABLE_KEYBOARD_MODULE_HOTKEYS = False
+# Keep selector-driven Playwright click paths on by default even when the broader
+# keyboard-module hotkey set is disabled, so JSON-configured task shortcuts still work.
+ENABLE_KEYBOARD_MODULE_CLICK_PATH_HOTKEYS = True
 # Global hotkey toggles
 ENABLE_QUICK_NEXT_TASK_HOTKEY = False
 QUICK_NEXT_TASK_HOTKEY = "ctrl+alt+enter"
@@ -416,12 +448,6 @@ CDP_VISIT_TYPE_KEYWORDS = [
     ("premature ejaculation", "Sexual Health"),
     ("birth control", "Birth Control"),
     ("contraception", "Birth Control"),
-    ("testosterone", "Testosterone"),
-    ("t deficiency", "T Deficiency"),
-    ("testosterone deficiency", "T Deficiency"),
-    ("low t", "Testosterone"),
-    ("hypogonadism", "Testosterone"),
-    ("androgen deficiency", "T Deficiency"),
     ("hair loss", "Hair Loss"),
     ("photoaging", "Photoaging"),
     ("acne", "Acne"),
@@ -436,13 +462,6 @@ VISIT_TYPE_FALLBACK_KEYWORDS = [
     ("performance anxiety", "Performance Anxiety"),
     ("sexual health", "Sexual Health"),
     ("premature ejaculation", "Sexual Health"),
-    ("testosterone deficiency", "T Deficiency"),
-    ("t deficiency", "T Deficiency"),
-    ("td/ed", "T Deficiency"),
-    ("td/ed labs", "T Deficiency"),
-    ("td labs", "T Deficiency"),
-    ("low t", "T Deficiency"),
-    ("testosterone", "T Deficiency"),
     ("hair loss", "Hair Loss"),
     ("photoaging", "Photoaging"),
     ("birth control", "Birth Control"),
@@ -534,15 +553,14 @@ CDP_HEADER_EXPRESSION = _CDP_HEADER_EXPR_TEMPLATE.replace("__SELS__", CDP_TITLE_
 ).replace("__KEYWORDS__", CDP_VISIT_KEYWORDS_JSON)
 
 VISIT_TAB_INDICES = {
-    "T Deficiency": 0,
-    "Hair Loss": 1,
-    "Photoaging": 2,
-    "Sexual Health": 3,
-    "Performance Anxiety": 5,
-    "Birth Control": 6,
+    "Hair Loss": 0,
+    "Photoaging": 1,
+    "Sexual Health": 2,
+    "Performance Anxiety": 4,
+    "Birth Control": 5,
 }
 
-AUTO_CLICKER_TAB_INDEX = 4
+AUTO_CLICKER_TAB_INDEX = 3
 
 BIRTH_CONTROL_PMH_OPTIONS = [
     ("htn", "HTN (hypertension)"),
@@ -565,90 +583,7 @@ BIRTH_CONTROL_PMH_KEYWORDS = {
 AUTO_CLICKER_DEBUG = False
 
 CDP_HEADER_SELECTORS_JSON = json.dumps(CDP_HEADER_SELECTORS)
-CDP_TITLE_XPATHS_JSON = json.dumps(CDP_TITLE_XPATHS)
-CDP_TITLE_SELECTORS_JSON = json.dumps(CDP_TITLE_SELECTORS)
 CDP_VISIT_FALLBACK_KEYWORDS_JSON = json.dumps([kw for kw, _ in VISIT_TYPE_FALLBACK_KEYWORDS])
-
-_CDP_VISIT_HEADER_SCRIPT = (
-    """
-(() => {
-    const sels = __SELS__;
-    const xpaths = __XPATHS__;
-    const keywords = __KEYWORDS__;
-
-    const normalize = (text) => (text || '').trim();
-    const accept = (text) => {
-        const raw = normalize(text);
-        if (!raw) return null;
-        const low = raw.toLowerCase();
-        if (low.includes('navigation') || low.includes('menu')) return null;
-        for (const kw of keywords) {
-            if (low.includes(kw)) return raw;
-        }
-        return null;
-    };
-
-    const scrapeNodes = (doc, nodes) => {
-        for (const node of nodes) {
-            try {
-                const txt = accept(node.innerText || node.textContent || '');
-                if (txt) return txt;
-            } catch (e) {}
-        }
-        return null;
-    };
-
-    const queryDocument = (doc) => {
-        if (!doc) return null;
-
-        for (const xp of xpaths) {
-            try {
-                const res = doc.evaluate(xp, doc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-                const nodes = [];
-                for (let i = 0; i < res.snapshotLength; i++) {
-                    nodes.push(res.snapshotItem(i));
-                }
-                const hit = scrapeNodes(doc, nodes);
-                if (hit) return hit;
-            } catch (e) {}
-        }
-
-        for (const sel of sels) {
-            try {
-                const matches = Array.from(doc.querySelectorAll(sel));
-                const hit = scrapeNodes(doc, matches);
-                if (hit) return hit;
-            } catch (e) {}
-        }
-
-        return null;
-    };
-
-    const mainDoc = document;
-    const direct = queryDocument(mainDoc);
-    if (direct) return direct;
-
-    const frames = Array.from(document.querySelectorAll('iframe'));
-    for (const frame of frames) {
-        try {
-            const doc = frame.contentDocument;
-            const hit = queryDocument(doc);
-            if (hit) return hit;
-        } catch (e) {}
-    }
-
-    try {
-        const titleHit = accept(document.title || '');
-        if (titleHit) return titleHit;
-    } catch (e) {}
-
-    return null;
-})();
-"""
-    .replace("__SELS__", CDP_TITLE_SELECTORS_JSON)
-    .replace("__XPATHS__", CDP_TITLE_XPATHS_JSON)
-    .replace("__KEYWORDS__", CDP_VISIT_FALLBACK_KEYWORDS_JSON)
-)
 
 INTAKE_FORM_DATE_SELECTOR = "div[data-testid='intake-form'] time, div[data-testid='IntakeForm'] time, time[datetime][dir]"
 
@@ -701,19 +636,15 @@ pyautogui.FAILSAFE = True  # Keep failsafe enabled
 # Set to 9222 for Chrome or Thorium depending on which browser you're using
 CDP_DEBUG_PORT = 9222  # Change to match your --remote-debugging-port value
 
-# Prefer Playwright for grabbing medication in Sexual Health tab
-USE_PLAYWRIGHT_FOR_MED = True
-# Prefer Playwright for Sexual Health (effectiveness/BP/notes) when available
-# Default to False for speed; PW will be used as a fallback when enabled
-USE_PLAYWRIGHT_FOR_SH = False
 # Prefer fetching page text via CDP (Playwright) instead of Selenium for speed and to avoid focus/clipboard
 USE_CDP_FOR_TEXT = True
-# Optional clipboard scraping mode for Sexual Health (select-all + copy and parse)
+# Preferred page-text grab path for all variable parsing grabs.
+# Change PLAYWRIGHT_TEXT_GRAB_METHOD to switch the concrete Playwright strategy.
+USE_PLAYWRIGHT_TEXT_GRAB = True
+PLAYWRIGHT_TEXT_GRAB_METHOD = "inner_text_body"
+# Clipboard remains available as an automatic fallback when Playwright text grab fails.
 USE_CLIPBOARD_FOR_TEXT = True
-# Global grab-method toggle for T Deficiency, Hair Loss, and Photoaging tabs
-# True = use CDP/Playwright (fast, no clipboard needed), False = use clipboard (Ctrl+A/Ctrl+C)
-USE_CDP_FOR_GRAB = False
-# Start in overlay mode when a CDP browser session is available.
+# Attempt to start directly in JS overlay mode on launch. Falls back to Python UI if CDP is unavailable.
 AUTO_START_JS_OVERLAY = True
 # Delay (ms) before running an auto grab so the EMR has time to focus after a tab switch
 AUTO_GRAB_DELAY_MS = 900
@@ -721,141 +652,7 @@ AUTO_GRAB_DELAY_MS = 900
 # Width to leave visible when the GUI is hidden off-screen
 GUI_HIDDEN_VISIBLE_WIDTH = 65
 
-# Lab configuration - matching the 9 labs from simple_lab_grabber
-LABS_CONFIG = {
-    "Total PSA": {
-        "unit": "ng/mL", 
-        "normal_range": "0-4", 
-        "patterns": ["Total PSA", "PSA Total", "PSA", "Prostate Specific Antigen", "PSA, Total"],
-        "var": "psa"
-    },
-    "FSH": {
-        "unit": "mIU/mL", 
-        "normal_range": "1.5-12.4", 
-        "patterns": ["FSH", "Follicle Stimulating Hormone", "Follicle-Stimulating Hormone", "FSH, Serum"],
-        "var": "fsh"
-    },
-    "LH": {
-        "unit": "mIU/mL", 
-        "normal_range": "1.7-8.6", 
-        "patterns": ["LH", "Luteinizing Hormone", "Luteinizing-Hormone", "LH, Serum"],
-        "var": "lh"
-    },
-    "Albumin": {
-        "unit": "g/dL", 
-        "normal_range": "3.5-5.0", 
-        "patterns": ["Albumin", "Albumin, Serum", "Serum Albumin"],
-        "var": "albumin"
-    },
-    "Estradiol": {
-        "unit": "pg/mL", 
-        "normal_range": "7.6-42.6", 
-        "patterns": ["Estradiol", "E2", "Estradiol, Serum", "17-Beta Estradiol"],
-        "var": "estradiol"
-    },
-    "Free Testosterone": {
-        "unit": "ng/dL", 
-        "normal_range": "9.3-26.5", 
-        "patterns": ["Free Testosterone", "Free T", "Testosterone Free", "Testosterone, Free", "Free Testosterone, Serum"],
-        "var": "free_testosterone"
-    },
-    "SHBG": {
-        "unit": "nmol/L", 
-        "normal_range": "16.5-55.9", 
-        "patterns": ["SHBG", "Sex Hormone Binding Globulin", "Sex Hormone-Binding Globulin", "SHBG, Serum"],
-        "var": "shbg"
-    },
-    "Total Testosterone": {
-        "unit": "ng/dL", 
-        "normal_range": "264-916", 
-        "patterns": ["Total Testosterone", "Total T", "Testosterone Total", "Testosterone", "Testosterone, Total", "Testosterone, Serum"],
-        "var": "total_testosterone"
-    },
-    "Hematocrit": {
-        "unit": "%", 
-        "normal_range": "37.5-51.0", 
-        "patterns": ["Hematocrit", "HCT", "Hct", "Hematocrit %"],
-        "var": "hematocrit"
-    },
-}
-
-def extract_td_medication_from_text(text: str) -> str:
-    """Extract testosterone deficiency medication from grabbed text.
-    
-    Prioritizes lines that contain both medication name AND dosage/directions.
-    Example target: "Enclomiphene / Tadalafil, 12.5mg / 8.5mg (daily)"
-    """
-    if not text:
-        return ""
-    
-    lines = text.split('\n')
-    
-    # Pattern to match TD-related medications
-    td_med_pattern = re.compile(
-        r'(enclomiphene|clomiphene|tadalafil|testosterone|androgen|TRT)',
-        re.IGNORECASE
-    )
-    
-    # Pattern to match dosage (e.g., 12.5mg, 25 mg)
-    dose_pattern = re.compile(r'\d+\.?\d*\s*mg', re.IGNORECASE)
-    
-    # Pattern to match frequency/directions
-    frequency_pattern = re.compile(
-        r'\(?\s*(daily|every other day|twice daily|weekly|as needed|EOD|QD|BID|once daily|per day)\s*\)?',
-        re.IGNORECASE
-    )
-    
-    # Lines to skip (headers, warnings, etc.)
-    skip_patterns = re.compile(
-        r'^(treatment plan|medication interaction|patient preference|patient is already|treatment$|medication$)',
-        re.IGNORECASE
-    )
-    
-    # Priority 1: Find lines with medication name + dosage + frequency (best match)
-    best_match = ""
-    for ln in lines:
-        ln_stripped = ln.strip()
-        if not ln_stripped or skip_patterns.match(ln_stripped):
-            continue
-        
-        has_med = td_med_pattern.search(ln_stripped)
-        has_dose = dose_pattern.search(ln_stripped)
-        has_freq = frequency_pattern.search(ln_stripped)
-        
-        if has_med and has_dose and has_freq:
-            # This is ideal - has medication, dose, AND frequency
-            best_match = ln_stripped
-            break
-        elif has_med and has_dose and not best_match:
-            # Good match - has medication and dose
-            best_match = ln_stripped
-    
-    # Priority 2: If no match with dose, fall back to any medication line
-    if not best_match:
-        for ln in lines:
-            ln_stripped = ln.strip()
-            if not ln_stripped or skip_patterns.match(ln_stripped):
-                continue
-            if td_med_pattern.search(ln_stripped):
-                # Skip very short entries that are likely just category names
-                if len(ln_stripped) > 15:
-                    best_match = ln_stripped
-                    break
-    
-    # Clean up the medication string
-    if best_match:
-        # Remove leading bullet points, asterisks, etc.
-        best_match = re.sub(r'^[\-\*\•\>]+\s*', '', best_match).strip()
-    
-    return best_match
-
-
-def _update_td_med_text(value: str) -> None:
-    """Update the TD medication text control with the given value."""
-    target = globals().get("frame")
-    if not target or not hasattr(target, "td_med_text"):
-        return
-    target.td_med_text.SetValue(value)
+# --- END CONFIGURATION SECTION ---
 
 # Performance Anxiety known options (used for text-based fallback parsing)
 PA_SITUATION_OPTIONS = [
@@ -931,298 +728,76 @@ PA_SYMPTOM_KEYWORDS = [
     'chest', 'flushed', 'hot', 'chills',
 ]
 
-TEMPLATE_BUTTONS = [
-    {"label": "Insert Labs", "dynamic_labs": True},
-    {"label": "Rx Note", "rx_note": True},
-    {"label": "Referral note", "referral_note": True},
-    {"label": "Lab Message", "lab_message": True},
-    {"label": "T Follow-up Labs", "template_name": "Testosterone Follow-up Labs"},
-    {"label": "TD Follow-up Note", "template_name": "Testosterone Deficiency Follow-up"},
-    {"label": "Clinical Matrix", "show_matrix": True},
-    {"label": "Clear All", "clear_all": True},
-]
-
 # --- END CONFIGURATION SECTION ---
 
-def extract_lab_value_simple(label_config: Dict[str, Any], text: str) -> Dict[str, str]:
-    """
-    Simplified extraction for EMR format
-    Looking for pattern: Lab Name -> Value -> Unit on separate lines
-    """
-    unit = label_config["unit"]
-    patterns = label_config["patterns"]
-    normal_range = label_config.get("normal_range", "")
-    
-    # Split text into lines for easier processing
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
-    best_comparator_match: Optional[Dict[str, Any]] = None
 
-    for pattern in patterns:
-        # Find the lab name line
-        for i, line in enumerate(lines):
-            if pattern.lower() in line.lower():
-                # Look ahead for the value in the next few lines
-                for j in range(i+1, min(i+5, len(lines))):
-                    next_line = lines[j]
-                    
-                    # Check if this line contains a number that could be our value
-                    # Handle comparison operators like "< 25"
-                    value_match = re.search(r'([<>≤≥]?\s*\d+\.?\d*)', next_line)
-                    if value_match:
-                        potential_value = value_match.group(1).strip()
-                        
-                        # Check if the unit appears in the next line or same line
-                        unit_found = False
-                        for k in range(j, min(j+3, len(lines))):
-                            if unit.lower() in lines[k].lower():
-                                unit_found = True
-                                break
-                        
-                        if unit_found:
-                            # Extract just the numeric part for validation
-                            numeric_part = re.search(r'(\d+\.?\d*)', potential_value)
-                            if numeric_part:
-                                try:
-                                    float_val = float(numeric_part.group(1))
-                                    if 0.01 <= float_val <= 10000:  # Reasonable range
-                                        result = {
-                                            "value": f"{potential_value} {unit}",
-                                            "raw_value": potential_value,
-                                            "unit": unit,
-                                            "normal_range": normal_range,
-                                            "found": True,
-                                            "matched_pattern": f"Line-based: {pattern}"
-                                        }
-                                        is_comparator = potential_value.strip().startswith(("<", ">", "≤", "≥"))
-                                        if is_comparator and label_config.get("var") == "total_testosterone":
-                                            if best_comparator_match is None:
-                                                best_comparator_match = result
-                                            continue
-                                        return result
-                                except ValueError:
-                                    continue
-    
-    if best_comparator_match:
-        return best_comparator_match
-
-    return {
-        "value": "",
-        "raw_value": "",
-        "unit": label_config["unit"],
-        "normal_range": normal_range,
-        "found": False,
-        "matched_pattern": "Not found"
-    }
-
-def parse_tdcs_score(text: str) -> int:
-    """Parse TDCS score from text by counting 'Add +1 to TDCS score' and 'Add +2 to TDCS score'"""
-    score = 0
-    
-    # Count +1 occurrences
-    plus_one_pattern = r'Add \+1 to TDCS score'
-    plus_one_matches = len(re.findall(plus_one_pattern, text, re.IGNORECASE))
-    score += plus_one_matches * 1
-    
-    # Count +2 occurrences  
-    plus_two_pattern = r'Add \+2 to TDCS score'
-    plus_two_matches = len(re.findall(plus_two_pattern, text, re.IGNORECASE))
-    score += plus_two_matches * 2
-    
-    print(f"TDCS parsing: Found {plus_one_matches} '+1' and {plus_two_matches} '+2' = Total score: {score}")
-    return score
-
-def parse_tdcsc_score(text: str) -> Optional[int]:
-    """Parse TDCS-C score based on symptom change responses."""
-    questions = [
-        ("Since starting your treatment, how has your sex drive changed?", 2),
-        ("Since starting your treatment, how has your ability to get or keep an erection changed?", 2),
-        ("Since starting your treatment, how has your physical strength or endurance changed?", 1),
-        ("Since starting your treatment, how has your need to nap to feel alert changed?", 1),
-        ("Since starting your treatment, how have your energy levels changed?", 1),
-        ("Since starting your treatment, how has your mental clarity or brain fog changed?", 1),
-        ("Since starting your treatment, how has your motivation changed?", 1),
-        ("Since starting your treatment, how has your mood changed?", 1),
-    ]
-    response_points = {
-        "much better": 2,
-        "a little better": 1,
-        "no change": 0,
-        "a little worse": -1,
-        "much worse": -2,
-    }
-    total = 0
-    matched = 0
-    for question, weight in questions:
-        resp = _extract_response_after_question(question, text)
-        if not resp:
-            continue
-        normalized = resp.strip().lower()
-        points = None
-        for key, value in response_points.items():
-            if key in normalized:
-                points = value
-                break
-        if points is None:
-            continue
-        matched += 1
-        total += points * weight
-    if matched == 0:
-        print("TDCS-C parsing: no responses found")
-        return None
-    print(f"TDCS-C parsing: Matched {matched} responses = Total score: {total}")
-    return total
-
-def parse_ed_status(text: str) -> str:
-    """Parse ED status from the erection difficulty question"""
-    # Look for the specific question about erection difficulty
-    pattern = r'Do you sometimes have difficulty getting or keeping a hard erection\?\s*([YN][eo][s]?)'
-    match = re.search(pattern, text, re.IGNORECASE)
-    
-    if match:
-        answer = match.group(1).lower()
-        if answer.startswith('y'):
-            result = "Yes"
-        elif answer.startswith('n'):
-            result = "No"
-        else:
-            result = "—"
-        print(f"ED status parsed: {result}")
-        return result
-    
-    print("ED status not found in text")
-    return "—"
-
-def _extract_response_after_question(question: str, text: str) -> str:
-    """Find the line immediately after a question prompt and return it."""
-    try:
-        # Normalize newlines and search for the question text, allowing an optional 'Response:' line
-        pattern = re.escape(question) + r"\s*\n\s*(?:Response:\s*)?([^\n]+)"
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-    except Exception as e:
-        print(f"Question parse error: {e}")
-    return ""
-
-def parse_treatment_satisfaction(text: str) -> str:
-    """Parse satisfaction response from the questionnaire block."""
-    resp = _extract_response_after_question("Q: Overall, how satisfied are you with your treatment?", text)
-    if not resp:
-        return "—"
-    normalized = resp.lower()
-    mapping = {
-        "very satisfied": "Very satisfied",
-        "satisfied": "Satisfied",
-        "neutral": "Neutral",
-        "dissatisfied": "Dissatisfied",
-        "very dissatisfied": "Very dissatisfied",
-    }
-    for key, val in mapping.items():
-        if key in normalized:
-            return val
-    return resp
-
-def parse_side_effects_response(text: str) -> str:
-    """Parse side effects answer from questionnaire."""
-    resp = _extract_response_after_question("Q: Have you experienced any side effects?", text)
-    if not resp:
-        return "No side effects reported"
-    if resp.strip().lower().startswith("no"):
-        return "No side effects reported"
-    return resp
-
-def detect_td_diagnosis(text: str) -> bool:
-    """Detect testosterone deficiency / low T in text; returns True if found."""
-    if not text:
-        return False
-    low = text.lower()
-    keywords = (
-        "testosterone deficiency",
-        "t deficiency",
-        "low testosterone",
-        "low t",
-        "hypogonadism",
-        "hypogonadal",
-    )
-    return any(k in low for k in keywords)
-
-def load_templates_from_file():
-    """Load templates from external templates.txt file"""
+def _parse_template_file(filepath: str) -> dict:
+    """Parse a single template file and return a dict of {name: content}."""
     templates = {}
-    
-    # Get the directory where this script is located
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    templates_path = os.path.join(script_dir, 'templates.txt')
-    
     try:
-        with open(templates_path, 'r', encoding='utf-8') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
-        
-        # Parse templates - simplified format without [END] markers
         current_template = None
-        current_content = []
-        
-        for line in content.split('\n'):
+        current_content: list = []
+        for line in content.split("\n"):
             stripped_line = line.strip()
-            if stripped_line.startswith('[') and stripped_line.endswith(']'):
-                # Save previous template if exists
+            if stripped_line.startswith("[") and stripped_line.endswith("]"):
                 if current_template and current_content:
-                    template_text = '\n'.join(current_content).rstrip()  # Keep formatting but remove trailing spaces
+                    template_text = "\n".join(current_content).rstrip()
                     if template_text:
                         templates[current_template] = template_text
-                
-                # Start new template
-                current_template = stripped_line[1:-1]  # Remove brackets
+                current_template = stripped_line[1:-1]
                 current_content = []
-            elif current_template is not None:  # Include empty lines for paragraph breaks
-                current_content.append(line.rstrip())  # Keep original line but remove trailing spaces
-        
-        # Save last template
+            elif current_template is not None:
+                current_content.append(line.rstrip())
         if current_template and current_content:
-            template_text = '\n'.join(current_content).rstrip()  # Keep formatting but remove trailing spaces
+            template_text = "\n".join(current_content).rstrip()
             if template_text:
                 templates[current_template] = template_text
-    
     except FileNotFoundError:
-        print(f"Templates file not found: {templates_path}")
-        # Fallback to basic templates
-        templates = {
-            "Insert Labs": "Labs:\n{lab_values_formatted}",
-            "Lab Message": "I have reviewed your intake and the labs which are now complete. There is total testosterone of {total_testosterone} ng/dL and free testosterone of {free_testosterone} ng/dL. The other labs done for safety, to rule out possible concerning causes of deficiency, are unremarkable",
-            "Testosterone Follow-up Labs": (
-                "Hi, my name is Matthew Tomcik, MD, a board-certified family physician licensed in your state.\n\n"
-                "I have reviewed your responses here, and the labs which are now complete.\n\n"
-                "The total testosterone is now in the normal range at {total_testosterone} ng/dL ([up/down] from [last value total testosterone] in [Month, year]), "
-                "while the estradiol, hematocrit, and PSA are [normal/elevated] at {estradiol} pg/mL, {hematocrit} %, and {psa} ng/mL. "
-                "Please list each as \"lab name is [normal/abnormal] at [value]\" for any additional tests reviewed.\n\n"
-                "I see you've reported [improvement/no change/worsening] in symptoms and [blank/no] side effects [including side effects from the questionnaire], "
-                "we'd recommend that you [continue the treatment as-is/increase the dose to ***/decrease to ***] at this time."
-            ),
-            "Testosterone Deficiency Follow-up": (
-                "S: Reports he is {response} treatment with {side_effects}\n"
-                "O:\n"
-                "Total testosterone: {total_testosterone} ng/dL\n"
-                "PSA: {psa} ng/mL\n"
-                "estradiol: {estradiol} pg/mL\n"
-                "Hematocrit: {hematocrit} %\n"
-                "A: {diagnoses}\n"
-                "P: Proceed with {medication}\n"
-                "Prescription written, follow-up per routine."
-            ),
-        }
+        print(f"Template file not found: {filepath}")
     except Exception as e:
-        print(f"Error loading templates: {e}")
-        templates = {"Error": "Could not load templates"}
-    
+        print(f"Error parsing template file {filepath}: {e}")
     return templates
 
 
+def load_templates_from_file():
+    """Load templates from templates.txt and all files in the templates/ folder."""
+    templates = {}
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 1) Load base templates.txt (T-Deficiency / general)
+    base_path = os.path.join(script_dir, "templates.txt")
+    templates.update(_parse_template_file(base_path))
+
+    # 2) Load every file in the templates/ subfolder
+    templates_dir = os.path.join(script_dir, "templates")
+    if os.path.isdir(templates_dir):
+        for fname in sorted(os.listdir(templates_dir)):
+            if fname.endswith(".txt"):
+                fpath = os.path.join(templates_dir, fname)
+                templates.update(_parse_template_file(fpath))
+
+    if not templates:
+        print("Warning: No templates loaded from any file.")
+
+    # Log loaded template names for debugging
+    print(f"Loaded {len(templates)} templates: {list(templates.keys())}")
+    return templates
+
+
+# ================================================================
+# ================================================================
+# JS Overlay - injected into the EMR page via CDP as an alternative UI
+# ================================================================
 OVERLAY_JS = r"""
 (() => {
+    // Remove existing overlay if re-injecting
     const existing = document.getElementById('emr-assist-overlay');
     if (existing) existing.remove();
 
+    // --- Overlay container ---
     const overlay = document.createElement('div');
     overlay.id = 'emr-assist-overlay';
     overlay.innerHTML = `
@@ -1231,294 +806,4887 @@ OVERLAY_JS = r"""
             position: fixed;
             top: 0;
             left: 0;
-            right: 0;
+            width: 100%;
             z-index: 100000;
-            font-family: "Segoe UI", Arial, sans-serif;
-            color: #e8f3ff;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 12px;
+            pointer-events: auto;
+            user-select: none;
+            -webkit-user-select: none;
         }
-        #emr-assist-overlay * { box-sizing: border-box; }
-        .emr-overlay-shell {
-            background: rgba(9, 20, 36, 0.92);
-            border-bottom: 1px solid rgba(80, 185, 255, 0.55);
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
+        #emr-assist-overlay * {
+            box-sizing: border-box;
         }
-        .emr-overlay-bar {
+        .emr-bar {
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 8px 12px;
-            flex-wrap: wrap;
+            padding: 5px 12px;
+            background: rgba(10, 30, 60, 0.88);
+            border-bottom: 2px solid #3bd3ff;
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
         }
-        .emr-overlay-title {
-            font-size: 11px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: #8fc9ff;
-            margin-right: 10px;
+        .emr-section {
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
-        .emr-visit-pill {
-            min-width: 160px;
-            padding: 5px 10px;
-            border-radius: 999px;
-            background: rgba(28, 55, 84, 0.95);
-            color: #f4fbff;
-            font-size: 12px;
+        .emr-section-divider {
+            width: 1px;
+            height: 24px;
+            background: rgba(59, 211, 255, 0.3);
+            margin: 0 4px;
+        }
+        .emr-visit-label {
+            color: #93c0ff;
             font-weight: 600;
-        }
-        .emr-btn,
-        .emr-select {
-            height: 30px;
-            border-radius: 6px;
-            border: 1px solid rgba(96, 171, 232, 0.35);
-            background: rgba(17, 34, 53, 0.96);
-            color: #e8f3ff;
-            font: inherit;
+            font-size: 12px;
+            white-space: nowrap;
         }
         .emr-btn {
-            padding: 0 12px;
+            background: #0f2233;
+            color: #cfe7ff;
+            border: 1px solid #243948;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
             cursor: pointer;
-            font-size: 12px;
-            font-weight: 600;
+            white-space: nowrap;
+            font-family: inherit;
         }
         .emr-btn:hover {
-            background: rgba(29, 53, 79, 0.98);
-            border-color: rgba(112, 194, 255, 0.7);
+            background: #1a3a52;
+            border-color: #3bd3ff;
+            color: #fff;
         }
-        .emr-btn-active {
-            background: linear-gradient(180deg, #5dd7ff 0%, #1fb2e4 100%);
-            color: #062033;
-            border-color: #5dd7ff;
+        .emr-btn-accent {
+            background: linear-gradient(180deg, #3bd3ff 0%, #12aee6 100%);
+            color: #002233;
+            font-weight: 700;
+            border: 1px solid #3bd3ff;
         }
-        .emr-select {
-            min-width: 220px;
-            padding: 0 10px;
+        .emr-btn-accent:hover {
+            background: linear-gradient(180deg, #5de0ff 0%, #1ec4ff 100%);
         }
-        .emr-overlay-body {
-            display: grid;
-            grid-template-columns: minmax(220px, 1fr) minmax(320px, 2fr);
+        .emr-icon-btn {
+            min-width: 30px;
+            padding: 4px 8px;
+            font-size: 14px;
+            line-height: 1;
+        }
+        .emr-icon-btn.emr-btn-active,
+        .emr-invisit-btn.emr-btn-active,
+        .emr-keepawake-btn.emr-btn-active,
+        .emr-dark-btn.emr-btn-active {
+            background: linear-gradient(180deg, #3bd3ff 0%, #12aee6 100%);
+            color: #002233;
+            font-weight: 700;
+            border-color: #3bd3ff;
+        }
+        .emr-invisit-btn {
+            padding: 4px 10px;
+            font-size: 11px;
+            line-height: 1;
+        }
+        .emr-keepawake-btn {
+            padding: 4px 10px;
+            font-size: 11px;
+            line-height: 1;
+        }
+        .emr-dashboard-payroll-panel {
+            display: none;
+            background: rgba(7, 20, 39, 0.94);
+            border-bottom: 1px solid rgba(59, 211, 255, 0.25);
+            padding: 8px 14px 10px;
+        }
+        .emr-dashboard-payroll-panel.emr-dashboard-payroll-open {
+            display: block;
+        }
+        .emr-dashboard-payroll-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
             gap: 12px;
-            padding: 0 12px 12px;
-        }
-        .emr-panel {
-            background: rgba(13, 27, 44, 0.9);
-            border: 1px solid rgba(80, 145, 205, 0.24);
-            border-radius: 10px;
-            padding: 10px;
-            min-height: 110px;
-        }
-        .emr-panel-title {
-            font-size: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: #7fb7eb;
             margin-bottom: 8px;
         }
-        .emr-template-row {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            margin-bottom: 10px;
-            flex-wrap: wrap;
+        .emr-dashboard-payroll-title {
+            color: #93c0ff;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
         }
-        .emr-status {
-            min-height: 18px;
-            color: #b9d8f5;
-            font-size: 12px;
-        }
-        .emr-vars {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 8px;
-            max-height: 220px;
-            overflow: auto;
-            padding-right: 2px;
-        }
-        .emr-var-card {
-            padding: 8px;
-            border-radius: 8px;
-            background: rgba(20, 38, 59, 0.92);
-            border: 1px solid rgba(88, 139, 185, 0.22);
-        }
-        .emr-var-key {
+        .emr-dashboard-payroll-stamp {
+            color: #5a8ab0;
             font-size: 10px;
+            white-space: nowrap;
+        }
+        .emr-dashboard-payroll-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px 12px;
+        }
+        .emr-dashboard-payroll-item {
+            background: rgba(15, 34, 51, 0.72);
+            border: 1px solid rgba(59, 211, 255, 0.16);
+            border-radius: 6px;
+            padding: 7px 8px;
+            min-width: 0;
+        }
+        .emr-dashboard-payroll-label {
+            color: #5a8ab0;
+            font-size: 9px;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: #8eb8db;
+            letter-spacing: 0.45px;
             margin-bottom: 4px;
         }
-        .emr-var-value {
+        .emr-dashboard-payroll-value {
+            color: #ddeefb;
             font-size: 12px;
-            color: #f5fbff;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .emr-dashboard-payroll-footnote {
+            color: #7f93a4;
+            font-size: 10px;
+            margin-top: 8px;
+        }
+        .emr-dashboard-payroll-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .emr-select {
+            background: #071427;
+            color: #ddeefb;
+            border: 1px solid #213244;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            min-width: 160px;
+            font-family: inherit;
+        }
+        .emr-close {
+            background: transparent;
+            color: #7f93a4;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            padding: 2px 6px;
+            line-height: 1;
+            margin-left: auto;
+        }
+        .emr-close:hover {
+            color: #ff5555;
+        }
+        .emr-vars-toggle {
+            background: transparent;
+            color: #7f93a4;
+            border: none;
+            font-size: 10px;
+            cursor: pointer;
+            padding: 2px 4px;
+        }
+        .emr-vars-toggle:hover {
+            color: #3bd3ff;
+        }
+        .emr-vars-panel {
+            background: rgba(7, 20, 39, 0.92);
+            border-bottom: 1px solid rgba(59, 211, 255, 0.25);
+            padding: 6px 14px;
+            display: none;
+            flex-wrap: wrap;
+            gap: 4px 16px;
+            font-size: 11px;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+        .emr-vars-panel.emr-vars-open {
+            display: flex;
+        }
+        .emr-var-item {
+            color: #8ab4d8;
+            white-space: nowrap;
+        }
+        .emr-var-item .emr-var-name {
+            color: #5a8ab0;
+        }
+        .emr-var-item .emr-var-value {
+            color: #cfe7ff;
+            background: #0f2233;
+            padding: 1px 5px;
+            border-radius: 3px;
+            border: 1px solid #1a3a52;
+            font-family: Consolas, monospace;
+            font-size: 10px;
+        }
+        .emr-shortcut {
+            color: #5a7a94;
+            font-size: 9px;
+            margin-left: 2px;
+        }
+        .emr-status {
+            color: #5a7a94;
+            font-size: 10px;
+            font-style: italic;
+            white-space: nowrap;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .emr-minimize-btn {
+            background: transparent;
+            color: #7f93a4;
+            border: none;
+            font-size: 14px;
+            cursor: pointer;
+            padding: 2px 6px;
+            line-height: 1;
+        }
+        .emr-minimize-btn:hover {
+            color: #3bd3ff;
+        }
+        /* Minimized mini-bar - compact floating cluster, top-right */
+        .emr-mini-bar {
+            display: none;
+            position: fixed;
+            top: 4px;
+            right: 8px;
+            z-index: 100002;
+            align-items: center;
+            gap: 2px;
+            padding: 3px 4px;
+            background: rgba(10, 30, 60, 0.85);
+            border: 1px solid rgba(59, 211, 255, 0.3);
+            border-radius: 6px;
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            pointer-events: auto;
+        }
+        .emr-mini-bar.emr-mini-visible {
+            display: flex;
+        }
+        .emr-mini-bar .emr-invisit-btn {
+            min-width: 74px;
+            padding: 4px 10px;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .emr-mini-bar .emr-keepawake-btn {
+            min-width: 90px;
+            padding: 4px 10px;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .emr-mini-bar .emr-icon-btn {
+            min-width: 30px;
+            padding: 4px 8px;
+        }
+        .emr-mini-btn {
+            background: rgba(15, 34, 51, 0.9);
+            color: #cfe7ff;
+            border: 1px solid #243948;
+            width: 26px;
+            height: 22px;
+            border-radius: 3px;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+            padding: 0;
+            font-family: inherit;
+        }
+        .emr-mini-btn:hover {
+            background: #1a3a52;
+            border-color: #3bd3ff;
+            color: #fff;
+        }
+        .emr-mini-btn-close:hover {
+            color: #ff5555;
+            border-color: #ff5555;
+        }
+        /* â”€â”€ Template context menu (Ctrl+Shift+D) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        .emr-ctx-backdrop {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 100001;
+            pointer-events: none;
+        }
+        .emr-ctx-backdrop.emr-ctx-open {
+            display: block;
+        }
+        .emr-ctx-menu {
+            position: fixed;
+            background: rgba(7, 20, 39, 0.96);
+            border: 1px solid #3bd3ff;
+            border-radius: 8px;
+            min-width: 290px;
+            width: min(420px, calc(100vw - 16px));
+            max-width: 420px;
+            max-height: min(72vh, 760px);
+            overflow: hidden;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+        }
+        .emr-ctx-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px 6px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.2);
+            cursor: move;
+        }
+        .emr-ctx-drag-handle {
+            color: #5a8ab0;
+            font-size: 12px;
+            letter-spacing: 1px;
+            line-height: 1;
+            cursor: move;
+        }
+        .emr-ctx-title-wrap {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 0;
+            flex: 1;
+        }
+        .emr-ctx-title {
+            color: #93c0ff;
+            font-weight: 600;
+            font-size: 12px;
+            padding: 0;
+            margin: 0;
+        }
+        .emr-ctx-subtitle {
+            color: #6f92ab;
+            font-size: 10px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .emr-ctx-close-btn {
+            background: transparent;
+            color: #7f93a4;
+            border: 1px solid rgba(59, 211, 255, 0.15);
+            border-radius: 4px;
+            padding: 2px 8px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 11px;
+        }
+        .emr-ctx-close-btn:hover {
+            color: #fff;
+            border-color: rgba(59, 211, 255, 0.5);
+            background: rgba(59, 211, 255, 0.12);
+        }
+        .emr-ctx-tabs {
+            display: flex;
+            gap: 6px;
+            padding: 8px 12px 0;
+        }
+        .emr-ctx-tab {
+            flex: 1;
+            background: rgba(15, 34, 51, 0.75);
+            color: #93c0ff;
+            border: 1px solid rgba(59, 211, 255, 0.16);
+            border-bottom: none;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            padding: 7px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            font-family: inherit;
+        }
+        .emr-ctx-tab:hover {
+            background: rgba(26, 58, 82, 0.9);
+            color: #fff;
+        }
+        .emr-ctx-tab.emr-ctx-tab-active {
+            background: rgba(59, 211, 255, 0.15);
+            color: #fff;
+            border-color: rgba(59, 211, 255, 0.45);
+        }
+        .emr-ctx-body {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .emr-ctx-view {
+            display: none;
+            min-height: 0;
+        }
+        .emr-ctx-view.emr-ctx-view-active {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .emr-ctx-scroll {
+            overflow-y: auto;
+            min-height: 0;
+            padding-bottom: 6px;
+        }
+        .emr-ctx-quick-section {
+            padding: 8px 12px 6px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.2);
+            margin-bottom: 2px;
+        }
+        .emr-ctx-quick-heading {
+            color: #5a8ab0;
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+        .emr-ctx-quick-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .emr-ctx-quick-btn {
+            background: rgba(59, 211, 255, 0.12);
+            color: #cfe7ff;
+            border: 1px solid rgba(59, 211, 255, 0.28);
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            font-family: inherit;
+            white-space: nowrap;
+        }
+        .emr-ctx-quick-btn:hover {
+            background: rgba(59, 211, 255, 0.24);
+            border-color: rgba(59, 211, 255, 0.55);
+            color: #fff;
+        }
+        .emr-ctx-quick-btn:active {
+            background: rgba(59, 211, 255, 0.32);
+        }
+        .emr-ctx-item {
+            display: block;
+            width: 100%;
+            text-align: left;
+            background: transparent;
+            color: #cfe7ff;
+            border: none;
+            padding: 8px 16px;
+            font-size: 12px;
+            cursor: pointer;
+            font-family: inherit;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .emr-ctx-item:hover {
+            background: rgba(59, 211, 255, 0.15);
+            color: #fff;
+        }
+        .emr-ctx-item:active {
+            background: rgba(59, 211, 255, 0.3);
+        }
+        .emr-ctx-empty {
+            color: #5a7a94;
+            font-style: italic;
+            padding: 12px 16px;
+            font-size: 11px;
+        }
+        .emr-ctx-hint {
+            color: #5a7a94;
+            font-size: 9px;
+            padding: 6px 12px 8px;
+            border-top: 1px solid rgba(59, 211, 255, 0.15);
+            margin-top: auto;
+        }
+        /* Vars section inside context menu */
+        .emr-ctx-vars-section {
+            padding: 6px 12px 4px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.2);
+            margin-bottom: 2px;
+            max-height: 160px;
+            overflow-y: auto;
+        }
+        .emr-ctx-vars-heading {
+            color: #5a8ab0;
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+        .emr-ctx-var-row {
+            display: flex;
+            gap: 6px;
+            padding: 1px 0;
+            font-size: 10px;
+        }
+        .emr-ctx-var-name {
+            color: #5a8ab0;
+            white-space: nowrap;
+        }
+        .emr-ctx-var-val {
+            color: #cfe7ff;
+            background: #0f2233;
+            padding: 0 4px;
+            border-radius: 2px;
+            border: 1px solid #1a3a52;
+            font-family: Consolas, monospace;
+            font-size: 10px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 260px;
+        }
+        .emr-ctx-grab-shell {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        .emr-ctx-grab-help {
+            color: #7f93a4;
+            font-size: 10px;
+            line-height: 1.4;
+            padding: 8px 12px 6px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.15);
+        }
+        .emr-ctx-grab-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 10px 12px 8px;
+            overflow-y: auto;
+            min-height: 0;
+            max-height: 34vh;
+        }
+        .emr-ctx-grab-item {
+            border: 1px solid rgba(59, 211, 255, 0.16);
+            border-radius: 7px;
+            background: rgba(15, 34, 51, 0.65);
+            padding: 9px 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .emr-ctx-grab-item-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .emr-ctx-grab-label {
+            color: #cfe7ff;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .emr-ctx-grab-meta {
+            color: #6f92ab;
+            font-size: 9px;
+        }
+        .emr-ctx-grab-current {
+            color: #b7dff6;
+            background: rgba(7, 20, 39, 0.8);
+            border: 1px solid rgba(59, 211, 255, 0.12);
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-family: Consolas, monospace;
+            font-size: 10px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .emr-ctx-grab-action {
+            align-self: flex-start;
+            background: rgba(59, 211, 255, 0.12);
+            color: #cfe7ff;
+            border: 1px solid rgba(59, 211, 255, 0.24);
+            border-radius: 5px;
+            padding: 5px 10px;
+            font-size: 10px;
+            cursor: pointer;
+            font-family: inherit;
+        }
+        .emr-ctx-grab-action:hover {
+            background: rgba(59, 211, 255, 0.24);
+            color: #fff;
+            border-color: rgba(59, 211, 255, 0.5);
+        }
+        .emr-ctx-grab-action.emr-ctx-grab-action-active {
+            background: rgba(40, 245, 208, 0.16);
+            border-color: rgba(40, 245, 208, 0.52);
+            color: #dffff8;
+        }
+        .emr-ctx-preview {
+            margin: 0 12px 10px;
+            border: 1px solid rgba(40, 245, 208, 0.5);
+            background: rgba(10, 45, 50, 0.88);
+            border-radius: 8px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            box-shadow: 0 0 0 1px rgba(40, 245, 208, 0.12), 0 0 18px rgba(40, 245, 208, 0.18);
+        }
+        .emr-ctx-preview-title {
+            color: #dffff8;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .emr-ctx-preview-subtitle {
+            color: #94c8d2;
+            font-size: 10px;
+        }
+        .emr-ctx-preview-value {
+            color: #dffff8;
+            background: rgba(5, 22, 30, 0.9);
+            border: 1px solid rgba(40, 245, 208, 0.22);
+            border-radius: 6px;
+            padding: 8px;
+            font-family: Consolas, monospace;
+            font-size: 11px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .emr-ctx-preview-selector {
+            color: #93c0ff;
+            font-family: Consolas, monospace;
+            font-size: 10px;
+            word-break: break-all;
+        }
+        .emr-ctx-preview-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .emr-ctx-preview-btn {
+            background: #0f2233;
+            color: #cfe7ff;
+            border: 1px solid #243948;
+            border-radius: 6px;
+            padding: 6px 10px;
+            cursor: pointer;
+            font-size: 11px;
+            font-family: inherit;
+        }
+        .emr-ctx-preview-btn:hover {
+            background: #1a3a52;
+            border-color: #3bd3ff;
+            color: #fff;
+        }
+        .emr-ctx-preview-btn.emr-ctx-preview-accept {
+            background: linear-gradient(180deg, #3bd3ff 0%, #12aee6 100%);
+            border-color: #3bd3ff;
+            color: #002233;
+            font-weight: 700;
+        }
+        /* Vars-in-menu toggle */
+        .emr-vars-menu-toggle {
+            background: transparent;
+            color: #5a7a94;
+            border: 1px solid transparent;
+            font-size: 10px;
+            cursor: pointer;
+            padding: 2px 5px;
+            border-radius: 3px;
+            white-space: nowrap;
+        }
+        .emr-vars-menu-toggle:hover {
+            color: #3bd3ff;
+        }
+        .emr-vars-menu-toggle.emr-toggle-on {
+            color: #3bd3ff;
+            border-color: rgba(59, 211, 255, 0.4);
+            background: rgba(59, 211, 255, 0.08);
+        }
+        /* â”€â”€ Notepad (Ctrl+Alt+I) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        .emr-notepad-backdrop {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 100003;
+            background: rgba(0,0,0,0.35);
+        }
+        .emr-notepad-backdrop.emr-notepad-open {
+            display: flex;
+            justify-content: center;
+            padding-top: 40px;
+        }
+        .emr-notepad {
+            width: 700px;
+            height: 500px;
+            background: rgba(7, 20, 39, 0.97);
+            border: 1px solid #3bd3ff;
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 12px 48px rgba(0,0,0,0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            overflow: hidden;
+            align-self: flex-start;
+        }
+        .emr-notepad.emr-notepad-minimized {
+            height: auto;
+            width: auto;
+            min-width: 80px;
+        }
+        .emr-notepad-titlebar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 10px;
+            background: rgba(15, 34, 51, 0.95);
+            border-bottom: 1px solid rgba(59, 211, 255, 0.25);
+            cursor: default;
+        }
+        .emr-notepad-title {
+            color: #93c0ff;
+            font-weight: 600;
+            font-size: 12px;
+        }
+        .emr-notepad-winctrls {
+            display: flex;
+            gap: 4px;
+        }
+        .emr-notepad-winbtn {
+            background: rgba(15, 34, 51, 0.9);
+            color: #cfe7ff;
+            border: 1px solid #243948;
+            width: 24px;
+            height: 20px;
+            border-radius: 3px;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            line-height: 1;
+        }
+        .emr-notepad-winbtn:hover {
+            background: #1a3a52;
+            border-color: #3bd3ff;
+            color: #fff;
+        }
+        .emr-notepad-winbtn-close:hover {
+            color: #ff5555;
+            border-color: #ff5555;
+        }
+        .emr-notepad-body {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 8px;
+            gap: 6px;
+            overflow: hidden;
+        }
+        .emr-notepad.emr-notepad-minimized .emr-notepad-body {
+            display: none;
+        }
+        .emr-notepad-textarea {
+            flex: 1;
+            background: #071427;
+            color: #ddeefb;
+            border: 1px solid #213244;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-family: Consolas, 'Segoe UI', monospace;
+            font-size: 12px;
+            resize: none;
+            outline: none;
+            line-height: 1.5;
+        }
+        .emr-notepad-textarea:focus {
+            border-color: rgba(59, 211, 255, 0.5);
+        }
+        .emr-notepad-toolbar {
+            display: flex;
+            gap: 6px;
+            justify-content: flex-end;
+        }
+        .emr-notepad-btn {
+            background: #0f2233;
+            color: #cfe7ff;
+            border: 1px solid #243948;
+            padding: 5px 12px;
+            border-radius: 5px;
+            font-size: 11px;
+            cursor: pointer;
+            white-space: nowrap;
+            font-family: inherit;
+        }
+        .emr-notepad-btn:hover {
+            background: #1a3a52;
+            border-color: #3bd3ff;
+            color: #fff;
+        }
+        .emr-notepad-btn-accent {
+            background: linear-gradient(180deg, #3bd3ff 0%, #12aee6 100%);
+            color: #002233;
+            font-weight: 700;
+            border: 1px solid #3bd3ff;
+        }
+        .emr-notepad-btn-accent:hover {
+            background: linear-gradient(180deg, #5de0ff 0%, #1ec4ff 100%);
+        }
+        .emr-notepad-btn-danger {
+            color: #ffb0b0;
+            border-color: #553333;
+        }
+        .emr-notepad-btn-danger:hover {
+            color: #ff5555;
+            border-color: #ff5555;
+            background: #2b1a1a;
+        }
+        /* Selector finder (Ctrl+Alt+L) */
+        .emr-selector-panel {
+            position: fixed;
+            top: 40px;
+            left: 8px;
+            width: 760px;
+            max-width: calc(100vw - 16px);
+            height: 560px;
+            z-index: 100004;
+            display: none;
+            background: rgba(7, 20, 39, 0.97);
+            border: 1px solid rgba(59, 211, 255, 0.45);
+            border-radius: 10px;
+            box-shadow: 0 12px 48px rgba(0,0,0,0.55);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            overflow: hidden;
+            overscroll-behavior: contain;
+        }
+        .emr-selector-panel.emr-selector-open {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        .emr-selector-panel.emr-selector-open.emr-selector-minimized {
+            display: flex;
+            width: min(420px, calc(100vw - 16px));
+            height: auto;
+            max-height: none;
+        }
+        .emr-selector-window-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.18);
+            background: rgba(15, 34, 51, 0.98);
+            cursor: move;
+            user-select: none;
+        }
+        .emr-selector-window-titleblock {
+            min-width: 0;
+            flex: 1;
+        }
+        .emr-selector-tabs {
+            display: flex;
+            gap: 6px;
+            margin-top: 8px;
+        }
+        .emr-selector-tab {
+            background: #0f2233;
+            color: #7f93a4;
+            border: 1px solid #243948;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 10px;
+            cursor: pointer;
+            font-family: inherit;
+        }
+        .emr-selector-tab:hover {
+            border-color: #3bd3ff;
+            color: #cfe7ff;
+        }
+        .emr-selector-tab.emr-selector-tab-active {
+            background: rgba(59, 211, 255, 0.14);
+            border-color: #3bd3ff;
+            color: #fff;
+        }
+        .emr-selector-body {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            position: relative;
+        }
+        .emr-selector-workspace {
+            display: none;
+            flex: 1;
+            min-height: 0;
+        }
+        .emr-selector-workspace.emr-selector-workspace-active {
+            display: grid;
+            grid-template-columns: 220px minmax(0, 1fr);
+        }
+        .emr-selector-sidebar {
+            border-right: 1px solid rgba(59, 211, 255, 0.18);
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            min-height: 0;
+        }
+        .emr-selector-main {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            min-height: 0;
+        }
+        .emr-selector-panel.emr-selector-minimized .emr-selector-sidebar {
+            border-right: none;
+        }
+        .emr-selector-panel.emr-selector-minimized .emr-selector-body,
+        .emr-selector-panel.emr-selector-minimized .emr-selector-resize-handle {
+            display: none;
+        }
+        .emr-selector-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.18);
+            background: rgba(15, 34, 51, 0.94);
+        }
+        .emr-selector-title {
+            color: #93c0ff;
+            font-weight: 600;
+            font-size: 12px;
+        }
+        .emr-selector-subtitle {
+            color: #5a8ab0;
+            font-size: 10px;
+            margin-top: 2px;
+        }
+        .emr-selector-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .emr-selector-min-btn, .emr-selector-close {
+            background: transparent;
+            border: none;
+            color: #7f93a4;
+            font-size: 15px;
+            cursor: pointer;
+            padding: 2px 4px;
+            line-height: 1;
+        }
+        .emr-selector-min-btn:hover {
+            color: #cfe7ff;
+        }
+        .emr-selector-close:hover {
+            color: #ff5555;
+        }
+        .emr-selector-resize-handle {
+            position: absolute;
+            right: 4px;
+            bottom: 4px;
+            width: 16px;
+            height: 16px;
+            cursor: nwse-resize;
+            opacity: 0.7;
+        }
+        .emr-selector-resize-handle::before {
+            content: '';
+            position: absolute;
+            right: 2px;
+            bottom: 2px;
+            width: 10px;
+            height: 10px;
+            border-right: 2px solid rgba(147, 192, 255, 0.7);
+            border-bottom: 2px solid rgba(147, 192, 255, 0.7);
+        }
+        .emr-selector-var-list {
+            padding: 8px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-height: 0;
+            overscroll-behavior: contain;
+        }
+        .emr-selector-var-item {
+            border: 1px solid rgba(59, 211, 255, 0.14);
+            border-radius: 6px;
+            padding: 6px;
+            background: rgba(15, 34, 51, 0.55);
+        }
+        .emr-selector-var-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: #cfe7ff;
+            font-size: 11px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .emr-selector-pill {
+            display: inline-flex;
+            align-items: center;
+            border: 1px solid rgba(59, 211, 255, 0.25);
+            border-radius: 999px;
+            padding: 1px 6px;
+            color: #93c0ff;
+            font-size: 9px;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+        .emr-selector-var-meta {
+            color: #5a8ab0;
+            font-size: 9px;
+            margin-bottom: 6px;
+        }
+        .emr-selector-btn-row {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .emr-selector-find-btn, .emr-selector-pick-btn, .emr-selector-action-btn {
+            background: #0f2233;
+            color: #cfe7ff;
+            border: 1px solid #243948;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            cursor: pointer;
+            font-family: inherit;
+        }
+        .emr-selector-find-btn:hover, .emr-selector-pick-btn:hover, .emr-selector-action-btn:hover {
+            background: #1a3a52;
+            border-color: #3bd3ff;
+            color: #fff;
+        }
+        .emr-selector-find-btn.emr-selector-active, .emr-selector-pick-btn.emr-selector-active {
+            border-color: #3bd3ff;
+            background: rgba(59, 211, 255, 0.12);
+            color: #fff;
+        }
+        .emr-selector-results {
+            flex: 1;
+            padding: 8px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-height: 0;
+            overscroll-behavior: contain;
+        }
+        .emr-selector-section-title {
+            color: #93c0ff;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            margin: 2px 0 0;
+        }
+        .emr-selector-ranked-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .emr-selector-ranked-item {
+            border: 1px solid rgba(59, 211, 255, 0.18);
+            border-radius: 8px;
+            padding: 8px;
+            background: rgba(15, 34, 51, 0.55);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .emr-selector-ranked-meta {
+            color: #7f93a4;
+            font-size: 10px;
+        }
+        .emr-selector-empty {
+            color: #7f93a4;
+            font-size: 11px;
+            font-style: italic;
+            padding: 10px;
+        }
+        .emr-selector-card {
+            border: 1px solid rgba(59, 211, 255, 0.18);
+            border-radius: 8px;
+            padding: 8px;
+            background: rgba(15, 34, 51, 0.6);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .emr-selector-card-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .emr-selector-card-method {
+            color: #93c0ff;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .emr-selector-card-actions {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .emr-selector-card-selector {
+            color: #8ab4d8;
+            font-family: Consolas, monospace;
+            font-size: 10px;
+            word-break: break-all;
+            background: #071427;
+            border: 1px solid #213244;
+            border-radius: 5px;
+            padding: 6px;
+        }
+        .emr-selector-card-raw {
+            color: #ddeefb;
+            font-family: Consolas, monospace;
+            font-size: 10px;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            background: #071427;
+            border: 1px solid #213244;
+            border-radius: 5px;
+            padding: 6px;
+            margin: 0;
+            max-height: 140px;
+            overflow-y: auto;
+        }
+        .emr-selector-summary {
+            border: 1px solid rgba(59, 211, 255, 0.18);
+            border-radius: 8px;
+            padding: 8px;
+            background: rgba(11, 28, 43, 0.82);
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .emr-selector-summary-title {
+            color: #93c0ff;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .emr-selector-summary-copy {
+            color: #c7d8ea;
+            font-size: 10px;
+            line-height: 1.45;
+        }
+        .emr-selector-preview {
+            border: 1px solid rgba(59, 211, 255, 0.16);
+            border-radius: 6px;
+            background: rgba(7, 20, 39, 0.86);
+            padding: 6px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .emr-selector-preview-row {
+            display: grid;
+            grid-template-columns: 92px minmax(0, 1fr);
+            gap: 8px;
+            align-items: start;
+        }
+        .emr-selector-preview-label {
+            color: #7f93a4;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .emr-selector-preview-value {
+            color: #ddeefb;
+            font-family: Consolas, monospace;
+            font-size: 10px;
+            line-height: 1.45;
             white-space: pre-wrap;
             word-break: break-word;
         }
-        .emr-empty {
-            color: #89a6c1;
-            font-size: 12px;
+        .emr-selector-preview-note {
+            color: #7f93a4;
+            font-size: 10px;
+            line-height: 1.4;
         }
-        #emr-assist-overlay.emr-overlay-minimized .emr-overlay-body { display: none; }
-        #emr-assist-overlay.emr-overlay-minimized .emr-overlay-shell { background: rgba(9, 20, 36, 0.78); }
+        .emr-selector-field-label {
+            color: #93c0ff;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            margin-top: 2px;
+        }
+        .emr-selector-text-input,
+        .emr-selector-textarea {
+            width: 100%;
+            background: #071427;
+            border: 1px solid #213244;
+            color: #ddeefb;
+            padding: 6px 8px;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 11px;
+            box-sizing: border-box;
+        }
+        .emr-selector-text-input[readonly] {
+            color: #7f93a4;
+            background: rgba(7, 20, 39, 0.82);
+        }
+        .emr-selector-textarea {
+            min-height: 84px;
+            resize: vertical;
+            font-family: Consolas, monospace;
+            line-height: 1.4;
+        }
+        .emr-selector-help {
+            color: #7f93a4;
+            font-size: 10px;
+            line-height: 1.4;
+        }
+        .emr-selector-template-list {
+            padding: 8px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-height: 0;
+            overscroll-behavior: contain;
+        }
+        .emr-selector-template-item {
+            border: 1px solid rgba(59, 211, 255, 0.14);
+            border-radius: 6px;
+            padding: 8px;
+            background: rgba(15, 34, 51, 0.55);
+            color: #cfe7ff;
+            cursor: pointer;
+        }
+        .emr-selector-template-item:hover {
+            border-color: rgba(59, 211, 255, 0.45);
+            background: rgba(15, 34, 51, 0.78);
+        }
+        .emr-selector-template-item.emr-selector-active {
+            border-color: #3bd3ff;
+            background: rgba(59, 211, 255, 0.12);
+        }
+        .emr-selector-template-name {
+            font-size: 11px;
+            font-weight: 600;
+            margin-bottom: 3px;
+        }
+        .emr-selector-template-meta {
+            color: #7f93a4;
+            font-size: 9px;
+        }
+        .emr-selector-template-editor {
+            padding: 10px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-height: 0;
+        }
+        .emr-selector-template-body {
+            min-height: 300px;
+        }
     </style>
-    <div class="emr-overlay-shell">
-        <div class="emr-overlay-bar">
-            <div class="emr-overlay-title">EMR Assist Overlay</div>
-            <div class="emr-visit-pill" data-role="visit">Visit: Unknown</div>
-            <button class="emr-btn" data-action="grab">Grab</button>
-            <button class="emr-btn" data-action="detect">Detect</button>
-            <button class="emr-btn" data-action="dashboard-auto">Dashboard</button>
-            <button class="emr-btn" data-action="invisit-auto">In-Visit</button>
-            <button class="emr-btn" data-action="dark">Dark</button>
-            <button class="emr-btn" data-action="minimize">Minimize</button>
-            <button class="emr-btn" data-action="python">Python UI</button>
-            <button class="emr-btn" data-action="close">Close</button>
+
+    <!-- Main toolbar bar. -->
+    <div class="emr-bar">
+
+        <!-- Section 1: Visit type. -->
+        <div class="emr-section">
+            <span class="emr-visit-label" id="emr-visit-label">Visit: -</span>
+            <button class="emr-btn" id="emr-detect-btn" title="Detect visit type from EMR">Detect</button>
         </div>
-        <div class="emr-overlay-body">
-            <div class="emr-panel">
-                <div class="emr-panel-title">Templates</div>
-                <div class="emr-template-row">
-                    <select class="emr-select" data-role="template-select"></select>
-                    <button class="emr-btn" data-action="insert-template">Insert</button>
+
+        <!-- Thin vertical cyan hairline divider between sections -->
+        <div class="emr-section-divider"></div>
+
+        <!-- Section 2: Template picker and insert. -->
+        <div class="emr-section">
+            <select class="emr-select" id="emr-template-select">
+                <option value="">- no templates -</option>
+            </select>
+            <button class="emr-btn emr-btn-accent" id="emr-insert-btn">Insert</button>
+        </div>
+
+        <div class="emr-section-divider"></div>
+
+        <!-- Section 3: Grab. -->
+        <div class="emr-section">
+            <button class="emr-btn emr-btn-accent" id="emr-grab-btn">&#x27F3; Grab<span class="emr-shortcut">F4</span></button>
+        </div>
+
+        <div class="emr-section-divider" id="emr-dashboard-payroll-divider" hidden></div>
+
+        <div class="emr-section" id="emr-dashboard-payroll-section" hidden>
+            <button class="emr-btn" id="emr-dashboard-payroll-btn" title="Calculate payroll from dashboard metrics">$ Payroll</button>
+        </div>
+
+        <div class="emr-section-divider"></div>
+
+           <!-- Section 4: Variables panel toggle. -->
+        <div class="emr-section">
+            <button class="emr-vars-toggle" id="emr-vars-toggle-btn" title="Show/hide grabbed variables">v Vars</button>
+            <button class="emr-vars-menu-toggle emr-toggle-on" id="emr-vars-menu-toggle" title="Show grabbed variables in the Ctrl+Shift+D template menu">In Menu</button>
+            <button class="emr-btn" id="emr-ad-hoc-grab-btn" title="Open ad hoc selector grab at the current mouse position">Ad Hoc Grab</button>
+            <button class="emr-btn" id="emr-selector-toggle-btn" title="Open variable selector overlay">Selectors<span class="emr-shortcut">Ctrl+Alt+L</span></button>
+        </div>
+
+        <div class="emr-section-divider"></div>
+
+        <div class="emr-section">
+            <button class="emr-btn emr-dark-btn" id="emr-dark-mode-btn" title="Toggle page dark mode while JS overlay is active">Dark</button>
+        </div>
+
+           <!-- Inline status message. -->
+        <span class="emr-status" id="emr-status-msg"></span>
+
+        <!-- Push remaining content to the right -->
+        <div style="flex:1"></div>
+
+           <!-- Right-side controls. -->
+        <div class="emr-section">
+            <button class="emr-btn" id="emr-python-btn" title="Return to Python UI">Python UI</button>
+            <button class="emr-btn emr-invisit-btn" id="emr-invisit-btn" title="Start in-visit auto clicker">In Visit &#x21BB;</button>
+            <button class="emr-btn emr-keepawake-btn" id="emr-keepawake-btn" title="Start Keep Awake clicks">Keep Awake</button>
+            <button class="emr-btn emr-icon-btn" id="emr-autoclicker-btn" title="Start dashboard auto clicker">&#x21BB;</button>
+            <button class="emr-minimize-btn" id="emr-minimize-btn" title="Minimize overlay">-</button>
+            <button class="emr-close" id="emr-close-btn" title="Close EMR Assist entirely">X</button>
+        </div>
+    </div>
+
+    <!-- Minimized mini-bar. -->
+    <div class="emr-mini-bar" id="emr-mini-bar">
+        <button class="emr-btn emr-invisit-btn" id="emr-mini-invisit-btn" title="Start in-visit auto clicker">In Visit &#x21BB;</button>
+        <button class="emr-btn emr-keepawake-btn" id="emr-mini-keepawake-btn" title="Start Keep Awake clicks">Keep Awake</button>
+        <button class="emr-btn emr-icon-btn" id="emr-mini-autoclicker-btn" title="Start dashboard auto clicker">&#x21BB;</button>
+        <button class="emr-mini-btn" id="emr-restore-btn" title="Restore overlay">[]</button>
+        <button class="emr-mini-btn emr-mini-btn-close" id="emr-mini-close-btn" title="Close EMR Assist">X</button>
+    </div>
+
+    <!-- Variables panel. -->
+    <div class="emr-vars-panel" id="emr-vars-panel"></div>
+        <div class="emr-dashboard-payroll-panel" id="emr-dashboard-payroll-panel" hidden></div>
+
+    <div class="emr-selector-panel" id="emr-selector-panel">
+        <div class="emr-selector-window-header" id="emr-selector-window-header">
+            <div class="emr-selector-window-titleblock">
+                <div class="emr-selector-title">Selector Workbench</div>
+                <div class="emr-selector-subtitle" id="emr-selector-visit-label">Visit: -</div>
+                <div class="emr-selector-tabs">
+                    <button class="emr-selector-tab emr-selector-tab-active" id="emr-selector-tab-variables" type="button">Variables</button>
+                    <button class="emr-selector-tab" id="emr-selector-tab-templates" type="button">Templates</button>
                 </div>
-                <div class="emr-status" data-role="status">Overlay ready.</div>
             </div>
-            <div class="emr-panel">
-                <div class="emr-panel-title">Grabbed Variables</div>
-                <div class="emr-vars" data-role="vars"></div>
+            <div class="emr-selector-header-actions">
+                <button class="emr-selector-min-btn" id="emr-selector-expand-btn" title="Expand workbench">[]</button>
+                <button class="emr-selector-min-btn" id="emr-selector-min-btn" title="Minimize selector finder">-</button>
+                <button class="emr-selector-close" id="emr-selector-close-btn" title="Close selector finder">X</button>
             </div>
         </div>
-    </div>`;
+        <div class="emr-selector-body" id="emr-selector-body">
+            <div class="emr-selector-workspace emr-selector-workspace-active" id="emr-selector-vars-workspace">
+                <div class="emr-selector-sidebar">
+                    <div class="emr-selector-header">
+                        <div>
+                            <div class="emr-selector-title">Variable Selectors</div>
+                            <div class="emr-selector-subtitle">Built-ins plus per-visit custom variables</div>
+                        </div>
+                        <div class="emr-selector-header-actions">
+                            <button class="emr-selector-action-btn" id="emr-selector-new-var-btn" title="Create a custom variable">+ Custom</button>
+                        </div>
+                    </div>
+                    <div class="emr-selector-var-list" id="emr-selector-var-list"></div>
+                </div>
+                <div class="emr-selector-main">
+                    <div class="emr-selector-header">
+                        <div>
+                            <div class="emr-selector-title" id="emr-selector-results-title">Selector Trials</div>
+                            <div class="emr-selector-subtitle">Review variable settings, ranked runtime order, and parser preview before saving.</div>
+                        </div>
+                    </div>
+                    <div class="emr-selector-results" id="emr-selector-results"></div>
+                </div>
+            </div>
+            <div class="emr-selector-workspace" id="emr-selector-templates-workspace">
+                <div class="emr-selector-sidebar">
+                    <div class="emr-selector-header">
+                        <div>
+                            <div class="emr-selector-title">Templates</div>
+                            <div class="emr-selector-subtitle">Edit the current visit type files directly</div>
+                        </div>
+                        <div class="emr-selector-header-actions">
+                            <button class="emr-selector-action-btn" id="emr-selector-template-new-btn" title="Create a new template">+ New</button>
+                        </div>
+                    </div>
+                    <div class="emr-selector-template-list" id="emr-selector-template-list"></div>
+                </div>
+                <div class="emr-selector-main">
+                    <div class="emr-selector-header">
+                        <div>
+                            <div class="emr-selector-title" id="emr-selector-template-editor-title">Template Editor</div>
+                            <div class="emr-selector-subtitle" id="emr-selector-template-path-hint">Current visit type template file</div>
+                        </div>
+                        <div class="emr-selector-header-actions">
+                            <button class="emr-selector-action-btn" id="emr-selector-template-delete-btn" title="Delete selected template">Delete</button>
+                            <button class="emr-selector-action-btn" id="emr-selector-template-save-btn" title="Save template changes">Save</button>
+                        </div>
+                    </div>
+                    <div class="emr-selector-template-editor">
+                        <label class="emr-selector-field-label" for="emr-selector-template-name">Template name</label>
+                        <input class="emr-selector-text-input" id="emr-selector-template-name" type="text" placeholder="Template name" />
+                        <label class="emr-selector-field-label" for="emr-selector-template-body">Template body</label>
+                        <textarea class="emr-selector-textarea emr-selector-template-body" id="emr-selector-template-body" placeholder="Template body"></textarea>
+                        <div class="emr-selector-help" id="emr-selector-template-help">Edits are written directly to the current visit type JSON/text template files.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="emr-selector-resize-handle" id="emr-selector-resize-handle"></div>
+    </div>
 
-    document.documentElement.appendChild(overlay);
-    window.__emrOverlayActive = true;
+    <!-- Notepad (Ctrl+Alt+I) -->
+    <div class="emr-notepad-backdrop" id="emr-notepad-backdrop">
+        <div class="emr-notepad" id="emr-notepad">
+            <div class="emr-notepad-titlebar">
+                <span class="emr-notepad-title">Notepad</span>
+                <div class="emr-notepad-winctrls">
+                    <button class="emr-notepad-winbtn" id="emr-notepad-min-btn" title="Minimize">-</button>
+                    <button class="emr-notepad-winbtn emr-notepad-winbtn-close" id="emr-notepad-close-btn" title="Close">X</button>
+                </div>
+            </div>
+            <div class="emr-notepad-body">
+                <textarea class="emr-notepad-textarea" id="emr-notepad-textarea" placeholder="Type or paste notes here..."></textarea>
+                <div class="emr-notepad-toolbar">
+                    <button class="emr-notepad-btn emr-notepad-btn-danger" id="emr-notepad-clear-btn">Clear</button>
+                    <button class="emr-notepad-btn" id="emr-notepad-copy-btn">Copy</button>
+                    <button class="emr-notepad-btn emr-notepad-btn-accent" id="emr-notepad-insert-btn">Insert</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
-    const state = { visitType: 'Unknown', templates: [], vars: {}, minimized: false };
-    const visitEl = overlay.querySelector('[data-role="visit"]');
-    const statusEl = overlay.querySelector('[data-role="status"]');
-    const varsEl = overlay.querySelector('[data-role="vars"]');
-    const templateSelect = overlay.querySelector('[data-role="template-select"]');
-    const dashboardBtn = overlay.querySelector('[data-action="dashboard-auto"]');
-    const invisitBtn = overlay.querySelector('[data-action="invisit-auto"]');
-    const darkBtn = overlay.querySelector('[data-action="dark"]');
+    <!-- Template context menu (Ctrl+Shift+D) -->
+    <div class="emr-ctx-backdrop" id="emr-ctx-backdrop">
+        <div class="emr-ctx-menu" id="emr-ctx-menu">
+            <div class="emr-ctx-header" id="emr-ctx-header">
+        <div class="emr-ctx-drag-handle">::</div>
+                <div class="emr-ctx-title-wrap">
+                    <div class="emr-ctx-title" id="emr-ctx-title">Templates</div>
+                    <div class="emr-ctx-subtitle" id="emr-ctx-subtitle">Current visit actions</div>
+                </div>
+                <button class="emr-ctx-close-btn" id="emr-ctx-close-btn" type="button">Close</button>
+            </div>
+            <div class="emr-ctx-tabs">
+                <button class="emr-ctx-tab emr-ctx-tab-active" id="emr-ctx-tab-templates" type="button">Templates</button>
+                <button class="emr-ctx-tab" id="emr-ctx-tab-grab" type="button">Ad Hoc Selector Grab</button>
+            </div>
+            <div class="emr-ctx-body">
+                <div class="emr-ctx-view emr-ctx-view-active" id="emr-ctx-template-view">
+                    <div class="emr-ctx-scroll">
+                        <div id="emr-ctx-vars-container"></div>
+                        <div id="emr-ctx-quick-actions"></div>
+                        <div id="emr-ctx-list"></div>
+                    </div>
+                </div>
+                <div class="emr-ctx-view" id="emr-ctx-grab-view">
+                    <div class="emr-ctx-grab-shell">
+                        <div class="emr-ctx-grab-help" id="emr-ctx-grab-help">Choose a variable for this visit type, then click the matching field on the EMR page. The selector is used only for this one ad hoc selector grab.</div>
+                        <div class="emr-ctx-grab-list" id="emr-ctx-grab-list"></div>
+                        <div id="emr-ctx-grab-preview"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="emr-ctx-hint" id="emr-ctx-hint">Esc to close. Drag the header to move this palette.</div>
+        </div>
+    </div>
+    `;
 
-    const callHost = (name, ...args) => {
-        const fn = window[name];
-        if (typeof fn !== 'function') return Promise.resolve();
-        try { return Promise.resolve(fn(...args)); } catch (error) {
-            console.error('[EMR OVERLAY] Host call failed:', name, error);
-            return Promise.resolve();
-        }
-    };
+    // Prepend the whole overlay div before the first child of <body>
+    // so it always sits above the EMR page's own fixed headers.
+    document.body.prepend(overlay);
 
-    const renderTemplates = () => {
-        templateSelect.innerHTML = '';
-        const items = Array.isArray(state.templates) ? state.templates : [];
-        if (!items.length) {
-            const opt = document.createElement('option');
-            opt.value = '';
-            opt.textContent = 'No templates for this visit';
-            templateSelect.appendChild(opt);
-            templateSelect.disabled = true;
-            return;
-        }
-        templateSelect.disabled = false;
-        for (const item of items) {
-            const opt = document.createElement('option');
-            opt.value = String(item || '');
-            opt.textContent = String(item || '');
-            templateSelect.appendChild(opt);
-        }
-    };
-
-    const renderVariables = () => {
-        varsEl.innerHTML = '';
-        const entries = Object.entries(state.vars || {}).filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
-        if (!entries.length) {
-            const empty = document.createElement('div');
-            empty.className = 'emr-empty';
-            empty.textContent = 'No grabbed variables yet.';
-            varsEl.appendChild(empty);
-            return;
-        }
-        for (const [key, value] of entries) {
-            const card = document.createElement('div');
-            card.className = 'emr-var-card';
-            const keyEl = document.createElement('div');
-            keyEl.className = 'emr-var-key';
-            keyEl.textContent = key;
-            const valueEl = document.createElement('div');
-            valueEl.className = 'emr-var-value';
-            valueEl.textContent = String(value);
-            card.appendChild(keyEl);
-            card.appendChild(valueEl);
-            varsEl.appendChild(card);
-        }
-    };
-
-    const setButtonActive = (btn, enabled) => btn && btn.classList.toggle('emr-btn-active', !!enabled);
-
-    overlay.querySelector('[data-action="grab"]').addEventListener('click', () => callHost('__emr_grab'));
-    overlay.querySelector('[data-action="detect"]').addEventListener('click', () => callHost('__emr_detect_visit'));
-    overlay.querySelector('[data-action="dashboard-auto"]').addEventListener('click', () => callHost('__emr_toggle_autoclicker'));
-    overlay.querySelector('[data-action="invisit-auto"]').addEventListener('click', () => callHost('__emr_toggle_invisit_autoclicker'));
-    overlay.querySelector('[data-action="dark"]').addEventListener('click', () => callHost('__emr_toggle_dark_mode'));
-    overlay.querySelector('[data-action="minimize"]').addEventListener('click', () => window.__emrToggleMinimize());
-    overlay.querySelector('[data-action="python"]').addEventListener('click', () => callHost('__emr_switch_to_python'));
-    overlay.querySelector('[data-action="close"]').addEventListener('click', () => callHost('__emr_close'));
-    overlay.querySelector('[data-action="insert-template"]').addEventListener('click', () => {
-        if (!templateSelect.value) return;
-        callHost('__emr_insert_template', templateSelect.value, 'overlay');
+    // â”€â”€ Focus preservation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Prevent all overlay elements from stealing focus from the EMR
+    // page's active text field. click events still fire normally.
+    // Exception: the notepad textarea must be focusable for typing.
+    overlay.addEventListener('mousedown', (e) => {
+        if (e.target && e.target.id === 'emr-notepad-textarea') return;
+        if (e.target && typeof e.target.closest === 'function' && e.target.closest('#emr-selector-panel')) return;
+        e.preventDefault();
     });
 
-    window.__emrUpdateVariables = (payload) => {
-        state.vars = payload || {};
-        renderVariables();
-    };
-    window.__emrUpdateVisitType = (visitType, templates) => {
-        state.visitType = String(visitType || 'Unknown');
-        state.templates = Array.isArray(templates) ? templates : [];
-        visitEl.textContent = `Visit: ${state.visitType}`;
-        renderTemplates();
-    };
-    window.__emrSetStatus = (message) => { statusEl.textContent = String(message || ''); };
-    window.__emrSetAutoclickerState = (enabled) => setButtonActive(dashboardBtn, enabled);
-    window.__emrSetInvisitAutoclickerState = (enabled) => setButtonActive(invisitBtn, enabled);
-    window.__emrSetDarkMode = (enabled) => setButtonActive(darkBtn, enabled);
-    window.__emrToggleMinimize = () => {
-        state.minimized = !state.minimized;
-        overlay.classList.toggle('emr-overlay-minimized', state.minimized);
-        return state.minimized;
+    // â”€â”€ Mouse position tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // keydown events don't carry mouse coordinates, so we track the
+    // last known position for the Ctrl+Shift+D context menu.
+    let lastMouseX = 0, lastMouseY = 0;
+    document.addEventListener('mousemove', (e) => {
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+    });
+
+    // â”€â”€ Variables panel toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Handles the â–¼/â–² Vars button. Toggles .emr-vars-open on the panel
+    // (which switches it from display:none â†’ display:flex in CSS).
+    // Uses requestAnimationFrame so the height is measured after the
+    // browser has painted the panel into its new open/closed state.
+    const toggleBtn = document.getElementById('emr-vars-toggle-btn');
+    const varsPanel = document.getElementById('emr-vars-panel');
+    const dashboardPayrollDivider = document.getElementById('emr-dashboard-payroll-divider');
+    const dashboardPayrollSection = document.getElementById('emr-dashboard-payroll-section');
+    const dashboardPayrollBtn = document.getElementById('emr-dashboard-payroll-btn');
+    const dashboardPayrollPanel = document.getElementById('emr-dashboard-payroll-panel');
+    if (toggleBtn && varsPanel) {
+        toggleBtn.addEventListener('click', () => {
+            varsPanel.classList.toggle('emr-vars-open');
+            toggleBtn.textContent = varsPanel.classList.contains('emr-vars-open') ? '^ Vars' : 'v Vars';
+        });
+    }
+
+    // â”€â”€ "Vars in Menu" toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // When on, the Ctrl+Shift+D context menu shows grabbed variables
+    // above the template list for quick review before insertion.
+    let showVarsInMenu = true;
+    let lastVarsData = {};  // cached by __emrUpdateVariables
+    let ctxMenuMode = 'templates';
+    let ctxMenuDragState = null;
+    let ctxMenuLastLeft = 8;
+    let ctxMenuLastTop = 8;
+    let adHocPickVarId = '';
+    let adHocPreview = null;
+    let adHocSelectedElement = null;
+    let adHocSelectedOutline = '';
+    let adHocSelectedOutlineOffset = '';
+    let lastQuickTemplateActions = [];
+    let lastDashboardPayroll = null;
+    let dashboardPayrollVisible = false;
+    const darkModeBtn = document.getElementById('emr-dark-mode-btn');
+    const varsMenuToggle = document.getElementById('emr-vars-menu-toggle');
+    if (varsMenuToggle) {
+        varsMenuToggle.addEventListener('click', () => {
+            showVarsInMenu = !showVarsInMenu;
+            varsMenuToggle.classList.toggle('emr-toggle-on', showVarsInMenu);
+        });
+    }
+
+    if (darkModeBtn) {
+        darkModeBtn.addEventListener('click', () => {
+            if (typeof window.__emr_toggle_dark_mode !== 'function') {
+                window.__emrSetStatus('Dark mode unavailable');
+                return;
+            }
+            window.__emr_toggle_dark_mode();
+        });
+    }
+
+    function formatPayrollNumber(value, decimals = 2) {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric.toFixed(decimals) : '-';
+    }
+
+    function setDashboardPayrollVisibility(visible) {
+        dashboardPayrollVisible = !!visible;
+        if (dashboardPayrollDivider) dashboardPayrollDivider.hidden = !dashboardPayrollVisible;
+        if (dashboardPayrollSection) dashboardPayrollSection.hidden = !dashboardPayrollVisible;
+        if (!dashboardPayrollVisible && dashboardPayrollPanel) {
+            dashboardPayrollPanel.hidden = true;
+            dashboardPayrollPanel.classList.remove('emr-dashboard-payroll-open');
+        }
+        if (dashboardPayrollVisible && lastDashboardPayroll) {
+            window.__emrUpdateDashboardPayroll(lastDashboardPayroll);
+        }
+    }
+
+    window.__emrUpdateDashboardPayroll = function(resultJSON) {
+        try {
+            lastDashboardPayroll = typeof resultJSON === 'string' ? JSON.parse(resultJSON) : resultJSON;
+        } catch (e) {
+            console.error('emr overlay updateDashboardPayroll error:', e);
+            return;
+        }
+
+        if (!dashboardPayrollPanel || !dashboardPayrollVisible || !lastDashboardPayroll) {
+            return;
+        }
+
+        dashboardPayrollPanel.innerHTML = '';
+        const header = document.createElement('div');
+        header.className = 'emr-dashboard-payroll-header';
+        const title = document.createElement('div');
+        title.className = 'emr-dashboard-payroll-title';
+        title.textContent = 'Dashboard Payroll Snapshot';
+        const stamp = document.createElement('div');
+        stamp.className = 'emr-dashboard-payroll-stamp';
+        stamp.textContent = String(lastDashboardPayroll.timestamp || '');
+        header.appendChild(title);
+        header.appendChild(stamp);
+        dashboardPayrollPanel.appendChild(header);
+
+        const grid = document.createElement('div');
+        grid.className = 'emr-dashboard-payroll-grid';
+        const items = [
+            ['Payable Time', `${formatPayrollNumber(lastDashboardPayroll.payable_time)} hrs`],
+            ['Visits Signed', String(lastDashboardPayroll.visits_signed ?? '-')],
+            ['Visits / Hour', formatPayrollNumber(lastDashboardPayroll.visits_per_hour)],
+            ['Pay / Hour', `$${formatPayrollNumber(lastDashboardPayroll.pay_per_hour)}`],
+            ['Estimated Monthly Pay', `$${formatPayrollNumber(lastDashboardPayroll.estimated_monthly_pay)}`],
+        ];
+        for (const [label, value] of items) {
+            const item = document.createElement('div');
+            item.className = 'emr-dashboard-payroll-item';
+            const itemLabel = document.createElement('div');
+            itemLabel.className = 'emr-dashboard-payroll-label';
+            itemLabel.textContent = label;
+            const itemValue = document.createElement('div');
+            itemValue.className = 'emr-dashboard-payroll-value';
+            itemValue.textContent = value;
+            item.appendChild(itemLabel);
+            item.appendChild(itemValue);
+            grid.appendChild(item);
+        }
+        dashboardPayrollPanel.appendChild(grid);
+
+        const footnote = document.createElement('div');
+        footnote.className = 'emr-dashboard-payroll-footnote';
+        footnote.textContent = `${String(lastDashboardPayroll.rate_detail || '')} - ${lastDashboardPayroll.saved ? 'Saved to payroll_calculations.md' : 'Not saved yet'}`;
+        dashboardPayrollPanel.appendChild(footnote);
+
+        const actions = document.createElement('div');
+        actions.className = 'emr-dashboard-payroll-actions';
+        const refreshBtn = document.createElement('button');
+        refreshBtn.type = 'button';
+        refreshBtn.className = 'emr-btn';
+        refreshBtn.textContent = 'Grab New Payroll';
+        refreshBtn.addEventListener('click', () => {
+            overlayRunDashboardPayroll(true);
+        });
+        actions.appendChild(refreshBtn);
+
+        const saveBtn = document.createElement('button');
+        saveBtn.type = 'button';
+        saveBtn.className = 'emr-btn';
+        saveBtn.textContent = lastDashboardPayroll.saved ? 'Saved to File' : 'Save to File';
+        saveBtn.disabled = !!lastDashboardPayroll.saved;
+        saveBtn.addEventListener('click', () => {
+            if (typeof window.__emr_save_dashboard_payroll !== 'function') {
+                window.__emrSetStatus('Payroll save bridge unavailable');
+                return;
+            }
+            window.__emrSetStatus('Saving payroll snapshot...');
+            Promise.resolve(window.__emr_save_dashboard_payroll())
+                .catch((e) => {
+                    console.error('overlay dashboard payroll save error:', e);
+                    window.__emrSetStatus('Payroll save failed');
+                });
+        });
+        actions.appendChild(saveBtn);
+        dashboardPayrollPanel.appendChild(actions);
+        dashboardPayrollPanel.hidden = false;
+        dashboardPayrollPanel.classList.add('emr-dashboard-payroll-open');
     };
 
-    renderTemplates();
-    renderVariables();
+    // â”€â”€ Minimize / Restore â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // setMinimized(true)  â†’ hides the full .emr-bar and any open vars
+    //                       panel, then shows the slim .emr-mini-bar.
+    // setMinimized(false) â†’ reverses the above.
+    // Body padding is recalculated after each transition so the page
+    // content tracks the overlay height correctly in both states.
+    const mainBar = document.querySelector('#emr-assist-overlay .emr-bar');
+    const miniBar = document.getElementById('emr-mini-bar');
+    const minimizeBtn = document.getElementById('emr-minimize-btn');
+    const restoreBtn = document.getElementById('emr-restore-btn');
+    const miniCloseBtn = document.getElementById('emr-mini-close-btn');
+    const miniInvisitBtn = document.getElementById('emr-mini-invisit-btn');
+    const miniKeepAwakeBtn = document.getElementById('emr-mini-keepawake-btn');
+    const miniAutoclickerBtn = document.getElementById('emr-mini-autoclicker-btn');
+
+    function setMinimized(minimized) {
+        if (minimized) {
+            if (typeof closeTemplateMenu === 'function') {
+                closeTemplateMenu();
+            }
+            if (typeof closeSelectorPanel === 'function') {
+                closeSelectorPanel();
+            }
+            if (mainBar) mainBar.style.display = 'none';
+            if (varsPanel) varsPanel.style.display = 'none';
+            if (miniBar) miniBar.classList.add('emr-mini-visible');
+            overlay.style.pointerEvents = 'none';
+        } else {
+            if (mainBar) mainBar.style.display = '';
+            if (varsPanel) varsPanel.style.display = '';
+            if (miniBar) miniBar.classList.remove('emr-mini-visible');
+            overlay.style.pointerEvents = '';
+        }
+    }
+
+    if (minimizeBtn) minimizeBtn.addEventListener('click', () => setMinimized(true));
+    if (restoreBtn) restoreBtn.addEventListener('click', () => setMinimized(false));
+    if (miniCloseBtn) miniCloseBtn.addEventListener('click', () => window.__emr_close());
+
+    // Toggle minimize/restore from Python (OS-level Ctrl+Alt+H hotkey)
+    window.__emrToggleMinimize = function() {
+        const isMinimized = miniBar.classList.contains('emr-mini-visible');
+        setMinimized(!isMinimized);
+    };
+
+    // â”€â”€ Notepad (Ctrl+Alt+I) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const notepadBackdrop = document.getElementById('emr-notepad-backdrop');
+    const notepadEl = document.getElementById('emr-notepad');
+    const notepadTextarea = document.getElementById('emr-notepad-textarea');
+    const notepadMinBtn = document.getElementById('emr-notepad-min-btn');
+    const notepadCloseBtn = document.getElementById('emr-notepad-close-btn');
+    const notepadCopyBtn = document.getElementById('emr-notepad-copy-btn');
+    const notepadInsertBtn = document.getElementById('emr-notepad-insert-btn');
+    const notepadClearBtn = document.getElementById('emr-notepad-clear-btn');
+    const NOTEPAD_STORAGE_KEY = '__emr_notepad_text';
+
+    // Restore persisted text
+    try {
+        const saved = localStorage.getItem(NOTEPAD_STORAGE_KEY);
+        if (saved) notepadTextarea.value = saved;
+    } catch(e) {}
+
+    // Save on every input
+    notepadTextarea.addEventListener('input', () => {
+        try { localStorage.setItem(NOTEPAD_STORAGE_KEY, notepadTextarea.value); } catch(e) {}
+    });
+
+    let notepadIsMinimized = false;
+
+    function openNotepad() {
+        notepadBackdrop.classList.add('emr-notepad-open');
+        // Restore pointer-events if overlay is minimized
+        if (miniBar.classList.contains('emr-mini-visible')) {
+            overlay.style.pointerEvents = '';
+        }
+        if (!notepadIsMinimized) {
+            notepadTextarea.focus();
+        }
+    }
+
+    function closeNotepad() {
+        notepadBackdrop.classList.remove('emr-notepad-open');
+        // Re-disable pointer-events if overlay is minimized
+        if (miniBar.classList.contains('emr-mini-visible')) {
+            overlay.style.pointerEvents = 'none';
+        }
+    }
+
+    function minimizeNotepad(min) {
+        notepadIsMinimized = min;
+        notepadEl.classList.toggle('emr-notepad-minimized', min);
+        notepadMinBtn.textContent = min ? '\u25A1' : '\u2500';
+        notepadMinBtn.title = min ? 'Restore' : 'Minimize';
+    }
+
+    notepadCloseBtn.addEventListener('click', closeNotepad);
+    notepadMinBtn.addEventListener('click', () => minimizeNotepad(!notepadIsMinimized));
+
+    notepadCopyBtn.addEventListener('click', () => {
+        try {
+            navigator.clipboard.writeText(notepadTextarea.value);
+            const orig = notepadCopyBtn.textContent;
+            notepadCopyBtn.textContent = '\u2713 Copied';
+            setTimeout(() => { notepadCopyBtn.textContent = orig; }, 1200);
+        } catch(e) { console.error('Notepad copy error:', e); }
+    });
+
+    notepadInsertBtn.addEventListener('click', () => {
+        const text = notepadTextarea.value;
+        if (!text) return;
+        closeNotepad();
+        window.__emrSetStatus('Inserting\u2026');
+        window.__emr_notepad_insert(text)
+            .then(() => window.__emrSetStatus(''))
+            .catch(() => window.__emrSetStatus('Insert error'));
+    });
+
+    notepadClearBtn.addEventListener('click', () => {
+        notepadTextarea.value = '';
+        try { localStorage.removeItem(NOTEPAD_STORAGE_KEY); } catch(e) {}
+    });
+
+    // Close on backdrop click
+    notepadBackdrop.addEventListener('click', (e) => {
+        if (e.target === notepadBackdrop) closeNotepad();
+    });
+
+    // Toggle notepad from Python (OS-level Ctrl+Alt+I hotkey)
+    window.__emrToggleNotepad = function() {
+        if (notepadBackdrop.classList.contains('emr-notepad-open')) {
+            closeNotepad();
+        } else {
+            openNotepad();
+        }
+    };
+
+    // Selector finder (Ctrl+Alt+L)
+    const selectorPanel = document.getElementById('emr-selector-panel');
+    const selectorToggleBtn = document.getElementById('emr-selector-toggle-btn');
+    const selectorWindowHeader = document.getElementById('emr-selector-window-header');
+    const selectorVariablesTabBtn = document.getElementById('emr-selector-tab-variables');
+    const selectorTemplatesTabBtn = document.getElementById('emr-selector-tab-templates');
+    const selectorVarsWorkspace = document.getElementById('emr-selector-vars-workspace');
+    const selectorTemplatesWorkspace = document.getElementById('emr-selector-templates-workspace');
+    const selectorMinBtn = document.getElementById('emr-selector-min-btn');
+    const selectorExpandBtn = document.getElementById('emr-selector-expand-btn');
+    const selectorCloseBtn = document.getElementById('emr-selector-close-btn');
+    const selectorVisitLabel = document.getElementById('emr-selector-visit-label');
+    const selectorNewVarBtn = document.getElementById('emr-selector-new-var-btn');
+    const selectorVarList = document.getElementById('emr-selector-var-list');
+    const selectorResultsTitle = document.getElementById('emr-selector-results-title');
+    const selectorResults = document.getElementById('emr-selector-results');
+    const selectorTemplateList = document.getElementById('emr-selector-template-list');
+    const selectorTemplateEditorTitle = document.getElementById('emr-selector-template-editor-title');
+    const selectorTemplatePathHint = document.getElementById('emr-selector-template-path-hint');
+    const selectorTemplateNameInput = document.getElementById('emr-selector-template-name');
+    const selectorTemplateBodyInput = document.getElementById('emr-selector-template-body');
+    const selectorTemplateHelp = document.getElementById('emr-selector-template-help');
+    const selectorTemplateNewBtn = document.getElementById('emr-selector-template-new-btn');
+    const selectorTemplateSaveBtn = document.getElementById('emr-selector-template-save-btn');
+    const selectorTemplateDeleteBtn = document.getElementById('emr-selector-template-delete-btn');
+    const selectorResizeHandle = document.getElementById('emr-selector-resize-handle');
+    const SELECTOR_NOISE_TEXT = new Set([
+        '',
+        'edit',
+        'refer patient',
+        'continue rx',
+        'photos',
+        'diagnostic photo',
+        'show unselected answers',
+        'select all that apply',
+    ]);
+    let selectorSpecs = [];
+    let selectorActiveVarId = '';
+    let selectorPendingSelectVarId = '';
+    let selectorPickVarId = '';
+    let selectorPanelMinimized = false;
+    let selectorPanelExpanded = false;
+    let selectorRestoreFrame = null;
+    let selectorMinimizedRestoreFrame = null;
+    let selectorDragState = null;
+    let selectorResizeState = null;
+    let selectorTrialState = {};
+    let selectorPreviewCache = {};
+    let selectorPreviewInflight = {};
+    let selectorHoverElement = null;
+    let selectorHoverOutline = '';
+    let selectorHoverOutlineOffset = '';
+    let selectorActiveView = 'variables';
+    let selectorActiveTemplateName = '';
+    let selectorPendingTemplateName = '';
+    let selectorWorkbenchState = {
+        visit_type: '',
+        window_state: null,
+        template_records: [],
+        template_config_file: '',
+        template_file: '',
+    };
+
+    function selectorDebug(event, payload = {}) {
+        try {
+            const message = Object.assign({ event }, payload || {});
+            console.log('[SELECTOR OVERLAY]', message);
+            if (window.__emr_selector_debug) {
+                window.__emr_selector_debug(message).catch(() => {});
+            }
+        } catch (e) {
+            console.error('selector debug emit error:', e);
+        }
+    }
+
+    function selectorNormalize(text) {
+        return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+
+    function selectorRawText(el) {
+        if (!el) return '';
+        return String(el.innerText || el.textContent || '')
+            .replace(/\u00a0/g, ' ')
+            .trim();
+    }
+
+    function selectorIsNoiseText(text) {
+        return SELECTOR_NOISE_TEXT.has(selectorNormalize(text));
+    }
+
+    function selectorCssEscape(value) {
+        if (window.CSS && typeof window.CSS.escape === 'function') {
+            return window.CSS.escape(value);
+        }
+        return String(value || '').replace(/([^\w-])/g, '\\$1');
+    }
+
+    function selectorIsElementNode(el) {
+        return !!(el && typeof el === 'object' && el.nodeType === 1 && typeof el.tagName === 'string');
+    }
+
+    function selectorGetWindow(el) {
+        try {
+            return el && el.ownerDocument && el.ownerDocument.defaultView
+                ? el.ownerDocument.defaultView
+                : window;
+        } catch (e) {
+            return window;
+        }
+    }
+
+    function selectorIsVisible(el) {
+        if (!selectorIsElementNode(el)) return false;
+        const view = selectorGetWindow(el);
+        const style = view.getComputedStyle(el);
+        if (
+            style.display === 'none' ||
+            style.visibility === 'hidden' ||
+            Number(style.opacity || '1') === 0
+        ) {
+            return false;
+        }
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function selectorEligibleElement(el) {
+        if (!selectorIsElementNode(el)) return false;
+        if (el === overlay || overlay.contains(el)) return false;
+        if (!selectorIsVisible(el)) return false;
+        const tag = (el.tagName || '').toLowerCase();
+        if (['script', 'style', 'noscript', 'svg', 'path'].includes(tag)) return false;
+        const raw = selectorRawText(el);
+        return !!raw && raw.length <= 500;
+    }
+
+    function selectorQuerySafe(selector) {
+        const matches = [];
+        if (!selector) return matches;
+        for (const doc of selectorCollectDocuments()) {
+            try {
+                matches.push(
+                    ...Array.from(doc.querySelectorAll(selector)).filter(
+                        (el) => !(el === overlay || overlay.contains(el))
+                    )
+                );
+            } catch (e) {
+                console.warn('selector query failed:', selector, e);
+            }
+        }
+        return matches;
+    }
+
+    function selectorCollectDocuments() {
+        const docs = [];
+        const seen = new Set();
+
+        function visit(doc, depth = 0) {
+            if (!doc || seen.has(doc) || depth > 5) return;
+            seen.add(doc);
+            docs.push(doc);
+            let frames = [];
+            try {
+                frames = Array.from(doc.querySelectorAll('iframe, frame'));
+            } catch (e) {
+                return;
+            }
+            for (const frameEl of frames) {
+                try {
+                    const frameDoc = frameEl.contentDocument;
+                    if (frameDoc && frameDoc.body) {
+                        visit(frameDoc, depth + 1);
+                    }
+                } catch (e) {
+                    // Cross-origin or not yet ready; ignore.
+                }
+            }
+        }
+
+        visit(document);
+        selectorDebug('documents_collected', { count: docs.length });
+        return docs;
+    }
+
+    function selectorCollectTextElements(limit = 3000) {
+        const items = [];
+        for (const doc of selectorCollectDocuments()) {
+            const all = doc.body ? doc.body.querySelectorAll('*') : [];
+            for (const el of all) {
+                if (!selectorEligibleElement(el)) continue;
+                items.push(el);
+                if (items.length >= limit) break;
+            }
+            if (items.length >= limit) break;
+        }
+        return items;
+    }
+
+    function selectorCssPath(el) {
+        if (!selectorIsElementNode(el)) return '';
+        const parts = [];
+        let node = el;
+        let depth = 0;
+        while (node && node.nodeType === 1 && depth < 6) {
+            let part = node.tagName.toLowerCase();
+            if (!part || part === 'html' || part === 'body') break;
+
+            const dataTestId = node.getAttribute('data-testid');
+            if (dataTestId) {
+                part += `[data-testid="${String(dataTestId).replace(/"/g, '\\"')}"]`;
+                parts.unshift(part);
+                break;
+            }
+
+            if (node.id) {
+                part += `#${selectorCssEscape(node.id)}`;
+                parts.unshift(part);
+                break;
+            }
+
+            const classNames = Array.from(node.classList || [])
+                .filter((cls) => /^[A-Za-z0-9_-]+$/.test(cls))
+                .slice(0, 2);
+            if (classNames.length) {
+                part += '.' + classNames.map(selectorCssEscape).join('.');
+            }
+
+            if (node.parentElement) {
+                const siblings = Array.from(node.parentElement.children).filter(
+                    (sib) => sib.tagName === node.tagName
+                );
+                if (siblings.length > 1) {
+                    part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+                }
+            }
+
+            parts.unshift(part);
+            node = node.parentElement;
+            depth += 1;
+        }
+        return parts.join(' > ');
+    }
+
+    function selectorFlashElement(el) {
+        if (!selectorIsElementNode(el)) return;
+        try {
+            el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+        } catch (e) {}
+        const previousOutline = el.style.outline;
+        const previousOffset = el.style.outlineOffset;
+        el.style.outline = '3px solid #ffb347';
+        el.style.outlineOffset = '2px';
+        window.setTimeout(() => {
+            el.style.outline = previousOutline;
+            el.style.outlineOffset = previousOffset;
+        }, 1400);
+    }
+
+    function selectorRenderEmpty(message) {
+        selectorResults.innerHTML = '';
+        selectorResults.scrollTop = 0;
+        const empty = document.createElement('div');
+        empty.className = 'emr-selector-empty';
+        empty.textContent = message;
+        selectorResults.appendChild(empty);
+    }
+
+    function selectorFlashResultsPane() {
+        const previousBoxShadow = selectorResults.style.boxShadow;
+        selectorResults.style.boxShadow = 'inset 0 0 0 1px rgba(59, 211, 255, 0.9), 0 0 14px rgba(59, 211, 255, 0.25)';
+        window.setTimeout(() => {
+            selectorResults.style.boxShadow = previousBoxShadow;
+        }, 650);
+    }
+
+    function selectorClearHoverHighlight() {
+        if (selectorHoverElement && selectorIsElementNode(selectorHoverElement)) {
+            selectorHoverElement.style.outline = selectorHoverOutline;
+            selectorHoverElement.style.outlineOffset = selectorHoverOutlineOffset;
+        }
+        selectorHoverElement = null;
+        selectorHoverOutline = '';
+        selectorHoverOutlineOffset = '';
+    }
+
+    function selectorSetHoverHighlight(el) {
+        if (!selectorIsElementNode(el) || el === selectorHoverElement) return;
+        selectorClearHoverHighlight();
+        selectorHoverElement = el;
+        selectorHoverOutline = el.style.outline;
+        selectorHoverOutlineOffset = el.style.outlineOffset;
+        el.style.outline = '3px solid #7cff6b';
+        el.style.outlineOffset = '2px';
+    }
+
+    function adHocClearSelectedHighlight() {
+        if (adHocSelectedElement && selectorIsElementNode(adHocSelectedElement)) {
+            adHocSelectedElement.style.outline = adHocSelectedOutline;
+            adHocSelectedElement.style.outlineOffset = adHocSelectedOutlineOffset;
+        }
+        adHocSelectedElement = null;
+        adHocSelectedOutline = '';
+        adHocSelectedOutlineOffset = '';
+    }
+
+    function adHocSetSelectedHighlight(el) {
+        if (!selectorIsElementNode(el)) return;
+        adHocClearSelectedHighlight();
+        adHocSelectedElement = el;
+        adHocSelectedOutline = el.style.outline;
+        adHocSelectedOutlineOffset = el.style.outlineOffset;
+        el.style.outline = '4px solid #28f5d0';
+        el.style.outlineOffset = '3px';
+    }
+
+    function adHocResetState() {
+        adHocPickVarId = '';
+        adHocPreview = null;
+        selectorClearHoverHighlight();
+        adHocClearSelectedHighlight();
+    }
+
+    function adHocGetSpec() {
+        return selectorGetSpecByVarId(adHocPickVarId) || null;
+    }
+
+    function selectorGetSpecByVarId(varId) {
+        return selectorSpecs.find((spec) => spec.var_id === varId) || null;
+    }
+
+    function selectorCallWorkbench(payload) {
+        if (typeof window.__emr_selector_workbench !== 'function') {
+            const err = new Error('selector workbench bridge unavailable');
+            console.error(err);
+            window.__emrSetStatus('Workbench bridge unavailable');
+            return Promise.reject(err);
+        }
+        try {
+            return Promise.resolve(window.__emr_selector_workbench(payload));
+        } catch (err) {
+            console.error('selector workbench bridge error:', err);
+            window.__emrSetStatus('Workbench bridge unavailable');
+            return Promise.reject(err);
+        }
+    }
+
+    function selectorCallSave(payload) {
+        if (typeof window.__emr_selector_save !== 'function') {
+            const err = new Error('selector save bridge unavailable');
+            console.error(err);
+            window.__emrSetStatus('Selector save bridge unavailable');
+            return Promise.reject(err);
+        }
+        try {
+            return Promise.resolve(window.__emr_selector_save(payload));
+        } catch (err) {
+            console.error('selector save bridge error:', err);
+            window.__emrSetStatus('Selector save bridge unavailable');
+            return Promise.reject(err);
+        }
+    }
+
+    function selectorCallPreview(payload) {
+        if (typeof window.__emr_selector_preview !== 'function') {
+            const err = new Error('selector preview bridge unavailable');
+            console.error(err);
+            window.__emrSetStatus('Selector preview bridge unavailable');
+            return Promise.reject(err);
+        }
+        try {
+            return Promise.resolve(window.__emr_selector_preview(payload));
+        } catch (err) {
+            console.error('selector preview bridge error:', err);
+            window.__emrSetStatus('Selector preview bridge unavailable');
+            return Promise.reject(err);
+        }
+    }
+
+    function selectorPreviewCacheKey(spec, selector, rawText) {
+        return [
+            selectorWorkbenchState.visit_type || '',
+            spec && spec.var_id ? spec.var_id : '',
+            selector || '',
+            selectorNormalize(rawText || ''),
+        ].join('||');
+    }
+
+    function selectorApplySaveResult(spec, result) {
+        if (!result || result.ok === false) {
+            throw new Error((result && result.error) || 'Selector save error');
+        }
+        const nextSpec = result.spec ? selectorUpsertLocalSpec(result.spec) : selectorGetSpecByVarId(spec && spec.var_id);
+        if (nextSpec && Array.isArray(result.ranked_selectors)) {
+            selectorSetRankedSelectors(nextSpec, result.ranked_selectors);
+        }
+        return selectorGetSpecByVarId((nextSpec || spec || {}).var_id || '') || nextSpec || spec || null;
+    }
+
+    function selectorAppendPreviewRow(container, labelText, valueText) {
+        const row = document.createElement('div');
+        row.className = 'emr-selector-preview-row';
+
+        const label = document.createElement('div');
+        label.className = 'emr-selector-preview-label';
+        label.textContent = labelText;
+
+        const value = document.createElement('div');
+        value.className = 'emr-selector-preview-value';
+        value.textContent = valueText || '(empty)';
+
+        row.appendChild(label);
+        row.appendChild(value);
+        container.appendChild(row);
+    }
+
+    function selectorRenderPreview(previewEl, previewResult) {
+        if (!previewEl) return;
+        previewEl.innerHTML = '';
+        previewEl.className = 'emr-selector-preview';
+
+        if (!previewResult || previewResult.ok === false) {
+            const note = document.createElement('div');
+            note.className = 'emr-selector-preview-note';
+            note.textContent = previewResult && previewResult.error
+                ? `Preview unavailable: ${previewResult.error}`
+                : 'Preview unavailable.';
+            previewEl.appendChild(note);
+            return;
+        }
+
+        selectorAppendPreviewRow(previewEl, 'Runtime preview', previewResult.runtime_value || '');
+        if (
+            Object.prototype.hasOwnProperty.call(previewResult, 'ad_hoc_value')
+            && previewResult.ad_hoc_value !== previewResult.runtime_value
+        ) {
+            selectorAppendPreviewRow(previewEl, 'Ad hoc preview', previewResult.ad_hoc_value || '');
+        }
+        if (Array.isArray(previewResult.parser_rules) && previewResult.parser_rules.length) {
+            selectorAppendPreviewRow(
+                previewEl,
+                'Parser rules',
+                JSON.stringify(previewResult.parser_rules)
+            );
+        }
+        if (previewResult.note) {
+            const note = document.createElement('div');
+            note.className = 'emr-selector-preview-note';
+            note.textContent = previewResult.note;
+            previewEl.appendChild(note);
+        }
+    }
+
+    function selectorPrimeCandidatePreview(spec, candidate, previewEl) {
+        if (!spec || !candidate || !previewEl) return;
+        const cacheKey = selectorPreviewCacheKey(spec, candidate.selector, candidate.rawText);
+        if (selectorPreviewCache[cacheKey]) {
+            selectorRenderPreview(previewEl, selectorPreviewCache[cacheKey]);
+            return;
+        }
+        if (selectorPreviewInflight[cacheKey]) {
+            previewEl.textContent = 'Previewing parser output...';
+            return;
+        }
+
+        previewEl.className = 'emr-selector-preview';
+        previewEl.textContent = 'Previewing parser output...';
+        selectorPreviewInflight[cacheKey] = true;
+        selectorCallPreview({
+            visit_type: selectorWorkbenchState.visit_type,
+            var_id: spec.var_id,
+            selector: candidate.selector,
+            raw_text: candidate.rawText,
+        }).then((result) => {
+            selectorPreviewCache[cacheKey] = result;
+            if (previewEl.isConnected) {
+                selectorRenderPreview(previewEl, result);
+            }
+        }).catch((err) => {
+            if (previewEl.isConnected) {
+                selectorRenderPreview(previewEl, { ok: false, error: err && err.message ? err.message : String(err) });
+            }
+        }).finally(() => {
+            delete selectorPreviewInflight[cacheKey];
+        });
+    }
+
+    function selectorBuildDefaultCustomVariable() {
+        const baseLabel = 'New Custom Variable';
+        let label = baseLabel;
+        let labelSuffix = 2;
+        const existingLabels = new Set(
+            selectorSpecs.map((spec) => String(spec.label || '').trim().toLowerCase()).filter(Boolean)
+        );
+        while (existingLabels.has(label.toLowerCase())) {
+            label = `${baseLabel} ${labelSuffix}`;
+            labelSuffix += 1;
+        }
+
+        const baseVarId = selectorSlugify(label) || 'custom_variable';
+        let nextVarId = baseVarId;
+        let idSuffix = 2;
+        while (selectorSpecs.some((spec) => spec.var_id === nextVarId)) {
+            nextVarId = `${baseVarId}_${idSuffix}`;
+            idSuffix += 1;
+        }
+
+        return {
+            var_id: nextVarId,
+            label,
+            group: `custom_${selectorSlugify(selectorWorkbenchState.visit_type || 'unknown') || 'unknown'}`,
+            key: nextVarId,
+            keywords: [],
+            anchors: [],
+            parser_rules: [],
+            configured_selectors: [],
+            playwright_ranked_selectors: [],
+            is_custom: true,
+            source: 'custom',
+        };
+    }
+
+    function selectorUpsertLocalSpec(spec) {
+        if (!spec || !spec.var_id) return null;
+        const existingIdx = selectorSpecs.findIndex((item) => item.var_id === spec.var_id);
+        if (existingIdx >= 0) {
+            selectorSpecs[existingIdx] = Object.assign({}, selectorSpecs[existingIdx], spec);
+        } else {
+            selectorSpecs = selectorSpecs.concat([spec]);
+        }
+        return selectorGetSpecByVarId(spec.var_id);
+    }
+
+    function selectorUpsertLocalCustomSpec(spec) {
+        if (!spec || !spec.var_id) return null;
+        const nextSpec = Object.assign({
+            group: `custom_${selectorSlugify(selectorWorkbenchState.visit_type || 'unknown') || 'unknown'}`,
+            key: spec.var_id,
+            keywords: [],
+            anchors: [],
+            parser_rules: [],
+            configured_selectors: [],
+            playwright_ranked_selectors: [],
+            is_custom: true,
+            source: 'custom',
+        }, spec);
+        return selectorUpsertLocalSpec(nextSpec);
+    }
+
+    function selectorRemoveLocalCustomSpec(varId) {
+        selectorSpecs = selectorSpecs.filter((spec) => spec.var_id !== varId);
+        if (selectorActiveVarId === varId) {
+            selectorActiveVarId = '';
+        }
+        if (selectorPickVarId === varId) {
+            selectorStopPickMode('spec_removed');
+        }
+    }
+
+    function selectorUpsertLocalTemplateRecord(name, body) {
+        const templateName = String(name || '').trim();
+        if (!templateName) return null;
+        const nextBody = String(body || '');
+        const records = selectorGetTemplateRecords().slice();
+        const existingIdx = records.findIndex((record) => record && record.name === templateName);
+        const nextRecord = { name: templateName, body: nextBody };
+        if (existingIdx >= 0) {
+            records[existingIdx] = nextRecord;
+        } else {
+            records.push(nextRecord);
+        }
+        selectorWorkbenchState.template_records = records;
+        return nextRecord;
+    }
+
+    function selectorRemoveLocalTemplateRecord(name) {
+        const templateName = String(name || '').trim();
+        if (!templateName) return;
+        selectorWorkbenchState.template_records = selectorGetTemplateRecords().filter(
+            (record) => record && record.name !== templateName
+        );
+    }
+
+    function selectorStoreRestoreFrame(frame) {
+        const next = selectorClampFrame(Object.assign({}, frame || {}, { minimized: false }));
+        selectorMinimizedRestoreFrame = next;
+        if (selectorPanel) {
+            selectorPanel.dataset.restoreLeft = String(next.left);
+            selectorPanel.dataset.restoreTop = String(next.top);
+            selectorPanel.dataset.restoreWidth = String(next.width);
+            selectorPanel.dataset.restoreHeight = String(next.height);
+        }
+        return next;
+    }
+
+    function selectorGetStoredRestoreFrame() {
+        if (selectorMinimizedRestoreFrame) {
+            return selectorClampFrame(Object.assign({}, selectorMinimizedRestoreFrame, { minimized: false }));
+        }
+        const restoreLeft = Number(selectorPanel && selectorPanel.dataset.restoreLeft);
+        const restoreTop = Number(selectorPanel && selectorPanel.dataset.restoreTop);
+        const restoreWidth = Number(selectorPanel && selectorPanel.dataset.restoreWidth);
+        const restoreHeight = Number(selectorPanel && selectorPanel.dataset.restoreHeight);
+        return selectorClampFrame({
+            left: Number.isFinite(restoreLeft) ? restoreLeft : 8,
+            top: Number.isFinite(restoreTop) ? restoreTop : 40,
+            width: Number.isFinite(restoreWidth) ? restoreWidth : 760,
+            height: Number.isFinite(restoreHeight) ? restoreHeight : 560,
+            minimized: false,
+        });
+    }
+
+    function selectorApplyCompactFrame(baseFrame) {
+        const next = selectorClampFrame({
+            left: baseFrame.left,
+            top: baseFrame.top,
+            width: Math.min(baseFrame.width, 420),
+            height: 52,
+            minimized: true,
+            restore_left: baseFrame.left,
+            restore_top: baseFrame.top,
+            restore_width: baseFrame.width,
+            restore_height: baseFrame.height,
+        });
+        selectorPanel.style.left = `${next.left}px`;
+        selectorPanel.style.top = `${next.top}px`;
+        selectorPanel.style.width = `${next.width}px`;
+        selectorPanel.style.height = `${next.height}px`;
+    }
+
+    function selectorSetPanelMinimized(minimized) {
+        const nextMinimized = !!minimized;
+        if (nextMinimized === selectorPanelMinimized) {
+            if (selectorMinBtn) {
+                selectorMinBtn.textContent = selectorPanelMinimized ? '\u25A1' : '\u2014';
+                selectorMinBtn.title = selectorPanelMinimized
+                    ? 'Restore selector workbench'
+                    : 'Minimize selector workbench';
+            }
+            return;
+        }
+
+        if (nextMinimized) {
+            const restoreFrame = selectorStoreRestoreFrame(selectorGetCurrentFrame());
+            selectorApplyCompactFrame(restoreFrame);
+        } else {
+            const restoreFrame = selectorGetStoredRestoreFrame();
+            selectorPanel.style.left = `${restoreFrame.left}px`;
+            selectorPanel.style.top = `${restoreFrame.top}px`;
+            selectorPanel.style.width = `${restoreFrame.width}px`;
+            selectorPanel.style.height = `${restoreFrame.height}px`;
+        }
+
+        selectorPanelMinimized = nextMinimized;
+        selectorPanel.classList.toggle('emr-selector-minimized', selectorPanelMinimized);
+        if (selectorMinBtn) {
+            selectorMinBtn.textContent = selectorPanelMinimized ? '\u25A1' : '\u2014';
+            selectorMinBtn.title = selectorPanelMinimized
+                ? 'Restore selector workbench'
+                : 'Minimize selector workbench';
+        }
+        if (!selectorPanelMinimized) {
+            selectorResults.scrollTop = 0;
+        }
+    }
+
+    function selectorSlugify(value) {
+        return String(value || '')
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_+|_+$/g, '');
+    }
+
+    function selectorSplitFieldInput(value) {
+        return String(value || '')
+            .split(/[\n,]/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+    }
+
+    function selectorGetDefaultFrame() {
+        return {
+            left: 8,
+            top: 40,
+            width: 760,
+            height: 560,
+            minimized: false,
+            restore_left: 8,
+            restore_top: 40,
+            restore_width: 760,
+            restore_height: 560,
+        };
+    }
+
+    function selectorClampFrame(frame) {
+        const next = Object.assign(selectorGetDefaultFrame(), frame || {});
+        const targetMinimized = !!next.minimized;
+        const minWidth = targetMinimized ? 320 : 520;
+        const minHeight = targetMinimized ? 52 : 360;
+        const maxWidth = Math.max(minWidth, window.innerWidth - 16);
+        const maxHeight = Math.max(minHeight, window.innerHeight - 16);
+        next.width = Math.min(Math.max(minWidth, Number(next.width) || minWidth), maxWidth);
+        next.height = Math.min(Math.max(minHeight, Number(next.height) || minHeight), maxHeight);
+        next.left = Number(next.left) || 8;
+        next.top = Number(next.top) || 8;
+        next.left = Math.min(Math.max(8, next.left), Math.max(8, window.innerWidth - next.width - 8));
+        next.top = Math.min(Math.max(8, next.top), Math.max(8, window.innerHeight - next.height - 8));
+        for (const key of ['restore_left', 'restore_top', 'restore_width', 'restore_height']) {
+            const value = Number(next[key]);
+            if (Number.isFinite(value)) {
+                next[key] = value;
+            }
+        }
+        next.minimized = !!next.minimized;
+        return next;
+    }
+
+    function selectorGetCurrentFrame() {
+        const restoreFrame = selectorGetStoredRestoreFrame();
+        return selectorClampFrame({
+            left: parseFloat(selectorPanel.style.left) || selectorPanel.offsetLeft || 8,
+            top: parseFloat(selectorPanel.style.top) || selectorPanel.offsetTop || 40,
+            width: parseFloat(selectorPanel.style.width) || selectorPanel.offsetWidth || 760,
+            height: parseFloat(selectorPanel.style.height) || selectorPanel.offsetHeight || 560,
+            minimized: selectorPanelMinimized,
+            restore_left: restoreFrame.left,
+            restore_top: restoreFrame.top,
+            restore_width: restoreFrame.width,
+            restore_height: restoreFrame.height,
+        });
+    }
+
+    function selectorApplyFrame(frame) {
+        const next = selectorClampFrame(frame);
+        if (next.minimized) {
+            const restoreFrame = selectorStoreRestoreFrame({
+                left: Number.isFinite(Number(next.restore_left)) ? Number(next.restore_left) : next.left,
+                top: Number.isFinite(Number(next.restore_top)) ? Number(next.restore_top) : next.top,
+                width: Number.isFinite(Number(next.restore_width)) ? Number(next.restore_width) : 760,
+                height: Number.isFinite(Number(next.restore_height)) ? Number(next.restore_height) : 560,
+                minimized: false,
+            });
+            selectorApplyCompactFrame(restoreFrame);
+        } else {
+            selectorPanel.style.left = `${next.left}px`;
+            selectorPanel.style.top = `${next.top}px`;
+            selectorPanel.style.width = `${next.width}px`;
+            selectorPanel.style.height = `${next.height}px`;
+            selectorStoreRestoreFrame(next);
+        }
+        selectorSetPanelMinimized(!!next.minimized);
+    }
+
+    function selectorPersistWindowState() {
+        if (!selectorWorkbenchState.visit_type || selectorPanelExpanded) {
+            return;
+        }
+        selectorCallWorkbench({
+            action: 'save_window_state',
+            visit_type: selectorWorkbenchState.visit_type,
+            state: selectorGetCurrentFrame(),
+        }).catch((err) => {
+            console.error('selector window-state save error:', err);
+        });
+    }
+
+    function selectorSetExpanded(expanded) {
+        const nextExpanded = !!expanded;
+        if (nextExpanded === selectorPanelExpanded) return;
+        if (nextExpanded) {
+            selectorRestoreFrame = selectorGetCurrentFrame();
+            selectorPanelExpanded = true;
+            selectorSetPanelMinimized(false);
+            selectorApplyFrame({
+                left: 8,
+                top: 8,
+                width: Math.max(720, window.innerWidth - 16),
+                height: Math.max(420, window.innerHeight - 16),
+                minimized: false,
+            });
+        } else {
+            selectorPanelExpanded = false;
+            selectorApplyFrame(selectorRestoreFrame || selectorWorkbenchState.window_state || selectorGetDefaultFrame());
+            selectorPersistWindowState();
+        }
+        if (selectorExpandBtn) {
+            selectorExpandBtn.textContent = selectorPanelExpanded ? '[ ]' : '[]';
+            selectorExpandBtn.title = selectorPanelExpanded ? 'Restore workbench size' : 'Expand workbench';
+        }
+    }
+
+    function selectorSetActiveView(viewName) {
+        selectorActiveView = viewName === 'templates' ? 'templates' : 'variables';
+        selectorVariablesTabBtn.classList.toggle('emr-selector-tab-active', selectorActiveView === 'variables');
+        selectorTemplatesTabBtn.classList.toggle('emr-selector-tab-active', selectorActiveView === 'templates');
+        selectorVarsWorkspace.classList.toggle('emr-selector-workspace-active', selectorActiveView === 'variables');
+        selectorTemplatesWorkspace.classList.toggle('emr-selector-workspace-active', selectorActiveView === 'templates');
+        if (selectorActiveView === 'templates') {
+            selectorRenderTemplateList();
+            selectorSelectTemplate(selectorPendingTemplateName || selectorActiveTemplateName || '');
+        }
+    }
+
+    function selectorGetTemplateRecords() {
+        return Array.isArray(selectorWorkbenchState.template_records)
+            ? selectorWorkbenchState.template_records
+            : [];
+    }
+
+    function selectorGetTemplateRecordByName(name) {
+        return selectorGetTemplateRecords().find((record) => record && record.name === name) || null;
+    }
+
+    function selectorRenderTemplateList() {
+        selectorTemplateList.innerHTML = '';
+        const records = selectorGetTemplateRecords();
+        if (!records.length) {
+            const empty = document.createElement('div');
+            empty.className = 'emr-selector-empty';
+            empty.textContent = 'No templates are configured for this visit type yet.';
+            selectorTemplateList.appendChild(empty);
+            return;
+        }
+
+        for (const record of records) {
+            const item = document.createElement('div');
+            item.className = 'emr-selector-template-item';
+            if (record.name === selectorActiveTemplateName) {
+                item.classList.add('emr-selector-active');
+            }
+
+            const nameEl = document.createElement('div');
+            nameEl.className = 'emr-selector-template-name';
+            nameEl.textContent = record.name || 'Untitled template';
+
+            const metaEl = document.createElement('div');
+            metaEl.className = 'emr-selector-template-meta';
+            metaEl.textContent = record.body ? `${String(record.body).length} chars` : 'Empty body';
+
+            item.appendChild(nameEl);
+            item.appendChild(metaEl);
+            item.addEventListener('click', () => selectorSelectTemplate(record.name || ''));
+            selectorTemplateList.appendChild(item);
+        }
+    }
+
+    function selectorSelectTemplate(name) {
+        const records = selectorGetTemplateRecords();
+        let record = selectorGetTemplateRecordByName(name);
+        if (!record && records.length) {
+            record = records[0];
+        }
+
+        selectorActiveTemplateName = record ? String(record.name || '') : '';
+        selectorTemplateNameInput.value = record ? String(record.name || '') : '';
+        selectorTemplateBodyInput.value = record ? String(record.body || '') : '';
+        selectorTemplateEditorTitle.textContent = selectorActiveTemplateName || 'Template Editor';
+        selectorTemplatePathHint.textContent = selectorWorkbenchState.template_file
+            ? `Editing ${selectorWorkbenchState.template_file} (${selectorWorkbenchState.template_config_file || 'template config'})`
+            : 'Current visit type template file';
+        selectorTemplateDeleteBtn.disabled = !selectorActiveTemplateName;
+        selectorRenderTemplateList();
+    }
+
+    function selectorResetTemplateEditor() {
+        selectorActiveTemplateName = '';
+        selectorPendingTemplateName = '';
+        selectorTemplateNameInput.value = '';
+        selectorTemplateBodyInput.value = '';
+        selectorTemplateEditorTitle.textContent = 'New Template';
+        selectorTemplateDeleteBtn.disabled = true;
+        selectorRenderTemplateList();
+    }
+
+    function selectorCreateCustomVariable() {
+        if (!selectorWorkbenchState.visit_type) {
+            window.__emrSetStatus('Visit type is not ready yet');
+            return;
+        }
+        const draftSpec = selectorBuildDefaultCustomVariable();
+        selectorPendingSelectVarId = draftSpec.var_id;
+        selectorActiveVarId = draftSpec.var_id;
+        const optimisticSpec = selectorUpsertLocalCustomSpec(draftSpec);
+        renderSelectorVariableList();
+        selectorSetActiveView('variables');
+        selectorSetPanelMinimized(false);
+        renderSelectorResults(
+            optimisticSpec,
+            [],
+            'Custom variable created. Update the fields below, then click Save custom variable.'
+        );
+        window.__emrSetStatus(`Creating ${draftSpec.label}...`);
+        selectorCallWorkbench({
+            action: 'save_custom_variable',
+            visit_type: selectorWorkbenchState.visit_type,
+            variable: {
+                var_id: draftSpec.var_id,
+                label: draftSpec.label,
+                keywords: [],
+                anchors: [],
+                parser_rules: [],
+            },
+        }).then((result) => {
+            if (result && result.ok === false) {
+                throw new Error(result.error || 'Custom variable error');
+            }
+            if (result && result.spec) {
+                selectorUpsertLocalSpec(result.spec);
+                renderSelectorVariableList();
+                renderSelectorView(selectorGetSpecByVarId(draftSpec.var_id) || optimisticSpec || draftSpec);
+            }
+        }).catch((err) => {
+            console.error('create custom variable error:', err);
+            selectorRemoveLocalCustomSpec(draftSpec.var_id);
+            renderSelectorVariableList();
+            renderSelectorView(selectorGetSpecByVarId(selectorActiveVarId) || selectorSpecs[0] || null);
+            window.__emrSetStatus('Custom variable error');
+        });
+    }
+
+    function selectorCreateFieldLabel(text) {
+        const label = document.createElement('label');
+        label.className = 'emr-selector-field-label';
+        label.textContent = text;
+        return label;
+    }
+
+    function selectorBuildSpecEditorCard(spec) {
+        if (!spec) return null;
+
+        const card = document.createElement('div');
+        card.className = 'emr-selector-card';
+
+        const title = document.createElement('div');
+        title.className = 'emr-selector-card-method';
+        title.textContent = spec.is_custom ? 'Custom Variable' : 'Built-in Variable';
+        card.appendChild(title);
+
+        const meta = document.createElement('div');
+        meta.className = 'emr-selector-ranked-meta';
+        meta.textContent = `${spec.group}.${spec.key}`;
+        card.appendChild(meta);
+
+        const labelInput = document.createElement('input');
+        labelInput.className = 'emr-selector-text-input';
+        labelInput.value = spec.label || '';
+
+        const varIdInput = document.createElement('input');
+        varIdInput.className = 'emr-selector-text-input';
+        varIdInput.value = spec.var_id || '';
+        varIdInput.readOnly = true;
+
+        const keywordsInput = document.createElement('input');
+        keywordsInput.className = 'emr-selector-text-input';
+        keywordsInput.value = Array.isArray(spec.keywords) ? spec.keywords.join(', ') : '';
+
+        const anchorsInput = document.createElement('textarea');
+        anchorsInput.className = 'emr-selector-textarea';
+        anchorsInput.value = Array.isArray(spec.anchors) ? spec.anchors.join('\n') : '';
+
+        const parserRulesInput = document.createElement('textarea');
+        parserRulesInput.className = 'emr-selector-textarea';
+        parserRulesInput.value = JSON.stringify(spec.parser_rules || [], null, 2);
+
+        card.appendChild(selectorCreateFieldLabel('Label'));
+        card.appendChild(labelInput);
+        card.appendChild(selectorCreateFieldLabel('Variable ID'));
+        card.appendChild(varIdInput);
+        card.appendChild(selectorCreateFieldLabel('Keyword hints'));
+        card.appendChild(keywordsInput);
+        card.appendChild(selectorCreateFieldLabel('Anchor hints'));
+        card.appendChild(anchorsInput);
+        card.appendChild(selectorCreateFieldLabel('Parser rules (JSON array)'));
+        card.appendChild(parserRulesInput);
+
+        const help = document.createElement('div');
+        help.className = 'emr-selector-help';
+        help.textContent = spec.is_custom
+            ? 'Parser rules are stored now so later runtime extraction can transform raw selector text deterministically.'
+            : 'Built-in parser rules let you change runtime source order without editing Python. For Birth Control BP, reorder the JSON array to prefer combined BP or split systolic/diastolic reads.';
+        card.appendChild(help);
+
+        const btnRow = document.createElement('div');
+        btnRow.className = 'emr-selector-card-actions';
+
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'emr-selector-action-btn';
+        saveBtn.textContent = spec.is_custom ? 'Save custom variable' : 'Save built-in settings';
+        saveBtn.addEventListener('click', () => {
+            let parserRules = [];
+            try {
+                parserRules = JSON.parse(parserRulesInput.value || '[]');
+            } catch (err) {
+                window.__emrSetStatus('Parser rules must be valid JSON');
+                return;
+            }
+            selectorPendingSelectVarId = spec.var_id || '';
+            const optimisticSpec = selectorUpsertLocalSpec(Object.assign({}, spec, {
+                var_id: spec.var_id,
+                label: labelInput.value,
+                keywords: selectorSplitFieldInput(keywordsInput.value),
+                anchors: selectorSplitFieldInput(anchorsInput.value),
+                parser_rules: parserRules,
+            }));
+            renderSelectorVariableList();
+            renderSelectorView(optimisticSpec || spec);
+            window.__emrSetStatus(`Saving ${labelInput.value || spec.var_id}...`);
+            selectorCallWorkbench({
+                action: spec.is_custom ? 'save_custom_variable' : 'save_builtin_variable',
+                visit_type: selectorWorkbenchState.visit_type,
+                variable: {
+                    var_id: spec.var_id,
+                    label: labelInput.value,
+                    keywords: selectorSplitFieldInput(keywordsInput.value),
+                    anchors: selectorSplitFieldInput(anchorsInput.value),
+                    parser_rules: parserRules,
+                },
+            }).then((result) => {
+                if (result && result.ok === false) {
+                    throw new Error(result.error || 'Variable save failed');
+                }
+                if (result && result.spec) {
+                    selectorUpsertLocalSpec(result.spec);
+                    renderSelectorVariableList();
+                    renderSelectorView(selectorGetSpecByVarId(spec.var_id) || optimisticSpec || spec);
+                }
+            }).catch((err) => {
+                console.error('save variable error:', err);
+                window.__emrSetStatus(spec.is_custom ? 'Custom variable error' : 'Built-in settings error');
+            });
+        });
+
+        btnRow.appendChild(saveBtn);
+        if (spec.is_custom) {
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'emr-selector-action-btn';
+            deleteBtn.textContent = 'Delete custom variable';
+            deleteBtn.addEventListener('click', () => {
+                if (!window.confirm(`Delete custom variable "${spec.label || spec.var_id}"?`)) {
+                    return;
+                }
+                selectorPendingSelectVarId = '';
+                selectorCallWorkbench({
+                    action: 'delete_custom_variable',
+                    visit_type: selectorWorkbenchState.visit_type,
+                    var_id: spec.var_id,
+                }).catch((err) => {
+                    console.error('delete custom variable error:', err);
+                    window.__emrSetStatus('Custom variable error');
+                });
+            });
+            btnRow.appendChild(deleteBtn);
+        } else {
+            const createBtn = document.createElement('button');
+            createBtn.className = 'emr-selector-action-btn';
+            createBtn.textContent = 'New custom variable';
+            createBtn.addEventListener('click', selectorCreateCustomVariable);
+            btnRow.appendChild(createBtn);
+        }
+        card.appendChild(btnRow);
+        return card;
+    }
+
+    function selectorAddCandidate(results, seen, method, el, explicitSelector = '') {
+        if (!selectorEligibleElement(el)) return;
+        const rawText = selectorRawText(el);
+        if (!rawText || selectorIsNoiseText(rawText)) return;
+        const selector = explicitSelector || selectorCssPath(el);
+        if (!selector) return;
+        const dedupeKey = `${method}|${selector}|${selectorNormalize(rawText)}`;
+        if (seen.has(dedupeKey)) return;
+        seen.add(dedupeKey);
+        selectorDebug('candidate_added', {
+            method,
+            selector,
+            raw_text: rawText,
+        });
+        results.push({
+            method,
+            selector,
+            rawText,
+            element: el,
+        });
+    }
+
+    function selectorFindAnchorMatches(spec, textElements) {
+        const matches = [];
+        const anchors = Array.isArray(spec.anchors) ? spec.anchors : [];
+        if (!anchors.length) return matches;
+        for (const el of textElements) {
+            const raw = selectorRawText(el);
+            const normalized = selectorNormalize(raw);
+            if (!normalized) continue;
+            for (const anchor of anchors) {
+                const anchorNorm = selectorNormalize(anchor);
+                if (!anchorNorm) continue;
+                if (
+                    normalized === anchorNorm ||
+                    normalized.startsWith(anchorNorm + ':') ||
+                    normalized.includes(anchorNorm)
+                ) {
+                    matches.push({ anchor, element: el });
+                    break;
+                }
+            }
+        }
+        return matches;
+    }
+
+    function selectorNextMeaningfulElements(anchorEl, textElements, indexMap, maxCount = 3) {
+        const results = [];
+        const anchorIndex = indexMap.get(anchorEl);
+        if (anchorIndex === undefined) return results;
+        const anchorNorm = selectorNormalize(selectorRawText(anchorEl));
+        for (
+            let idx = anchorIndex + 1;
+            idx < textElements.length && idx <= anchorIndex + 8 && results.length < maxCount;
+            idx += 1
+        ) {
+            const el = textElements[idx];
+            const raw = selectorRawText(el);
+            const normalized = selectorNormalize(raw);
+            if (!raw || normalized === anchorNorm) continue;
+            if (normalized.includes('show unselected answers')) break;
+            if (selectorIsNoiseText(raw)) continue;
+            if (anchorEl.contains(el) || el.contains(anchorEl)) continue;
+            results.push(el);
+        }
+        return results;
+    }
+
+    function selectorAnchorSectionElements(anchorEl, textElements, indexMap, maxCount = 3) {
+        const results = [];
+        const anchorIndex = indexMap.get(anchorEl);
+        if (anchorIndex === undefined) return results;
+        let container = anchorEl.parentElement;
+        let depth = 0;
+        while (container && depth < 3 && results.length < maxCount) {
+            for (
+                let idx = anchorIndex + 1;
+                idx < textElements.length && idx <= anchorIndex + 14 && results.length < maxCount;
+                idx += 1
+            ) {
+                const el = textElements[idx];
+                if (!container.contains(el)) continue;
+                const raw = selectorRawText(el);
+                if (!raw || selectorIsNoiseText(raw)) continue;
+                if (selectorNormalize(raw).includes('show unselected answers')) break;
+                if (anchorEl.contains(el) || el.contains(anchorEl)) continue;
+                results.push(el);
+            }
+            container = container.parentElement;
+            depth += 1;
+        }
+        return results;
+    }
+
+    function selectorRunAttributeKeywordTrials(spec, results, seen) {
+        const keywords = Array.isArray(spec.keywords) ? spec.keywords.map(selectorNormalize).filter(Boolean) : [];
+        if (!keywords.length) return;
+        const scored = [];
+        for (const doc of selectorCollectDocuments()) {
+            const all = doc.body ? doc.body.querySelectorAll('*') : [];
+            for (const el of all) {
+                if (!selectorIsElementNode(el)) continue;
+                if (el === overlay || overlay.contains(el)) continue;
+                if (!selectorIsVisible(el)) continue;
+                const raw = selectorRawText(el);
+                if (!raw || raw.length > 300 || selectorIsNoiseText(raw)) continue;
+                const attrBlob = [
+                    el.getAttribute('data-testid') || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('name') || '',
+                    el.id || '',
+                    typeof el.className === 'string' ? el.className : '',
+                ].join(' ');
+                const attrNorm = selectorNormalize(attrBlob);
+                if (!attrNorm) continue;
+                let score = 0;
+                for (const keyword of keywords) {
+                    if (attrNorm.includes(keyword)) score += keyword.length;
+                }
+                if (score > 0) {
+                    scored.push({ el, score });
+                }
+            }
+        }
+        scored.sort((a, b) => b.score - a.score);
+        for (const item of scored.slice(0, 5)) {
+            selectorAddCandidate(results, seen, 'Attribute keyword', item.el);
+        }
+    }
+
+    function selectorRunKeywordTextTrials(spec, textElements, results, seen) {
+        const keywords = Array.isArray(spec.keywords) ? spec.keywords.map(selectorNormalize).filter(Boolean) : [];
+        const anchors = new Set((Array.isArray(spec.anchors) ? spec.anchors : []).map(selectorNormalize).filter(Boolean));
+        if (!keywords.length) return;
+        const scored = [];
+        for (const el of textElements) {
+            const raw = selectorRawText(el);
+            const normalized = selectorNormalize(raw);
+            if (!normalized || anchors.has(normalized) || selectorIsNoiseText(raw)) continue;
+            let score = 0;
+            for (const keyword of keywords) {
+                if (normalized.includes(keyword)) score += keyword.length;
+            }
+            if (score > 0) {
+                scored.push({ el, score });
+            }
+        }
+        scored.sort((a, b) => b.score - a.score);
+        for (const item of scored.slice(0, 5)) {
+            selectorAddCandidate(results, seen, 'Keyword text', item.el);
+        }
+    }
+
+    function selectorGetRankedSelectors(spec) {
+        return Array.isArray(spec && spec.playwright_ranked_selectors)
+            ? spec.playwright_ranked_selectors.filter(Boolean)
+            : [];
+    }
+
+    function selectorSetRankedSelectors(spec, selectors) {
+        if (!spec) return;
+        const deduped = [];
+        for (const selector of Array.isArray(selectors) ? selectors : []) {
+            if (selector && !deduped.includes(selector)) {
+                deduped.push(selector);
+            }
+        }
+        spec.playwright_ranked_selectors = deduped;
+        if (!Array.isArray(spec.configured_selectors)) {
+            spec.configured_selectors = [];
+        }
+        for (const selector of deduped) {
+            if (!spec.configured_selectors.includes(selector)) {
+                spec.configured_selectors.push(selector);
+            }
+        }
+    }
+
+    function selectorGetTrialState(spec) {
+        if (!spec || !spec.var_id) {
+            return { candidates: [], emptyMessage: '' };
+        }
+        return selectorTrialState[spec.var_id] || { candidates: [], emptyMessage: '' };
+    }
+
+    function selectorSetTrialState(spec, candidates, emptyMessage = '') {
+        if (!spec || !spec.var_id) return;
+        selectorTrialState[spec.var_id] = {
+            candidates: Array.isArray(candidates) ? candidates : [],
+            emptyMessage,
+        };
+    }
+
+    function selectorCollectCandidatesForSelector(selector, methodLabel, limit = 3) {
+        const results = [];
+        const seen = new Set();
+        let count = 0;
+        for (const el of selectorQuerySafe(selector)) {
+            selectorAddCandidate(results, seen, methodLabel, el, selector);
+            count += 1;
+            if (count >= limit) break;
+        }
+        return results;
+    }
+
+    function selectorFlashSelector(selector) {
+        const candidates = selectorCollectCandidatesForSelector(selector, 'Flash selector', 1);
+        if (candidates.length) {
+            selectorFlashElement(candidates[0].element);
+        }
+    }
+
+    function selectorManageRankedSelector(spec, payload, buttonEl) {
+        if (!spec || !payload || !payload.selector) return;
+        selectorDebug('save_attempt', {
+            var_id: spec.var_id,
+            label: spec.label,
+            selector: payload.selector,
+            details: payload.action || '',
+        });
+        window.__emrSetStatus(`Updating ranked selectors for ${spec.label}...`);
+        selectorCallSave({
+            action: payload.action,
+            direction: payload.direction,
+            group: spec.group,
+            key: spec.key,
+            label: spec.label,
+            selector: payload.selector,
+        }).then((result) => {
+            const nextSpec = selectorApplySaveResult(spec, result);
+            if (buttonEl) {
+                const original = buttonEl.textContent;
+                buttonEl.textContent = 'Done';
+                window.setTimeout(() => { buttonEl.textContent = original; }, 900);
+            }
+            renderSelectorVariableList();
+            renderSelectorView(nextSpec || spec);
+            if (result && result.status) {
+                window.__emrSetStatus(result.status);
+            }
+            window.setTimeout(() => window.__emrSetStatus(''), 900);
+        }).catch((err) => {
+            console.error('ranked selector update error:', err);
+            window.__emrSetStatus('Selector save error');
+        });
+    }
+
+    function selectorPersistCandidate(spec, candidate, useBtn) {
+        if (!spec || !candidate || !candidate.selector) return;
+        const alreadyRanked = selectorGetRankedSelectors(spec).includes(candidate.selector);
+        const action = alreadyRanked ? 'promote_ranked' : 'add_ranked';
+        selectorDebug('save_attempt', {
+            var_id: spec.var_id,
+            label: spec.label,
+            method: candidate.method,
+            selector: candidate.selector,
+            raw_text: candidate.rawText,
+            details: action,
+        });
+        window.__emrSetStatus(
+            alreadyRanked
+                ? `Promoting selector for ${spec.label}...`
+                : `Adding selector for ${spec.label}...`
+        );
+        selectorCallSave({
+            action,
+            group: spec.group,
+            key: spec.key,
+            label: spec.label,
+            selector: candidate.selector,
+            method: candidate.method,
+            raw_text: candidate.rawText,
+        }).then((result) => {
+            const nextSpec = selectorApplySaveResult(spec, result);
+            if (useBtn) {
+                const original = useBtn.textContent;
+                useBtn.textContent = alreadyRanked ? 'Promoted' : 'Added';
+                window.setTimeout(() => { useBtn.textContent = original; }, 1200);
+            }
+            renderSelectorVariableList();
+            renderSelectorView(nextSpec || spec);
+            if (result && result.status) {
+                window.__emrSetStatus(result.status);
+            }
+            window.setTimeout(() => window.__emrSetStatus(''), 900);
+        }).catch((err) => {
+            console.error('selector save error:', err);
+            window.__emrSetStatus('Selector save error');
+        });
+    }
+
+    function selectorStopPickMode(reason = 'cancelled') {
+        if (!selectorPickVarId) return;
+        selectorDebug('pick_mode_stopped', {
+            var_id: selectorPickVarId,
+            details: reason,
+        });
+        selectorPickVarId = '';
+        selectorClearHoverHighlight();
+        renderSelectorVariableList();
+        const activeSpec = selectorGetSpecByVarId(selectorActiveVarId);
+        if (activeSpec) {
+            renderSelectorView(activeSpec);
+        }
+        window.__emrSetStatus('');
+    }
+
+    function selectorStartPickMode(spec) {
+        if (!spec) return;
+        selectorPickVarId = spec.var_id || '';
+        selectorActiveVarId = selectorPickVarId;
+        selectorClearHoverHighlight();
+        renderSelectorVariableList();
+        selectorSetTrialState(spec, [], 'Pick mode active. Move over the EMR page and click the exact field you want to use.');
+        renderSelectorView(spec);
+        window.__emrSetStatus(`Pick from page: ${spec.label}`);
+        selectorDebug('pick_mode_started', {
+            var_id: spec.var_id,
+            label: spec.label,
+            details: `${spec.group}.${spec.key}`,
+        });
+    }
+
+    function selectorCaptureManualPick(spec, el) {
+        if (!spec || !selectorEligibleElement(el)) return;
+        const rawText = selectorRawText(el);
+        const selector = selectorCssPath(el);
+        selectorDebug('manual_pick_captured', {
+            var_id: spec.var_id,
+            label: spec.label,
+            selector,
+            raw_text: rawText,
+        });
+        selectorSetPanelMinimized(false);
+        selectorStopPickMode('captured');
+        renderSelectorResults(spec, [{
+            method: 'Manual pick',
+            selector,
+            rawText,
+            element: el,
+        }]);
+    }
+
+    function selectorTestSavedSelector(spec, selector) {
+        if (!spec || !selector) return;
+        const rankedSelectors = selectorGetRankedSelectors(spec);
+        const idx = rankedSelectors.indexOf(selector);
+        const positionLabel = idx >= 0 ? `${idx + 1}/${rankedSelectors.length}` : '?/?';
+        window.__emrSetStatus(`Testing ranked selector ${positionLabel}`);
+        selectorDebug('ranked_selector_test', {
+            var_id: spec.var_id,
+            label: spec.label,
+            selector,
+            details: positionLabel,
+        });
+        selectorActiveVarId = spec.var_id || '';
+        renderSelectorVariableList();
+        const candidates = selectorCollectCandidatesForSelector(
+            selector,
+            idx >= 0 ? `Ranked selector #${idx + 1}` : 'Ranked selector',
+            5
+        );
+        if (candidates.length) {
+            window.__emrSetStatus(`Accepted from ranked selector ${idx + 1}`);
+            renderSelectorResults(spec, candidates);
+        } else {
+            renderSelectorResults(spec, [], 'No visible match for that ranked selector. Falling back to wide data grab in runtime.');
+            window.__emrSetStatus('Falling back to wide data grab');
+        }
+        window.setTimeout(() => window.__emrSetStatus(''), 1400);
+    }
+
+    function renderSelectorView(spec) {
+        if (!spec) {
+            selectorResultsTitle.textContent = 'Selector Trials';
+            selectorRenderEmpty('Select a variable on the left to try selector logic.');
+            return;
+        }
+        const state = selectorGetTrialState(spec);
+        const candidates = Array.isArray(state.candidates) ? state.candidates : [];
+        const emptyMessage = state.emptyMessage || 'No selector matches found. Scroll the EMR page to the relevant field and try again.';
+        const rankedSelectors = selectorGetRankedSelectors(spec);
+        selectorResults.scrollTop = 0;
+        selectorResults.innerHTML = '';
+        selectorResultsTitle.textContent = `Selector Trials: ${spec.label || spec.var_id || 'Variable'} (${candidates.length})`;
+
+        const editorCard = selectorBuildSpecEditorCard(spec);
+        if (editorCard) {
+            selectorResults.appendChild(editorCard);
+        }
+
+        const summaryCard = document.createElement('div');
+        summaryCard.className = 'emr-selector-summary';
+
+        const summaryTitle = document.createElement('div');
+        summaryTitle.className = 'emr-selector-summary-title';
+        summaryTitle.textContent = 'How selector choice works';
+
+        const summaryCopy = document.createElement('div');
+        summaryCopy.className = 'emr-selector-summary-copy';
+        summaryCopy.textContent = 'Trial results are candidate DOM matches for this variable. Review the raw text, then the parser preview below it. Only after that should you add or promote a selector into the ranked runtime list.';
+
+        summaryCard.appendChild(summaryTitle);
+        summaryCard.appendChild(summaryCopy);
+        selectorResults.appendChild(summaryCard);
+
+        const rankedTitle = document.createElement('div');
+        rankedTitle.className = 'emr-selector-section-title';
+        rankedTitle.textContent = `Ranked Runtime Order (${rankedSelectors.length})`;
+        selectorResults.appendChild(rankedTitle);
+
+        if (!rankedSelectors.length) {
+            const emptyRanked = document.createElement('div');
+            emptyRanked.className = 'emr-selector-empty';
+            emptyRanked.textContent = 'No ranked Playwright selectors saved yet.';
+            selectorResults.appendChild(emptyRanked);
+        } else {
+            const rankedList = document.createElement('div');
+            rankedList.className = 'emr-selector-ranked-list';
+            rankedSelectors.forEach((selector, idx) => {
+                const item = document.createElement('div');
+                item.className = 'emr-selector-ranked-item';
+
+                const top = document.createElement('div');
+                top.className = 'emr-selector-card-top';
+
+                const method = document.createElement('div');
+                method.className = 'emr-selector-card-method';
+                method.textContent = `Priority ${idx + 1}`;
+
+                const actions = document.createElement('div');
+                actions.className = 'emr-selector-card-actions';
+
+                const testBtn = document.createElement('button');
+                testBtn.className = 'emr-selector-action-btn';
+                testBtn.textContent = 'Test + Preview';
+                testBtn.addEventListener('click', () => selectorTestSavedSelector(spec, selector));
+
+                const flashBtn = document.createElement('button');
+                flashBtn.className = 'emr-selector-action-btn';
+                flashBtn.textContent = 'Flash';
+                flashBtn.addEventListener('click', () => selectorFlashSelector(selector));
+
+                const upBtn = document.createElement('button');
+                upBtn.className = 'emr-selector-action-btn';
+                upBtn.textContent = 'Up';
+                upBtn.disabled = idx === 0;
+                upBtn.addEventListener('click', () => selectorManageRankedSelector(spec, {
+                    action: 'move_ranked',
+                    direction: 'up',
+                    selector,
+                }, upBtn));
+
+                const downBtn = document.createElement('button');
+                downBtn.className = 'emr-selector-action-btn';
+                downBtn.textContent = 'Down';
+                downBtn.disabled = idx === rankedSelectors.length - 1;
+                downBtn.addEventListener('click', () => selectorManageRankedSelector(spec, {
+                    action: 'move_ranked',
+                    direction: 'down',
+                    selector,
+                }, downBtn));
+
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'emr-selector-action-btn';
+                removeBtn.textContent = 'Remove';
+                removeBtn.addEventListener('click', () => selectorManageRankedSelector(spec, {
+                    action: 'remove_ranked',
+                    selector,
+                }, removeBtn));
+
+                actions.appendChild(testBtn);
+                actions.appendChild(flashBtn);
+                actions.appendChild(upBtn);
+                actions.appendChild(downBtn);
+                actions.appendChild(removeBtn);
+                top.appendChild(method);
+                top.appendChild(actions);
+
+                const meta = document.createElement('div');
+                meta.className = 'emr-selector-ranked-meta';
+                meta.textContent = `${spec.group}.${spec.key}`;
+
+                const selectorEl = document.createElement('div');
+                selectorEl.className = 'emr-selector-card-selector';
+                selectorEl.textContent = selector;
+
+                item.appendChild(top);
+                item.appendChild(meta);
+                item.appendChild(selectorEl);
+                rankedList.appendChild(item);
+            });
+            selectorResults.appendChild(rankedList);
+        }
+
+        const trialTitle = document.createElement('div');
+        trialTitle.className = 'emr-selector-section-title';
+        trialTitle.textContent = `Candidate Matches (${candidates.length})`;
+        selectorResults.appendChild(trialTitle);
+
+        if (!candidates.length) {
+            const empty = document.createElement('div');
+            empty.className = 'emr-selector-empty';
+            empty.textContent = emptyMessage;
+            selectorResults.appendChild(empty);
+            return;
+        }
+
+        for (const candidate of candidates) {
+            const card = document.createElement('div');
+            card.className = 'emr-selector-card';
+
+            const top = document.createElement('div');
+            top.className = 'emr-selector-card-top';
+
+            const method = document.createElement('div');
+            method.className = 'emr-selector-card-method';
+            method.textContent = candidate.method;
+
+            const actions = document.createElement('div');
+            actions.className = 'emr-selector-card-actions';
+
+            const flashBtn = document.createElement('button');
+            flashBtn.className = 'emr-selector-action-btn';
+            flashBtn.textContent = 'Flash';
+            flashBtn.addEventListener('click', () => selectorFlashElement(candidate.element));
+
+            const useBtn = document.createElement('button');
+            useBtn.className = 'emr-selector-action-btn';
+            useBtn.textContent = selectorGetRankedSelectors(spec).includes(candidate.selector)
+                ? 'Promote to top'
+                : 'Add to ranked list';
+            useBtn.addEventListener('click', () => selectorPersistCandidate(spec, candidate, useBtn));
+
+            actions.appendChild(flashBtn);
+            actions.appendChild(useBtn);
+            top.appendChild(method);
+            top.appendChild(actions);
+
+            const selectorEl = document.createElement('div');
+            selectorEl.className = 'emr-selector-card-selector';
+            selectorEl.textContent = candidate.selector;
+
+            const rawEl = document.createElement('div');
+            rawEl.className = 'emr-selector-card-raw';
+            rawEl.textContent = candidate.rawText;
+
+            const previewEl = document.createElement('div');
+            previewEl.className = 'emr-selector-preview';
+            previewEl.textContent = 'Previewing parser output...';
+
+            card.appendChild(top);
+            card.appendChild(selectorEl);
+            card.appendChild(rawEl);
+            card.appendChild(previewEl);
+            card.addEventListener('mouseenter', () => selectorFlashElement(candidate.element));
+            selectorResults.appendChild(card);
+            selectorPrimeCandidatePreview(spec, candidate, previewEl);
+        }
+    }
+
+    function renderSelectorResults(spec, candidates, emptyMessage = '') {
+        selectorSetTrialState(spec, candidates, emptyMessage);
+        if (!candidates.length) {
+            selectorDebug('results_empty', {
+                var_id: spec && spec.var_id,
+                label: spec && spec.label,
+            });
+        } else {
+            selectorDebug('results_rendered', {
+                var_id: spec && spec.var_id,
+                label: spec && spec.label,
+                count: candidates.length,
+            });
+        }
+        renderSelectorView(spec);
+        selectorFlashResultsPane();
+    }
+
+    function runSelectorTrials(spec) {
+        if (!spec) {
+            selectorRenderEmpty('Select a variable on the left to test selector logic.');
+            return;
+        }
+
+        if (selectorPickVarId) {
+            selectorStopPickMode('find_clicked');
+        }
+        selectorSetPanelMinimized(false);
+
+        selectorDebug('find_clicked', {
+            var_id: spec.var_id,
+            label: spec.label,
+            details: `${spec.group}.${spec.key}`,
+        });
+
+        selectorActiveVarId = spec.var_id || '';
+        renderSelectorVariableList();
+        renderSelectorResults(spec, [], `Trying selector logic for ${spec.label || spec.var_id || 'variable'}...`);
+
+        const results = [];
+        const seen = new Set();
+        const textElements = selectorCollectTextElements();
+        selectorDebug('text_elements_collected', {
+            var_id: spec.var_id,
+            label: spec.label,
+            count: textElements.length,
+        });
+        const indexMap = new Map();
+        textElements.forEach((el, idx) => indexMap.set(el, idx));
+
+        const configuredSelectors = Array.isArray(spec.configured_selectors) ? spec.configured_selectors : [];
+        selectorDebug('configured_selectors', {
+            var_id: spec.var_id,
+            label: spec.label,
+            count: configuredSelectors.length,
+            details: configuredSelectors.join(' || '),
+        });
+        for (const selector of configuredSelectors) {
+            let count = 0;
+            for (const el of selectorQuerySafe(selector)) {
+                selectorAddCandidate(results, seen, 'Configured selector', el, selector);
+                count += 1;
+                if (count >= 3) break;
+            }
+            selectorDebug('configured_selector_query', {
+                var_id: spec.var_id,
+                label: spec.label,
+                selector,
+                count,
+            });
+        }
+
+        const anchorMatches = selectorFindAnchorMatches(spec, textElements).slice(0, 6);
+        selectorDebug('anchor_matches', {
+            var_id: spec.var_id,
+            label: spec.label,
+            count: anchorMatches.length,
+            details: anchorMatches.map((m) => m.anchor).join(' | '),
+        });
+        for (const match of anchorMatches) {
+            for (const el of selectorNextMeaningfulElements(match.element, textElements, indexMap, 3)) {
+                selectorAddCandidate(results, seen, `After anchor: ${match.anchor}`, el);
+            }
+        }
+
+        for (const match of anchorMatches.slice(0, 4)) {
+            for (const el of selectorAnchorSectionElements(match.element, textElements, indexMap, 3)) {
+                selectorAddCandidate(results, seen, `Anchor section: ${match.anchor}`, el);
+            }
+        }
+
+        selectorRunAttributeKeywordTrials(spec, results, seen);
+        selectorRunKeywordTextTrials(spec, textElements, results, seen);
+        selectorDebug('trial_complete', {
+            var_id: spec.var_id,
+            label: spec.label,
+            count: results.length,
+        });
+        renderSelectorResults(spec, results, 'No selector matches found. Scroll the EMR page to the relevant field and try again.');
+    }
+
+    function renderSelectorVariableList() {
+        selectorVarList.innerHTML = '';
+        if (!selectorSpecs.length) {
+            const empty = document.createElement('div');
+            empty.className = 'emr-selector-empty';
+            empty.textContent = 'No selector specs for this visit type.';
+            selectorVarList.appendChild(empty);
+            return;
+        }
+
+        for (const spec of selectorSpecs) {
+            const item = document.createElement('div');
+            item.className = 'emr-selector-var-item';
+
+            const label = document.createElement('div');
+            label.className = 'emr-selector-var-label';
+
+            const labelText = document.createElement('span');
+            labelText.textContent = spec.label || spec.var_id || spec.key || 'Variable';
+
+            const pill = document.createElement('span');
+            pill.className = 'emr-selector-pill';
+            pill.textContent = spec.is_custom ? 'custom' : 'built-in';
+
+            label.appendChild(labelText);
+            label.appendChild(pill);
+
+            const meta = document.createElement('div');
+            meta.className = 'emr-selector-var-meta';
+            const configuredCount = Array.isArray(spec.configured_selectors) ? spec.configured_selectors.length : 0;
+            const rankedCount = selectorGetRankedSelectors(spec).length;
+            meta.textContent =
+                `${spec.group}.${spec.key}` +
+                (rankedCount ? ` | ranked: ${rankedCount}` : '') +
+                (configuredCount ? ` | configured: ${configuredCount}` : '');
+
+            const btnRow = document.createElement('div');
+            btnRow.className = 'emr-selector-btn-row';
+
+            const findBtn = document.createElement('button');
+            findBtn.className = 'emr-selector-find-btn';
+            if (spec.var_id && spec.var_id === selectorActiveVarId) {
+                findBtn.classList.add('emr-selector-active');
+            }
+            findBtn.textContent = 'Find selector';
+            findBtn.addEventListener('click', () => {
+                selectorDebug('find_button_pressed', {
+                    var_id: spec.var_id,
+                    label: spec.label,
+                    details: `${spec.group}.${spec.key}`,
+                });
+                openSelectorPanel();
+                runSelectorTrials(spec);
+            });
+
+            const pickBtn = document.createElement('button');
+            pickBtn.className = 'emr-selector-pick-btn';
+            if (spec.var_id && spec.var_id === selectorPickVarId) {
+                pickBtn.classList.add('emr-selector-active');
+            }
+            pickBtn.textContent = spec.var_id === selectorPickVarId ? 'Pickingâ€¦' : 'Pick from page';
+            pickBtn.addEventListener('click', () => {
+                openSelectorPanel();
+                if (spec.var_id === selectorPickVarId) {
+                    selectorStopPickMode('button_toggle');
+                } else {
+                    selectorStartPickMode(spec);
+                }
+            });
+
+            item.appendChild(label);
+            item.appendChild(meta);
+            btnRow.appendChild(findBtn);
+            btnRow.appendChild(pickBtn);
+            item.appendChild(btnRow);
+            selectorVarList.appendChild(item);
+        }
+    }
+
+    function openSelectorPanel() {
+        const preferredView = arguments.length ? arguments[0] : selectorActiveView;
+        selectorPanel.classList.add('emr-selector-open');
+        if (miniBar.classList.contains('emr-mini-visible')) {
+            overlay.style.pointerEvents = '';
+        }
+        selectorSetActiveView(preferredView);
+        if (selectorActiveView === 'templates') {
+            selectorRenderTemplateList();
+            selectorSelectTemplate(selectorPendingTemplateName || selectorActiveTemplateName || '');
+            return;
+        }
+        if (!selectorSpecs.length) {
+            selectorRenderEmpty('No selector specs for this visit type.');
+            return;
+        }
+        const activeSpec = selectorGetSpecByVarId(selectorActiveVarId) || selectorSpecs[0];
+        if (activeSpec) {
+            runSelectorTrials(activeSpec);
+        }
+    }
+
+    function closeSelectorPanel() {
+        selectorStopPickMode('panel_closed');
+        selectorPanel.classList.remove('emr-selector-open');
+        if (selectorPanelExpanded) {
+            selectorSetExpanded(false);
+        }
+        if (miniBar.classList.contains('emr-mini-visible')) {
+            overlay.style.pointerEvents = 'none';
+        }
+    }
+
+    function toggleSelectorPanel() {
+        const preferredView = arguments.length ? arguments[0] : selectorActiveView;
+        if (selectorPanel.classList.contains('emr-selector-open')) {
+            closeSelectorPanel();
+        } else {
+            openSelectorPanel(preferredView);
+        }
+    }
+
+    if (selectorToggleBtn) {
+        selectorToggleBtn.addEventListener('click', () => toggleSelectorPanel('variables'));
+    }
+    if (selectorVariablesTabBtn) {
+        selectorVariablesTabBtn.addEventListener('click', () => {
+            openSelectorPanel('variables');
+        });
+    }
+    if (selectorTemplatesTabBtn) {
+        selectorTemplatesTabBtn.addEventListener('click', () => {
+            openSelectorPanel('templates');
+        });
+    }
+    if (selectorNewVarBtn) {
+        selectorNewVarBtn.addEventListener('click', () => {
+            openSelectorPanel('variables');
+            selectorCreateCustomVariable();
+        });
+    }
+    if (selectorTemplateNewBtn) {
+        selectorTemplateNewBtn.addEventListener('click', () => {
+            openSelectorPanel('templates');
+            selectorResetTemplateEditor();
+            selectorTemplateNameInput.focus();
+        });
+    }
+    if (selectorTemplateSaveBtn) {
+        selectorTemplateSaveBtn.addEventListener('click', () => {
+            const nextName = String(selectorTemplateNameInput.value || '').trim();
+            if (!nextName) {
+                window.__emrSetStatus('Template name is required');
+                return;
+            }
+            const previousName = selectorActiveTemplateName;
+            const previousRecord = previousName
+                ? Object.assign({}, selectorGetTemplateRecordByName(previousName) || {})
+                : null;
+            selectorPendingTemplateName = nextName;
+            selectorUpsertLocalTemplateRecord(nextName, selectorTemplateBodyInput.value || '');
+            if (previousName && previousName !== nextName) {
+                selectorRemoveLocalTemplateRecord(previousName);
+            }
+            selectorSelectTemplate(nextName);
+            window.__emrSetStatus(`Saving template ${nextName}...`);
+            selectorCallWorkbench({
+                action: 'save_template',
+                visit_type: selectorWorkbenchState.visit_type,
+                template_name: nextName,
+                previous_name: previousName,
+                body: selectorTemplateBodyInput.value || '',
+            }).catch((err) => {
+                console.error('template save error:', err);
+                if (previousRecord && previousRecord.name) {
+                    selectorUpsertLocalTemplateRecord(previousRecord.name, previousRecord.body || '');
+                    selectorSelectTemplate(previousRecord.name);
+                } else {
+                    selectorRemoveLocalTemplateRecord(nextName);
+                    selectorResetTemplateEditor();
+                }
+                window.__emrSetStatus('Template save error');
+            });
+        });
+    }
+    if (selectorTemplateDeleteBtn) {
+        selectorTemplateDeleteBtn.addEventListener('click', () => {
+            if (!selectorActiveTemplateName) return;
+            if (!window.confirm(`Delete template "${selectorActiveTemplateName}"?`)) {
+                return;
+            }
+            const deletedName = selectorActiveTemplateName;
+            selectorRemoveLocalTemplateRecord(deletedName);
+            selectorResetTemplateEditor();
+            selectorCallWorkbench({
+                action: 'delete_template',
+                visit_type: selectorWorkbenchState.visit_type,
+                template_name: deletedName,
+            }).catch((err) => {
+                console.error('template delete error:', err);
+                window.__emrSetStatus('Template delete error');
+            });
+        });
+    }
+    if (selectorMinBtn) {
+        selectorMinBtn.addEventListener('click', () => {
+            if (!selectorPanel.classList.contains('emr-selector-open')) {
+                openSelectorPanel(selectorActiveView);
+                return;
+            }
+            selectorSetPanelMinimized(!selectorPanelMinimized);
+            if (!selectorPanelExpanded) {
+                selectorPersistWindowState();
+            }
+        });
+    }
+    if (selectorExpandBtn) {
+        selectorExpandBtn.addEventListener('click', () => {
+            if (!selectorPanel.classList.contains('emr-selector-open')) {
+                openSelectorPanel(selectorActiveView);
+            }
+            selectorSetExpanded(!selectorPanelExpanded);
+        });
+    }
+    if (selectorCloseBtn) {
+        selectorCloseBtn.addEventListener('click', closeSelectorPanel);
+    }
+    if (selectorPanel) {
+        selectorPanel.addEventListener('wheel', (e) => {
+            e.stopPropagation();
+        }, { passive: true });
+    }
+    if (selectorWindowHeader) {
+        selectorWindowHeader.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) return;
+            if (selectorPanelExpanded) return;
+            if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea')) {
+                return;
+            }
+            selectorDragState = {
+                startX: event.clientX,
+                startY: event.clientY,
+                frame: selectorGetCurrentFrame(),
+            };
+            event.preventDefault();
+        });
+    }
+    if (selectorResizeHandle) {
+        selectorResizeHandle.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) return;
+            if (selectorPanelExpanded) return;
+            selectorResizeState = {
+                startX: event.clientX,
+                startY: event.clientY,
+                frame: selectorGetCurrentFrame(),
+            };
+            event.preventDefault();
+            event.stopPropagation();
+        });
+    }
+    document.addEventListener('mousemove', (event) => {
+        if (selectorDragState) {
+            selectorApplyFrame({
+                left: selectorDragState.frame.left + (event.clientX - selectorDragState.startX),
+                top: selectorDragState.frame.top + (event.clientY - selectorDragState.startY),
+                width: selectorDragState.frame.width,
+                height: selectorDragState.frame.height,
+                minimized: selectorPanelMinimized,
+            });
+        }
+        if (selectorResizeState) {
+            selectorApplyFrame({
+                left: selectorResizeState.frame.left,
+                top: selectorResizeState.frame.top,
+                width: selectorResizeState.frame.width + (event.clientX - selectorResizeState.startX),
+                height: selectorResizeState.frame.height + (event.clientY - selectorResizeState.startY),
+                minimized: false,
+            });
+        }
+    });
+    document.addEventListener('mouseup', () => {
+        if (selectorDragState || selectorResizeState) {
+            selectorDragState = null;
+            selectorResizeState = null;
+            if (!selectorPanelExpanded) {
+                selectorPersistWindowState();
+            }
+        }
+    });
+    window.addEventListener('resize', () => {
+        if (selectorPanelExpanded) {
+            selectorApplyFrame({
+                left: 8,
+                top: 8,
+                width: Math.max(720, window.innerWidth - 16),
+                height: Math.max(420, window.innerHeight - 16),
+                minimized: false,
+            });
+            return;
+        }
+        selectorApplyFrame(selectorGetCurrentFrame());
+    });
+
+    window.__emrUpdateSelectorSpecs = function(specsJSON) {
+        try {
+            selectorSpecs = Array.isArray(specsJSON)
+                ? specsJSON
+                : (typeof specsJSON === 'string' ? JSON.parse(specsJSON) : []);
+        } catch (e) {
+            console.error('emr overlay updateSelectorSpecs error:', e);
+            selectorSpecs = [];
+        }
+        selectorPreviewCache = {};
+        selectorPreviewInflight = {};
+
+        selectorDebug('specs_updated', {
+            count: selectorSpecs.length,
+            details: selectorSpecs.map((spec) => spec.var_id || spec.key || '').join(', '),
+        });
+
+        if (selectorPendingSelectVarId) {
+            const pendingSpec = selectorSpecs.find((spec) => spec.var_id === selectorPendingSelectVarId);
+            if (pendingSpec) {
+                selectorActiveVarId = selectorPendingSelectVarId;
+                selectorPendingSelectVarId = '';
+            }
+        }
+
+        if (!selectorSpecs.some((spec) => spec.var_id === selectorActiveVarId)) {
+            selectorActiveVarId = '';
+        }
+        if (!selectorSpecs.some((spec) => spec.var_id === selectorPickVarId)) {
+            selectorStopPickMode('specs_changed');
+        }
+        if (!selectorSpecs.some((spec) => spec.var_id === adHocPickVarId)) {
+            adHocResetState();
+        }
+
+        if (ctxBackdrop.classList.contains('emr-ctx-open') && ctxMenuMode === 'grab') {
+            renderAdHocGrabView();
+        }
+
+        renderSelectorVariableList();
+        if (!selectorSpecs.length) {
+            selectorResultsTitle.textContent = 'Selector Trials';
+            selectorRenderEmpty('No selector specs configured for this visit type.');
+            return;
+        }
+
+        if (selectorActiveVarId) {
+            const activeSpec = selectorSpecs.find((spec) => spec.var_id === selectorActiveVarId);
+            if (activeSpec) {
+                runSelectorTrials(activeSpec);
+                return;
+            }
+        }
+
+        selectorResultsTitle.textContent = 'Selector Trials';
+        selectorRenderEmpty('Select a variable on the left to try selector logic.');
+    };
+
+    window.__emrUpdateSelectorWorkbench = function(workbenchJSON) {
+        let nextState = {};
+        try {
+            nextState = typeof workbenchJSON === 'string' ? JSON.parse(workbenchJSON) : (workbenchJSON || {});
+        } catch (e) {
+            console.error('emr overlay updateSelectorWorkbench error:', e);
+            nextState = {};
+        }
+
+        const priorVisitType = selectorWorkbenchState.visit_type || '';
+        selectorWorkbenchState = Object.assign({
+            visit_type: priorVisitType,
+            window_state: selectorGetDefaultFrame(),
+            template_records: [],
+            template_config_file: '',
+            template_file: '',
+        }, nextState || {});
+
+        const visitChanged = selectorWorkbenchState.visit_type !== priorVisitType;
+        if (visitChanged && selectorWorkbenchState.window_state) {
+            selectorPanelExpanded = false;
+            selectorApplyFrame(selectorWorkbenchState.window_state);
+            if (selectorExpandBtn) {
+                selectorExpandBtn.textContent = 'â–¢';
+                selectorExpandBtn.title = 'Expand workbench';
+            }
+        }
+
+        selectorTemplatePathHint.textContent = selectorWorkbenchState.template_file
+            ? `Editing ${selectorWorkbenchState.template_file} (${selectorWorkbenchState.template_config_file || 'template config'})`
+            : 'Current visit type template file';
+        selectorTemplateHelp.textContent = selectorWorkbenchState.template_file
+            ? 'Edits are written directly to the current visit type JSON/text template files.'
+            : 'This visit type does not have a template file configured yet.';
+        selectorTemplateSaveBtn.disabled = !selectorWorkbenchState.template_file;
+        selectorTemplateNewBtn.disabled = !selectorWorkbenchState.template_file;
+        if (!selectorWorkbenchState.template_file) {
+            selectorTemplateDeleteBtn.disabled = true;
+        }
+
+        selectorRenderTemplateList();
+        selectorSelectTemplate(selectorPendingTemplateName || selectorActiveTemplateName || '');
+        selectorPendingTemplateName = '';
+    };
+
+    window.__emrToggleSelectorPanel = function() {
+        toggleSelectorPanel();
+    };
+
+    // --- Public API (called from Python via page.evaluate) ---
+    window.__emrUpdateVariables = function(varsJSON) {
+        const panel = document.getElementById('emr-vars-panel');
+        const toggle = document.getElementById('emr-vars-toggle-btn');
+        if (!panel) return;
+        try {
+            const vars = typeof varsJSON === 'string' ? JSON.parse(varsJSON) : varsJSON;
+            // Cache for context menu display
+            lastVarsData = vars;
+            panel.innerHTML = '';
+            let hasContent = false;
+            for (const [k, v] of Object.entries(vars)) {
+                if (v === '' || v === null || v === undefined) continue;
+                hasContent = true;
+                const item = document.createElement('div');
+                item.className = 'emr-var-item';
+                const safeName = k.replace(/</g, '&lt;');
+                const safeVal = String(v).replace(/</g, '&lt;');
+                item.innerHTML = '<span class="emr-var-name">' + safeName + ':</span> <span class="emr-var-value">' + safeVal + '</span>';
+                panel.appendChild(item);
+            }
+            // Auto-show when there are variables, auto-hide when empty
+            if (hasContent) {
+                panel.classList.add('emr-vars-open');
+                if (toggle) toggle.textContent = '\u25B2 Vars';
+            } else {
+                panel.classList.remove('emr-vars-open');
+                if (toggle) toggle.textContent = '\u25BC Vars';
+            }
+            if (ctxBackdrop.classList.contains('emr-ctx-open')) {
+                if (ctxMenuMode === 'grab') {
+                    renderAdHocGrabView();
+                } else {
+                    renderTemplateMenuView();
+                }
+            }
+        } catch(e) { console.error('emr overlay updateVariables error:', e); }
+    };
+
+    window.__emrUpdateVisitType = function(visitType, templatesJSON, quickTemplatesJSON) {
+        const label = document.getElementById('emr-visit-label');
+        if (label) label.textContent = 'Visit: ' + (visitType || '-');
+        const normalizedVisit = String(visitType || '').trim().toLowerCase();
+        setDashboardPayrollVisibility(normalizedVisit === 'emr dashboard');
+
+        if (selectorVisitLabel) selectorVisitLabel.textContent = 'Visit: ' + (visitType || '-');
+        const sel = document.getElementById('emr-template-select');
+        try {
+            const quickTemplates = typeof quickTemplatesJSON === 'string' ? JSON.parse(quickTemplatesJSON) : (quickTemplatesJSON || []);
+            lastQuickTemplateActions = Array.isArray(quickTemplates) ? quickTemplates : [];
+        } catch (e) {
+            console.error('emr overlay updateVisitType quick templates error:', e);
+            lastQuickTemplateActions = [];
+        }
+        if (!sel) return;
+        sel.innerHTML = '';
+        try {
+            const templates = typeof templatesJSON === 'string' ? JSON.parse(templatesJSON) : templatesJSON;
+            if (!templates || templates.length === 0) {
+                const opt = document.createElement('option');
+                opt.value = '';
+                opt.textContent = '- no templates -';
+                sel.appendChild(opt);
+                if (ctxBackdrop.classList.contains('emr-ctx-open')) {
+                    renderTemplateMenuView();
+                    if (ctxMenuMode === 'grab') {
+                        renderAdHocGrabView();
+                    } else {
+                        ctxSetMode('templates');
+                    }
+                }
+                return;
+            }
+            for (const t of templates) {
+                const opt = document.createElement('option');
+                opt.value = t;
+                opt.textContent = t;
+                sel.appendChild(opt);
+            }
+            if (ctxBackdrop.classList.contains('emr-ctx-open')) {
+                renderTemplateMenuView();
+                if (ctxMenuMode === 'grab') {
+                    renderAdHocGrabView();
+                } else {
+                    ctxSetMode('templates');
+                }
+            }
+        } catch(e) { console.error('emr overlay updateVisitType error:', e); }
+    };
+
+    window.__emrSetStatus = function(msg) {
+        const el = document.getElementById('emr-status-msg');
+        if (el) el.textContent = msg || '';
+    };
+
+    window.__emrSetDarkMode = function(enabled) {
+        const isEnabled = !!enabled;
+        if (darkModeBtn) {
+            darkModeBtn.classList.toggle('emr-btn-active', isEnabled);
+            darkModeBtn.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+            darkModeBtn.title = isEnabled
+                ? 'Disable page dark mode'
+                : 'Enable page dark mode while JS overlay is active';
+        }
+    };
+
+    window.__emrSetAutoclickerState = function(enabled) {
+        const buttons = [
+            document.getElementById('emr-autoclicker-btn'),
+            document.getElementById('emr-mini-autoclicker-btn'),
+        ].filter(Boolean);
+        if (!buttons.length) return;
+        const isEnabled = !!enabled;
+        const title = isEnabled
+            ? 'Stop dashboard auto clicker'
+            : 'Start dashboard auto clicker';
+        buttons.forEach((btn) => {
+            btn.classList.toggle('emr-btn-active', isEnabled);
+            btn.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+            btn.title = title;
+        });
+    };
+
+    window.__emrSetInvisitAutoclickerState = function(enabled) {
+        const buttons = [
+            document.getElementById('emr-invisit-btn'),
+            document.getElementById('emr-mini-invisit-btn'),
+        ].filter(Boolean);
+        if (!buttons.length) return;
+        const isEnabled = !!enabled;
+        const title = isEnabled
+            ? 'Stop in-visit auto clicker'
+            : 'Start in-visit auto clicker';
+        buttons.forEach((button) => {
+            button.classList.toggle('emr-btn-active', isEnabled);
+            button.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+            button.title = title;
+        });
+    };
+
+    window.__emrSetKeepAwakeState = function(enabled) {
+        const buttons = [
+            document.getElementById('emr-keepawake-btn'),
+            document.getElementById('emr-mini-keepawake-btn'),
+        ].filter(Boolean);
+        if (!buttons.length) return;
+        const isEnabled = !!enabled;
+        const title = isEnabled
+            ? 'Stop Keep Awake clicks'
+            : 'Start Keep Awake clicks';
+        buttons.forEach((button) => {
+            button.classList.toggle('emr-btn-active', isEnabled);
+            button.setAttribute('aria-pressed', isEnabled ? 'true' : 'false');
+            button.title = title;
+        });
+    };
+
+    function overlayToggleAutoclicker() {
+        if (typeof window.__emr_toggle_autoclicker !== 'function') {
+            window.__emrSetStatus('Autoclicker unavailable');
+            return;
+        }
+        Promise.resolve(window.__emr_toggle_autoclicker())
+            .catch((e) => {
+                console.error('overlay autoclicker error:', e);
+                window.__emrSetStatus('Autoclicker error');
+            });
+    }
+
+    function overlayToggleInvisitAutoclicker() {
+        if (typeof window.__emr_toggle_invisit_autoclicker !== 'function') {
+            window.__emrSetStatus('In-visit unavailable');
+            return;
+        }
+        Promise.resolve(window.__emr_toggle_invisit_autoclicker())
+            .catch((e) => {
+                console.error('overlay in-visit autoclicker error:', e);
+                window.__emrSetStatus('In-visit error');
+            });
+    }
+
+    function overlayToggleKeepAwake() {
+        if (typeof window.__emr_toggle_keep_awake !== 'function') {
+            window.__emrSetStatus('Keep Awake unavailable');
+            return;
+        }
+        Promise.resolve(window.__emr_toggle_keep_awake())
+            .catch((e) => {
+                console.error('overlay keep-awake error:', e);
+                window.__emrSetStatus('Keep Awake error');
+            });
+    }
+
+    function overlayRunDashboardPayroll(forceRefresh = false) {
+        if (!forceRefresh && dashboardPayrollPanel && !dashboardPayrollPanel.hidden) {
+            dashboardPayrollPanel.hidden = true;
+            dashboardPayrollPanel.classList.remove('emr-dashboard-payroll-open');
+            window.__emrSetStatus('');
+            return;
+        }
+        if (typeof window.__emr_run_dashboard_payroll !== 'function') {
+            window.__emrSetStatus('Payroll unavailable');
+            return;
+        }
+        window.__emrSetStatus(forceRefresh ? 'Regrabbing payroll snapshot...' : 'Calculating payroll...');
+        Promise.resolve(window.__emr_run_dashboard_payroll())
+            .catch((e) => {
+                console.error('overlay dashboard payroll error:', e);
+                window.__emrSetStatus('Payroll error');
+            });
+    }
+
+    function overlaySaveDashboardPayroll() {
+        if (!lastDashboardPayroll) {
+            window.__emrSetStatus('Nothing to save yet');
+            return;
+        }
+        if (typeof window.__emr_save_dashboard_payroll !== 'function') {
+            window.__emrSetStatus('Save unavailable');
+            return;
+        }
+        window.__emrSetStatus('Saving pay info...');
+        Promise.resolve(window.__emr_save_dashboard_payroll())
+            .catch((e) => {
+                console.error('overlay dashboard payroll save error:', e);
+                window.__emrSetStatus('Save error');
+            });
+    }
+
+    function overlayInvokeGrab() {
+        if (typeof window.__emr_grab !== 'function') {
+            console.error('overlay grab bridge unavailable');
+            window.__emrSetStatus('Grab unavailable');
+            return;
+        }
+        window.__emrSetStatus('Grabbing...');
+        Promise.resolve(window.__emr_grab())
+            .then(() => window.__emrSetStatus(''))
+            .catch((e) => {
+                console.error('overlay grab error:', e);
+                window.__emrSetStatus('Grab error');
+            });
+    }
+
+    function overlayInvokeVisitDetect() {
+        if (typeof window.__emr_detect_visit !== 'function') {
+            console.error('overlay detect bridge unavailable');
+            window.__emrSetStatus('Detect unavailable');
+            return;
+        }
+        window.__emrSetStatus('Detecting...');
+        Promise.resolve(window.__emr_detect_visit())
+            .then(() => window.__emrSetStatus(''))
+            .catch((e) => {
+                console.error('overlay detect error:', e);
+                window.__emrSetStatus('Detect error');
+            });
+    }
+
+    function overlayInvokeTemplateInsert(name, source = 'overlay') {
+        const nextName = String(name || '').trim();
+        const nextSource = String(source || 'overlay').trim() || 'overlay';
+        if (!nextName) {
+            window.__emrSetStatus('Select a template first');
+            return;
+        }
+        if (typeof window.__emr_insert_template !== 'function') {
+            console.error('overlay template bridge unavailable');
+            window.__emrSetStatus('Insert unavailable');
+            return;
+        }
+        window.__emrSetStatus('Inserting...');
+        Promise.resolve(window.__emr_insert_template(nextName, nextSource))
+            .then(() => window.__emrSetStatus(''))
+            .catch((e) => {
+                console.error('overlay insert error:', e);
+                window.__emrSetStatus('Insert error');
+            });
+    }
+
+    window.__emrOverlayActive = true;
+
+    // --- Button handlers (call exposed Python functions) ---
+    const overlayGrabBtn = document.getElementById('emr-grab-btn');
+    if (overlayGrabBtn) {
+        overlayGrabBtn.addEventListener('click', overlayInvokeGrab);
+    }
+
+    const overlayDetectBtn = document.getElementById('emr-detect-btn');
+    if (overlayDetectBtn) {
+        overlayDetectBtn.addEventListener('click', overlayInvokeVisitDetect);
+    }
+
+    const overlayInsertBtn = document.getElementById('emr-insert-btn');
+    if (overlayInsertBtn) {
+        overlayInsertBtn.addEventListener('click', () => {
+            const sel = document.getElementById('emr-template-select');
+            overlayInvokeTemplateInsert(sel ? sel.value : '');
+        });
+    }
+
+    const overlayPythonBtn = document.getElementById('emr-python-btn');
+    if (overlayPythonBtn) {
+        overlayPythonBtn.addEventListener('click', () => {
+            if (typeof window.__emr_switch_to_python === 'function') {
+                window.__emr_switch_to_python();
+            }
+        });
+    }
+
+    const overlayAdHocGrabBtn = document.getElementById('emr-ad-hoc-grab-btn');
+    if (overlayAdHocGrabBtn) {
+        overlayAdHocGrabBtn.addEventListener('click', () => {
+            openTemplateMenu(lastMouseX, lastMouseY, 'grab');
+        });
+    }
+
+    const overlayAutoclickerBtn = document.getElementById('emr-autoclicker-btn');
+    if (overlayAutoclickerBtn) {
+        overlayAutoclickerBtn.addEventListener('click', overlayToggleAutoclicker);
+    }
+
+    const overlayKeepAwakeBtn = document.getElementById('emr-keepawake-btn');
+    if (overlayKeepAwakeBtn) {
+        overlayKeepAwakeBtn.addEventListener('click', overlayToggleKeepAwake);
+    }
+
+    if (dashboardPayrollBtn) {
+        dashboardPayrollBtn.addEventListener('click', overlayRunDashboardPayroll);
+    }
+
+    const overlayInvisitBtn = document.getElementById('emr-invisit-btn');
+    if (overlayInvisitBtn) {
+        overlayInvisitBtn.addEventListener('click', overlayToggleInvisitAutoclicker);
+    }
+
+    if (miniInvisitBtn) {
+        miniInvisitBtn.addEventListener('click', overlayToggleInvisitAutoclicker);
+    }
+
+    if (miniKeepAwakeBtn) {
+        miniKeepAwakeBtn.addEventListener('click', overlayToggleKeepAwake);
+    }
+
+    if (miniAutoclickerBtn) {
+        miniAutoclickerBtn.addEventListener('click', overlayToggleAutoclicker);
+    }
+
+    const overlayCloseBtn = document.getElementById('emr-close-btn');
+    if (overlayCloseBtn) {
+        overlayCloseBtn.addEventListener('click', () => {
+            if (typeof window.__emr_close === 'function') {
+                window.__emr_close();
+            }
+        });
+    }
+
+    // --- Template context menu (Ctrl+Shift+D) ---
+    const ctxBackdrop = document.getElementById('emr-ctx-backdrop');
+    const ctxMenu = document.getElementById('emr-ctx-menu');
+    const ctxHeader = document.getElementById('emr-ctx-header');
+    const ctxList = document.getElementById('emr-ctx-list');
+    const ctxTitle = document.getElementById('emr-ctx-title');
+    const ctxSubtitle = document.getElementById('emr-ctx-subtitle');
+    const ctxCloseBtn = document.getElementById('emr-ctx-close-btn');
+    const ctxTemplateTab = document.getElementById('emr-ctx-tab-templates');
+    const ctxGrabTab = document.getElementById('emr-ctx-tab-grab');
+    const ctxTemplateView = document.getElementById('emr-ctx-template-view');
+    const ctxGrabView = document.getElementById('emr-ctx-grab-view');
+    const ctxVarsContainer = document.getElementById('emr-ctx-vars-container');
+    const ctxQuickActions = document.getElementById('emr-ctx-quick-actions');
+    const ctxGrabList = document.getElementById('emr-ctx-grab-list');
+    const ctxGrabPreview = document.getElementById('emr-ctx-grab-preview');
+
+    function ctxClampPosition(left, top) {
+        const menuW = ctxMenu.offsetWidth || 320;
+        const menuH = ctxMenu.offsetHeight || 420;
+        return {
+            left: Math.max(8, Math.min(left, window.innerWidth - menuW - 8)),
+            top: Math.max(8, Math.min(top, window.innerHeight - menuH - 8)),
+        };
+    }
+
+    function ctxApplyPosition(left, top) {
+        const next = ctxClampPosition(left, top);
+        ctxMenuLastLeft = next.left;
+        ctxMenuLastTop = next.top;
+        ctxMenu.style.left = `${next.left}px`;
+        ctxMenu.style.top = `${next.top}px`;
+    }
+
+    function adHocCurrentValueForSpec(spec) {
+        if (!spec || !spec.var_id) return '';
+        const raw = lastVarsData && Object.prototype.hasOwnProperty.call(lastVarsData, spec.var_id)
+            ? lastVarsData[spec.var_id]
+            : '';
+        if (raw === '' || raw === null || raw === undefined) {
+            return 'Current value: â€”';
+        }
+        return `Current value: ${String(raw)}`;
+    }
+
+    function renderAdHocGrabView() {
+        if (!ctxGrabList || !ctxGrabPreview) return;
+        ctxGrabList.innerHTML = '';
+        const activeSpecs = selectorSpecs.filter((spec) => !!(spec && spec.var_id));
+        if (!activeSpecs.length) {
+            const empty = document.createElement('div');
+            empty.className = 'emr-ctx-empty';
+            empty.textContent = 'No selector variables are configured for this visit type.';
+            ctxGrabList.appendChild(empty);
+        } else {
+            for (const spec of activeSpecs) {
+                const item = document.createElement('div');
+                item.className = 'emr-ctx-grab-item';
+
+                const top = document.createElement('div');
+                top.className = 'emr-ctx-grab-item-top';
+
+                const label = document.createElement('div');
+                label.className = 'emr-ctx-grab-label';
+                label.textContent = spec.label || spec.var_id || spec.key || 'Variable';
+
+                const meta = document.createElement('div');
+                meta.className = 'emr-ctx-grab-meta';
+                meta.textContent = `${spec.group}.${spec.key}`;
+
+                const current = document.createElement('div');
+                current.className = 'emr-ctx-grab-current';
+                current.textContent = adHocCurrentValueForSpec(spec);
+
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'emr-ctx-grab-action';
+                if (adHocPickVarId === spec.var_id) {
+                    btn.classList.add('emr-ctx-grab-action-active');
+                    btn.textContent = adHocPreview && adHocPreview.varId === spec.var_id ? 'Preview ready' : 'Pickingâ€¦';
+                } else {
+                    btn.textContent = 'Pick from page';
+                }
+                btn.addEventListener('click', () => {
+                    adHocPreview = null;
+                    adHocPickVarId = spec.var_id || '';
+                    adHocClearSelectedHighlight();
+                    selectorClearHoverHighlight();
+                    renderAdHocGrabView();
+                    window.__emrSetStatus(`Ad hoc selector grab: click the ${spec.label || spec.var_id} field`);
+                });
+
+                top.appendChild(label);
+                item.appendChild(top);
+                item.appendChild(meta);
+                item.appendChild(current);
+                item.appendChild(btn);
+                ctxGrabList.appendChild(item);
+            }
+        }
+
+        ctxGrabPreview.innerHTML = '';
+        if (!adHocPreview) return;
+
+        const preview = document.createElement('div');
+        preview.className = 'emr-ctx-preview';
+
+        const title = document.createElement('div');
+        title.className = 'emr-ctx-preview-title';
+        title.textContent = `${adHocPreview.label} preview`;
+
+        const subtitle = document.createElement('div');
+        subtitle.className = 'emr-ctx-preview-subtitle';
+        subtitle.textContent = 'Captured selector ready. Use once to update only this value, or save it to the ranked selector list for future grabs.';
+
+        const value = document.createElement('div');
+        value.className = 'emr-ctx-preview-value';
+        value.textContent = adHocPreview.rawText || '(empty text)';
+
+        const previewSpec = adHocGetSpec();
+        const parserPreview = document.createElement('div');
+        parserPreview.className = 'emr-selector-preview';
+        parserPreview.textContent = 'Previewing parser output...';
+
+        const selectorText = document.createElement('div');
+        selectorText.className = 'emr-ctx-preview-selector';
+        selectorText.textContent = adHocPreview.selector || '';
+
+        const actions = document.createElement('div');
+        actions.className = 'emr-ctx-preview-actions';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'emr-ctx-preview-btn';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => {
+            adHocResetState();
+            renderAdHocGrabView();
+            window.__emrSetStatus('');
+        });
+
+        const reselectBtn = document.createElement('button');
+        reselectBtn.type = 'button';
+        reselectBtn.className = 'emr-ctx-preview-btn';
+        reselectBtn.textContent = 'Cancel and Reselect';
+        reselectBtn.addEventListener('click', () => {
+            const priorVarId = adHocPreview.varId;
+            adHocResetState();
+            adHocPickVarId = priorVarId;
+            renderAdHocGrabView();
+            window.__emrSetStatus('Select a different field from the page');
+        });
+
+        const buildAcceptHandler = (persistSelector, buttonLabel) => () => {
+            if (typeof window.__emr_accept_variable_grab !== 'function') {
+                window.__emrSetStatus('Ad hoc selector grab bridge unavailable');
+                return;
+            }
+            const payload = {
+                visit_type: selectorWorkbenchState.visit_type || '',
+                var_id: adHocPreview.varId,
+                selector: adHocPreview.selector,
+                raw_text: adHocPreview.rawText,
+                page_url: window.location.href,
+                persist_selector: !!persistSelector,
+            };
+            window.__emrSetStatus(`${buttonLabel} ${adHocPreview.label}...`);
+            Promise.resolve(window.__emr_accept_variable_grab(payload))
+                .then(() => {
+                    const acceptedLabel = adHocPreview.label;
+                    const wasSaved = !!persistSelector;
+                    adHocResetState();
+                    renderAdHocGrabView();
+                    window.__emrSetStatus(
+                        wasSaved
+                            ? `Accepted and saved ${acceptedLabel}`
+                            : `Accepted ${acceptedLabel}`
+                    );
+                })
+                .catch((err) => {
+                    console.error('ad hoc selector grab accept error:', err);
+                    window.__emrSetStatus('Accept failed');
+                });
+        };
+
+        const acceptBtn = document.createElement('button');
+        acceptBtn.type = 'button';
+        acceptBtn.className = 'emr-ctx-preview-btn';
+        acceptBtn.textContent = 'Use Once';
+        acceptBtn.addEventListener('click', buildAcceptHandler(false, 'Accepting'));
+
+        const acceptAndSaveBtn = document.createElement('button');
+        acceptAndSaveBtn.type = 'button';
+        acceptAndSaveBtn.className = 'emr-ctx-preview-btn emr-ctx-preview-accept';
+        acceptAndSaveBtn.textContent = 'Use + Save';
+        acceptAndSaveBtn.addEventListener('click', buildAcceptHandler(true, 'Saving'));
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(reselectBtn);
+        actions.appendChild(acceptBtn);
+        actions.appendChild(acceptAndSaveBtn);
+
+        preview.appendChild(title);
+        preview.appendChild(subtitle);
+        preview.appendChild(value);
+        preview.appendChild(parserPreview);
+        preview.appendChild(selectorText);
+        preview.appendChild(actions);
+        ctxGrabPreview.appendChild(preview);
+        if (previewSpec) {
+            selectorPrimeCandidatePreview(previewSpec, {
+                selector: adHocPreview.selector,
+                rawText: adHocPreview.rawText,
+            }, parserPreview);
+        }
+    }
+
+    function ctxSetMode(mode) {
+        ctxMenuMode = mode === 'grab' ? 'grab' : 'templates';
+        ctxTemplateTab.classList.toggle('emr-ctx-tab-active', ctxMenuMode === 'templates');
+        ctxGrabTab.classList.toggle('emr-ctx-tab-active', ctxMenuMode === 'grab');
+        ctxTemplateView.classList.toggle('emr-ctx-view-active', ctxMenuMode === 'templates');
+        ctxGrabView.classList.toggle('emr-ctx-view-active', ctxMenuMode === 'grab');
+        if (ctxMenuMode === 'grab') {
+            ctxTitle.textContent = 'Ad Hoc Selector Grab';
+            ctxSubtitle.textContent = adHocPickVarId
+                ? `Pick a field for ${((adHocGetSpec() || {}).label || adHocPickVarId)}`
+                : 'Choose a current-visit variable to fill from the page';
+            renderAdHocGrabView();
+            return;
+        }
+        ctxTitle.textContent = ctxTitle.dataset.visitTitle || 'Templates';
+        ctxSubtitle.textContent = 'Current visit actions';
+    }
+
+    function renderTemplateMenuView() {
+        const sel = document.getElementById('emr-template-select');
+        const label = document.getElementById('emr-visit-label');
+        ctxList.innerHTML = '';
+        ctxVarsContainer.innerHTML = '';
+        if (ctxQuickActions) ctxQuickActions.innerHTML = '';
+        ctxTitle.dataset.visitTitle = (label ? label.textContent : 'Templates');
+        if (ctxMenuMode === 'templates') {
+            ctxTitle.textContent = ctxTitle.dataset.visitTitle;
+            ctxSubtitle.textContent = 'Current visit actions';
+        }
+
+        // Render grabbed variables above templates when toggle is on
+        if (showVarsInMenu && lastVarsData) {
+            const entries = Object.entries(lastVarsData).filter(
+                ([, v]) => v !== '' && v !== null && v !== undefined
+            );
+            if (entries.length > 0) {
+                const section = document.createElement('div');
+                section.className = 'emr-ctx-vars-section';
+                const heading = document.createElement('div');
+                heading.className = 'emr-ctx-vars-heading';
+                heading.textContent = 'Grabbed Variables';
+                section.appendChild(heading);
+                for (const [k, v] of entries) {
+                    const row = document.createElement('div');
+                    row.className = 'emr-ctx-var-row';
+                    const nm = document.createElement('span');
+                    nm.className = 'emr-ctx-var-name';
+                    nm.textContent = k + ':';
+                    const vl = document.createElement('span');
+                    vl.className = 'emr-ctx-var-val';
+                    vl.textContent = String(v);
+                    row.appendChild(nm);
+                    row.appendChild(vl);
+                    section.appendChild(row);
+                }
+                ctxVarsContainer.appendChild(section);
+            }
+        }
+
+        if (ctxQuickActions && Array.isArray(lastQuickTemplateActions) && lastQuickTemplateActions.length > 0) {
+            const section = document.createElement('div');
+            section.className = 'emr-ctx-quick-section';
+            const heading = document.createElement('div');
+            heading.className = 'emr-ctx-quick-heading';
+            heading.textContent = 'Quick Templates';
+            section.appendChild(heading);
+            const grid = document.createElement('div');
+            grid.className = 'emr-ctx-quick-grid';
+            for (const templateName of lastQuickTemplateActions) {
+                const btn = document.createElement('button');
+                btn.className = 'emr-ctx-quick-btn';
+                btn.type = 'button';
+                btn.textContent = String(templateName || '').trim();
+                btn.dataset.templateName = String(templateName || '').trim();
+                btn.addEventListener('click', () => {
+                    closeTemplateMenu();
+                    overlayInvokeTemplateInsert(btn.dataset.templateName, 'overlay_ctx_menu');
+                });
+                grid.appendChild(btn);
+            }
+            section.appendChild(grid);
+            ctxQuickActions.appendChild(section);
+        }
+
+        const hasNormalTemplates = !!(sel && sel.options.length > 0 && !(sel.options.length === 1 && sel.options[0].value === ''));
+        const hasQuickTemplates = Array.isArray(lastQuickTemplateActions) && lastQuickTemplateActions.length > 0;
+
+        if (!hasNormalTemplates && !hasQuickTemplates) {
+            const empty = document.createElement('div');
+            empty.className = 'emr-ctx-empty';
+            empty.textContent = 'No templates available \u2014 detect visit type first';
+            ctxList.appendChild(empty);
+        } else if (hasNormalTemplates) {
+            for (let i = 0; i < sel.options.length; i++) {
+                const opt = sel.options[i];
+                if (!opt.value) continue;
+                const btn = document.createElement('button');
+                btn.className = 'emr-ctx-item';
+                btn.textContent = opt.textContent;
+                btn.dataset.templateName = opt.value;
+                btn.addEventListener('click', () => {
+                    closeTemplateMenu();
+                    overlayInvokeTemplateInsert(btn.dataset.templateName, 'overlay_ctx_menu');
+                });
+                ctxList.appendChild(btn);
+            }
+        }
+    }
+
+    function openTemplateMenu(x, y, mode = 'templates') {
+        overlay.style.pointerEvents = '';
+        renderTemplateMenuView();
+        ctxBackdrop.classList.add('emr-ctx-open');
+        ctxApplyPosition(x, y);
+        ctxSetMode(mode);
+    }
+
+    function closeTemplateMenu() {
+        ctxBackdrop.classList.remove('emr-ctx-open');
+        adHocResetState();
+        // If overlay is minimized and no other interactive pane is open, let clicks
+        // fall through to the page again.
+        if (
+            miniBar.classList.contains('emr-mini-visible') &&
+            !notepadBackdrop.classList.contains('emr-notepad-open') &&
+            !selectorPanel.classList.contains('emr-selector-open')
+        ) {
+            overlay.style.pointerEvents = 'none';
+        }
+        window.__emrSetStatus('');
+    }
+
+    // Toggle template context menu from Python (OS-level hotkey)
+    // Uses the JS-tracked mouse position (lastMouseX/Y) since
+    // converting OS screen coords is unreliable across DPI scales.
+    window.__emrToggleCtxMenu = function() {
+        try {
+            console.log('[EMR CTX] __emrToggleCtxMenu called, open=',
+                ctxBackdrop.classList.contains('emr-ctx-open'),
+                'mouse=', lastMouseX, lastMouseY);
+            if (ctxBackdrop.classList.contains('emr-ctx-open')) {
+                closeTemplateMenu();
+            } else {
+                // Temporarily restore pointer-events so backdrop/menu are clickable
+                if (miniBar.classList.contains('emr-mini-visible')) {
+                    overlay.style.pointerEvents = '';
+                }
+                openTemplateMenu(lastMouseX, lastMouseY, 'templates');
+            }
+        } catch(e) { console.error('emrToggleCtxMenu error:', e); }
+    };
+
+    if (ctxCloseBtn) {
+        ctxCloseBtn.addEventListener('click', closeTemplateMenu);
+    }
+
+    if (ctxTemplateTab) {
+        ctxTemplateTab.addEventListener('click', () => {
+            renderTemplateMenuView();
+            ctxSetMode('templates');
+        });
+    }
+
+    if (ctxGrabTab) {
+        ctxGrabTab.addEventListener('click', () => {
+            ctxSetMode('grab');
+        });
+    }
+
+    if (ctxHeader) {
+        ctxHeader.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) return;
+            if (event.target.closest('button')) return;
+            ctxMenuDragState = {
+                startX: event.clientX,
+                startY: event.clientY,
+                left: ctxMenuLastLeft,
+                top: ctxMenuLastTop,
+            };
+            event.preventDefault();
+        });
+    }
+
+    document.addEventListener('mousemove', (e) => {
+        if (ctxMenuDragState) {
+            ctxApplyPosition(
+                ctxMenuDragState.left + (e.clientX - ctxMenuDragState.startX),
+                ctxMenuDragState.top + (e.clientY - ctxMenuDragState.startY)
+            );
+        }
+        const pickVarId = selectorPickVarId || adHocPickVarId;
+        if (!pickVarId) return;
+        const target = e.target;
+        if (!selectorIsElementNode(target)) return;
+        if (target === overlay || overlay.contains(target)) {
+            selectorClearHoverHighlight();
+            return;
+        }
+        if (!selectorEligibleElement(target)) {
+            selectorClearHoverHighlight();
+            return;
+        }
+        if (adHocPickVarId) {
+            selectorClearHoverHighlight();
+            selectorHoverElement = target;
+            selectorHoverOutline = target.style.outline;
+            selectorHoverOutlineOffset = target.style.outlineOffset;
+            target.style.outline = '3px solid #28f5d0';
+            target.style.outlineOffset = '2px';
+            return;
+        }
+        selectorSetHoverHighlight(target);
+    }, true);
+
+    document.addEventListener('mouseup', () => {
+        ctxMenuDragState = null;
+    }, true);
+
+    document.addEventListener('click', (e) => {
+        const pickVarId = selectorPickVarId || adHocPickVarId;
+        if (!pickVarId) return;
+        const target = e.target;
+        if (!selectorIsElementNode(target)) return;
+        if (target === overlay || overlay.contains(target)) return;
+        if (!selectorEligibleElement(target)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        if (adHocPickVarId) {
+            const spec = adHocGetSpec();
+            if (!spec) return;
+            adHocPreview = {
+                varId: spec.var_id,
+                label: spec.label || spec.var_id || spec.key || 'Variable',
+                rawText: selectorRawText(target),
+                selector: selectorCssPath(target),
+            };
+            adHocSetSelectedHighlight(target);
+            selectorClearHoverHighlight();
+            renderAdHocGrabView();
+            window.__emrSetStatus(`Captured ${adHocPreview.label}`);
+            return;
+        }
+        const spec = selectorGetSpecByVarId(selectorPickVarId);
+        selectorCaptureManualPick(spec, target);
+    }, true);
+
+    // --- Keyboard shortcuts ---
+    document.addEventListener('keydown', (e) => {
+        const ctxMenuOpen = !!(ctxBackdrop && ctxBackdrop.classList.contains('emr-ctx-open'));
+        const selectorOpen = !!(selectorPanel && selectorPanel.classList.contains('emr-selector-open'));
+        // Escape â†’ close template context menu if open
+        if (e.key === 'Escape' && ctxMenuOpen) {
+            e.preventDefault();
+            if (adHocPickVarId || adHocPreview) {
+                adHocResetState();
+                renderAdHocGrabView();
+                return;
+            }
+            closeTemplateMenu();
+            return;
+        }
+        // Ctrl+Shift+D â†’ open/close template context menu at mouse position
+        if (e.key === 'Escape' && selectorPickVarId) {
+            e.preventDefault();
+            selectorStopPickMode('escape');
+            return;
+        }
+        if (e.key === 'Escape' && selectorOpen) {
+            e.preventDefault();
+            closeSelectorPanel();
+            return;
+        }
+        if (e.ctrlKey && e.shiftKey && (e.key === 'd' || e.key === 'D')) {
+            e.preventDefault();
+            if (ctxMenuOpen) {
+                closeTemplateMenu();
+            } else {
+                openTemplateMenu(lastMouseX, lastMouseY, 'templates');
+            }
+            return;
+        }
+        // F4 â†’ Grab
+        if (e.ctrlKey && e.altKey && (e.key === 'l' || e.key === 'L')) {
+            e.preventDefault();
+            toggleSelectorPanel();
+            return;
+        }
+        if (e.key === 'F4' || e.code === 'F4') {
+            e.preventDefault();
+            overlayInvokeGrab();
+            return;
+        }
+        // Ctrl+Alt+F â†’ Insert first template (follow-up)
+        if (e.ctrlKey && e.altKey && (e.key === 'f' || e.key === 'F')) {
+            e.preventDefault();
+            const sel = document.getElementById('emr-template-select');
+            if (sel && sel.options.length > 0) {
+                overlayInvokeTemplateInsert(sel.options[0].value);
+            }
+            return;
+        }
+        // Ctrl+Alt+N â†’ Insert second template (initial note)
+        if (e.ctrlKey && e.altKey && (e.key === 'n' || e.key === 'N')) {
+            e.preventDefault();
+            const sel = document.getElementById('emr-template-select');
+            if (sel && sel.options.length > 1) {
+                overlayInvokeTemplateInsert(sel.options[1].value);
+            }
+            return;
+        }
+        // Ctrl+Alt+C â†’ Insert third template
+        if (e.ctrlKey && e.altKey && (e.key === 'c' || e.key === 'C')) {
+            e.preventDefault();
+            const sel = document.getElementById('emr-template-select');
+            if (sel && sel.options.length > 2) {
+                overlayInvokeTemplateInsert(sel.options[2].value);
+            }
+            return;
+        }
+    });
+
     return 'overlay_injected';
 })();
 """
 
 OVERLAY_REMOVE_JS = """
 (() => {
-    const overlay = document.getElementById('emr-assist-overlay');
-    if (overlay) overlay.remove();
-    window.__emrOverlayActive = false;
-    return 'overlay_removed';
+    document.documentElement.classList.remove('emr-assist-dark-page');
+    const darkModeStyle = document.getElementById('emr-assist-dark-mode-style');
+    if (darkModeStyle) darkModeStyle.remove();
+    const el = document.getElementById('emr-assist-overlay');
+    if (el) {
+        el.remove();
+        window.__emrOverlayActive = false;
+        return 'overlay_removed';
+    }
+    return 'no_overlay';
 })();
 """
 
-
-# ================================================================
 # Template Dropdown Configuration System
 # ================================================================
 # Maps tab names to their JSON config file and template file
 import subprocess
 
 TEMPLATE_CONFIG = {
-    "T Deficiency": {
-        "config_file": "t_deficiency_templates.json",
-        "template_file": "templates_t_deficiency.txt",
-    },
     "Hair Loss": {
         "config_file": "hair_templates.json",
         "template_file": "templates_hair.txt",
@@ -1541,6 +5709,8 @@ TEMPLATE_CONFIG = {
     },
 }
 
+PLAYWRIGHT_CLICK_PATHS_FILENAME = "playwright_click_paths.json"
+
 
 def _get_script_dir() -> str:
     """Return directory where this script is located."""
@@ -1561,6 +5731,124 @@ def get_template_file_path(tab_name: str) -> str:
     return os.path.join(script_dir, "templates", template_filename)
 
 
+def get_playwright_click_paths_path() -> str:
+    """Return full path to the Playwright click-path settings file."""
+    return os.path.join(_get_script_dir(), PLAYWRIGHT_CLICK_PATHS_FILENAME)
+
+
+def load_playwright_click_paths_config() -> List[Dict[str, Any]]:
+    """Load selector-driven Playwright click paths from JSON settings."""
+    config_path = get_playwright_click_paths_path()
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print(f"Playwright click-path config not found: {config_path}")
+        return []
+    except json.JSONDecodeError as e:
+        print(f"Invalid JSON in {config_path}: {e}")
+        return []
+    except Exception as e:
+        print(f"Error loading Playwright click-path config {config_path}: {e}")
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    raw_paths = data.get("paths", [])
+    if not isinstance(raw_paths, list):
+        print(
+            f"Invalid Playwright click-path config shape in {config_path}: 'paths' must be a list"
+        )
+        return []
+
+    for index, raw_entry in enumerate(raw_paths, start=1):
+        if not isinstance(raw_entry, dict):
+            print(f"Skipping Playwright click path #{index}: entry must be an object")
+            continue
+
+        hotkey = str(raw_entry.get("hotkey") or "").strip().lower()
+        path_id = str(raw_entry.get("id") or f"path_{index}").strip()
+        description = str(raw_entry.get("description") or path_id).strip()
+        enabled = bool(raw_entry.get("enabled", True))
+        auto_hide = bool(raw_entry.get("auto_hide", False))
+        suppress = bool(raw_entry.get("suppress", False))
+        trigger_on_release = bool(raw_entry.get("trigger_on_release", True))
+
+        raw_steps = raw_entry.get("steps", [])
+        if not hotkey:
+            print(f"Skipping Playwright click path '{path_id}': missing hotkey")
+            continue
+        if not isinstance(raw_steps, list):
+            print(f"Skipping Playwright click path '{path_id}': steps must be a list")
+            continue
+
+        steps: List[Dict[str, Any]] = []
+        for step_index, raw_step in enumerate(raw_steps, start=1):
+            selectors: List[str] = []
+            timeout_ms = 3000
+            wait_after_ms = 0
+
+            if isinstance(raw_step, str):
+                token = raw_step.strip()
+                if token:
+                    selectors.append(token)
+            elif isinstance(raw_step, dict):
+                primary_selector = str(raw_step.get("selector") or "").strip()
+                if primary_selector:
+                    selectors.append(primary_selector)
+                for token in raw_step.get("selectors", []) or []:
+                    selector = str(token or "").strip()
+                    if selector:
+                        selectors.append(selector)
+                try:
+                    timeout_ms = max(250, int(raw_step.get("timeout_ms", 3000) or 3000))
+                except Exception:
+                    timeout_ms = 3000
+                try:
+                    wait_after_ms = max(0, int(raw_step.get("wait_after_ms", 0) or 0))
+                except Exception:
+                    wait_after_ms = 0
+            else:
+                print(
+                    f"Skipping step {step_index} in Playwright click path '{path_id}': invalid step type"
+                )
+                continue
+
+            if not selectors:
+                print(
+                    f"Skipping step {step_index} in Playwright click path '{path_id}': no selectors configured"
+                )
+                continue
+
+            steps.append(
+                {
+                    "selectors": selectors,
+                    "timeout_ms": timeout_ms,
+                    "wait_after_ms": wait_after_ms,
+                }
+            )
+
+        if not steps:
+            print(
+                f"Skipping Playwright click path '{path_id}': no valid steps configured"
+            )
+            continue
+
+        normalized.append(
+            {
+                "id": path_id,
+                "hotkey": hotkey,
+                "description": description,
+                "enabled": enabled,
+                "auto_hide": auto_hide,
+                "suppress": suppress,
+                "trigger_on_release": trigger_on_release,
+                "steps": steps,
+            }
+        )
+
+    return normalized
+
+
 def load_tab_template_list(tab_name: str) -> List[str]:
     """Load the list of template names available for a tab (from JSON config)."""
     config_path = get_template_config_path(tab_name)
@@ -1577,6 +5865,206 @@ def load_tab_template_list(tab_name: str) -> List[str]:
     except Exception as e:
         print(f"Error loading template config {config_path}: {e}")
         return []
+
+
+def _load_raw_template_config(tab_name: str) -> Dict[str, Any]:
+    config_path = get_template_config_path(tab_name)
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {"templates": []}
+    except FileNotFoundError:
+        return {"templates": []}
+    except Exception as e:
+        print(f"Error loading raw template config {config_path}: {e}")
+        return {"templates": []}
+
+
+def _extract_template_names_from_config(data: Dict[str, Any]) -> List[str]:
+    raw_templates = data.get("templates", []) if isinstance(data, dict) else []
+    if not isinstance(raw_templates, list):
+        return []
+
+    names: List[str] = []
+    for item in raw_templates:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            text = str(item.get("name") or "").strip()
+        else:
+            text = ""
+        if text and text not in names:
+            names.append(text)
+    return names
+
+
+def _apply_template_names_to_config(
+    data: Dict[str, Any], names: List[str]
+) -> Dict[str, Any]:
+    next_data = dict(data or {})
+    raw_templates = next_data.get("templates", [])
+    if (
+        isinstance(raw_templates, list)
+        and raw_templates
+        and all(isinstance(item, dict) for item in raw_templates)
+    ):
+        existing = {
+            str(item.get("name") or "").strip(): dict(item)
+            for item in raw_templates
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+        next_data["templates"] = [
+            dict(existing.get(name, {}), name=name) for name in names
+        ]
+    else:
+        next_data["templates"] = list(names)
+    return next_data
+
+
+def _render_template_content(
+    template_map: Dict[str, str], ordered_names: List[str]
+) -> str:
+    sections: List[str] = []
+    seen = set()
+
+    for name in ordered_names:
+        body = str(template_map.get(name, "")).rstrip()
+        if not body:
+            continue
+        sections.append(f"[{name}]\n\n{body}")
+        seen.add(name)
+
+    for name, body in template_map.items():
+        if name in seen:
+            continue
+        cleaned = str(body or "").rstrip()
+        if not cleaned:
+            continue
+        sections.append(f"[{name}]\n\n{cleaned}")
+
+    return "\n\n".join(sections).rstrip() + "\n"
+
+
+def load_tab_template_records(tab_name: str) -> List[Dict[str, str]]:
+    template_map: Dict[str, str] = {}
+    template_path = get_template_file_path(tab_name)
+    if not os.path.basename(template_path):
+        return []
+    if template_path and os.path.exists(template_path):
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                template_map = _parse_template_content(f.read())
+        except Exception as e:
+            print(f"Error loading template records from {template_path}: {e}")
+
+    ordered_names = _extract_template_names_from_config(
+        _load_raw_template_config(tab_name)
+    )
+    records: List[Dict[str, str]] = []
+    seen = set()
+    for name in ordered_names:
+        records.append({"name": name, "body": template_map.get(name, "")})
+        seen.add(name)
+    for name, body in template_map.items():
+        if name in seen:
+            continue
+        records.append({"name": name, "body": body})
+    return records
+
+
+def save_tab_template_record(
+    tab_name: str, template_name: str, body: str, previous_name: Optional[str] = None
+) -> Dict[str, str]:
+    template_name = str(template_name or "").strip()
+    previous_name = str(previous_name or "").strip()
+    if not template_name:
+        raise ValueError("template_name is required")
+
+    config_path = get_template_config_path(tab_name)
+    template_path = get_template_file_path(tab_name)
+    if not os.path.basename(config_path) or not os.path.basename(template_path):
+        raise ValueError(f"{tab_name} does not have editable template files configured")
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    os.makedirs(os.path.dirname(template_path), exist_ok=True)
+
+    config_data = _load_raw_template_config(tab_name)
+    template_names = _extract_template_names_from_config(config_data)
+    if (
+        previous_name
+        and previous_name in template_names
+        and previous_name != template_name
+    ):
+        template_names = [
+            template_name if item == previous_name else item for item in template_names
+        ]
+    elif template_name not in template_names:
+        template_names.append(template_name)
+    config_data = _apply_template_names_to_config(config_data, template_names)
+
+    template_map: Dict[str, str] = {}
+    if os.path.exists(template_path):
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                template_map = _parse_template_content(f.read())
+        except Exception as e:
+            print(f"Error reading existing template file {template_path}: {e}")
+
+    if previous_name and previous_name != template_name:
+        template_map.pop(previous_name, None)
+    template_map[template_name] = str(body or "").rstrip()
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=4, ensure_ascii=False)
+        f.write("\n")
+
+    with open(template_path, "w", encoding="utf-8") as f:
+        f.write(_render_template_content(template_map, template_names))
+
+    return {
+        "config_path": config_path,
+        "template_path": template_path,
+        "template_name": template_name,
+    }
+
+
+def delete_tab_template_record(tab_name: str, template_name: str) -> Dict[str, str]:
+    template_name = str(template_name or "").strip()
+    if not template_name:
+        raise ValueError("template_name is required")
+
+    config_path = get_template_config_path(tab_name)
+    template_path = get_template_file_path(tab_name)
+    if not os.path.basename(config_path) or not os.path.basename(template_path):
+        raise ValueError(f"{tab_name} does not have editable template files configured")
+    config_data = _load_raw_template_config(tab_name)
+    template_names = [
+        name
+        for name in _extract_template_names_from_config(config_data)
+        if name != template_name
+    ]
+    config_data = _apply_template_names_to_config(config_data, template_names)
+
+    template_map: Dict[str, str] = {}
+    if os.path.exists(template_path):
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                template_map = _parse_template_content(f.read())
+        except Exception as e:
+            print(f"Error reading existing template file {template_path}: {e}")
+    template_map.pop(template_name, None)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=4, ensure_ascii=False)
+        f.write("\n")
+
+    with open(template_path, "w", encoding="utf-8") as f:
+        f.write(_render_template_content(template_map, template_names))
+
+    return {
+        "config_path": config_path,
+        "template_path": template_path,
+        "template_name": template_name,
+    }
 
 
 def load_all_templates_unified() -> Dict[str, str]:
@@ -1647,38 +6135,172 @@ def open_in_notepad(file_path: str) -> None:
         print(f"Error opening {file_path} in notepad: {e}")
 
 
+def _build_emr_assist_icon(size: int = 16) -> wx.Icon:
+    """Create a small fallback app icon for the frame and Windows tray."""
+    try:
+        bitmap = wx.Bitmap(size, size)
+        dc = wx.MemoryDC()
+        dc.SelectObject(bitmap)
+        try:
+            dc.SetBackground(wx.Brush(wx.Colour(15, 23, 36)))
+            dc.Clear()
+
+            margin = max(1, size // 10)
+            corner = max(2, size // 5)
+            dc.SetPen(wx.Pen(wx.Colour(59, 211, 255), max(1, size // 14)))
+            dc.SetBrush(wx.Brush(wx.Colour(15, 34, 51)))
+            dc.DrawRoundedRectangle(
+                margin,
+                margin,
+                size - (margin * 2),
+                size - (margin * 2),
+                corner,
+            )
+
+            label = "EA" if size >= 24 else "E"
+            font_size = max(7, int(size * 0.42))
+            dc.SetFont(
+                wx.Font(
+                    font_size,
+                    wx.FONTFAMILY_SWISS,
+                    wx.FONTSTYLE_NORMAL,
+                    wx.FONTWEIGHT_BOLD,
+                )
+            )
+            dc.SetTextForeground(wx.Colour(203, 215, 230))
+            text_w, text_h = dc.GetTextExtent(label)
+            dc.DrawText(
+                label, max(0, (size - text_w) // 2), max(0, (size - text_h) // 2)
+            )
+        finally:
+            dc.SelectObject(wx.NullBitmap)
+
+        icon = wx.Icon()
+        icon.CopyFromBitmap(bitmap)
+        if icon.IsOk():
+            return icon
+    except Exception as exc:
+        print(f"Tray icon generation failed: {exc}")
+
+    try:
+        fallback = wx.ArtProvider.GetIcon(
+            wx.ART_INFORMATION,
+            wx.ART_OTHER,
+            wx.Size(size, size),
+        )
+        if fallback and fallback.IsOk():
+            return fallback
+    except Exception:
+        pass
+
+    return wx.Icon()
+
+
+if wxadv is not None:
+    _wxadv = wxadv
+
+    class EMRAssistTaskBarIcon(_wxadv.TaskBarIcon):
+        """Native Windows tray icon for restoring or exiting EMR Assist."""
+
+        def __init__(self, frame):
+            super().__init__()
+            self.frame = frame
+            self.Bind(_wxadv.EVT_TASKBAR_LEFT_DCLICK, self._on_activate)
+            self.Bind(_wxadv.EVT_TASKBAR_LEFT_DOWN, self._on_activate)
+
+        def CreatePopupMenu(self):
+            menu = wx.Menu()
+            if getattr(self.frame, "_js_overlay_active", False):
+                primary_label = "Return to Python UI"
+            elif self.frame.IsShown() and not self.frame.IsIconized():
+                primary_label = "Hide Window"
+            else:
+                primary_label = "Show Window"
+
+            primary_item = menu.Append(wx.ID_ANY, primary_label)
+            self.Bind(wx.EVT_MENU, self._on_primary_action, primary_item)
+            menu.AppendSeparator()
+            exit_item = menu.Append(wx.ID_EXIT, "Exit")
+            self.Bind(wx.EVT_MENU, self._on_exit, exit_item)
+            return menu
+
+        def _on_activate(self, event):
+            self.frame._restore_from_tray()
+
+        def _on_primary_action(self, event):
+            self.frame._toggle_window_from_tray()
+
+        def _on_exit(self, event):
+            self.frame.Close()
+
+else:
+
+    class EMRAssistTaskBarIcon:
+        pass
+
+
 panel_title = "EMR Assist"
 last_active_window = None
-grabbed_vars = {config["var"]: "" for config in LABS_CONFIG.values()}
-# Add Sexual Health hair loss sxx variables
-grabbed_vars['hair_loss_additional_sxx'] = ""
-grabbed_vars['hair_loss_location'] = ""
+grabbed_vars = {
+    "hair_loss_additional_sxx": "",
+    "hair_loss_location": "",
+}
 text_ctrls = {}
-tdcs_value = ["—"]  # Store TDCS selection as a mutable list, default to em dash
-tdcs_c_value = ["—"]  # Store TDCS-C selection as a mutable list, default to em dash
 check_ctrls = {}  # Store checkboxes for each variable: {var: (high_checkbox, low_checkbox)}
 medication_value = [""]  # Populated from grabbed data
-ed_value = ["—"]  # Default to em dash
-td_satisfaction_value = ["—"]  # Parsed questionnaire satisfaction
-td_side_effects_value = ["No side effects reported"]  # Parsed questionnaire side effects
 diagnoses = [""]  # Will hold the comma-separated diagnoses string
 templates = {}  # Will hold loaded templates
 selected_template = [""]  # Currently selected template
 
+PAYROLL_CALCULATIONS_PATH = r"C:\Users\mattt\Documents\iCloudFolder\iCloudDrive\iCloud~md~obsidian\Work\payroll_calculations.md"
+PAYROLL_CALCULATIONS_LEGACY_HEADER = (
+    "| date/time | payable_time | visits_signed | visits_per_hour | pay_per_hour | estimated_monthly_pay |\n"
+    "| --------- | ------------ | ------------- | --------------- | ------------ | --------------------- |\n"
+)
+PAYROLL_CALCULATIONS_HEADER = (
+    "| Date/Time | Hours | Visits | Visits/hour | Pay/hour | Est. Pay |\n"
+    "| --------- | ----- | ------ | ----------- | -------- | -------- |\n"
+)
+
+QUICK_TEMPLATE_DISPLAY_ORDER = [
+    "Change Cadence",
+    "Change Number",
+    "Change Medication",
+    "Proactive Refill",
+]
+
+QUICK_TEMPLATE_REGISTRY: Dict[Tuple[str, str], Dict[str, str]] = {
+    ("Hair Loss", "Change Cadence"): {"kind": "change_cadence"},
+    ("Hair Loss", "Change Medication"): {"kind": "change_medication"},
+    ("Hair Loss", "Proactive Refill"): {"kind": "proactive_refill"},
+    ("Photoaging", "Change Cadence"): {"kind": "change_cadence"},
+    ("Photoaging", "Change Medication"): {"kind": "change_medication"},
+    ("Photoaging", "Proactive Refill"): {"kind": "proactive_refill"},
+    ("Sexual Health", "Change Cadence"): {"kind": "change_cadence"},
+    ("Sexual Health", "Change Number"): {"kind": "change_number"},
+    ("Sexual Health", "Change Medication"): {"kind": "change_medication"},
+    ("Sexual Health", "Proactive Refill"): {"kind": "proactive_refill"},
+    ("Performance Anxiety", "Change Cadence"): {"kind": "change_cadence"},
+    ("Performance Anxiety", "Change Number"): {"kind": "change_number"},
+    ("Performance Anxiety", "Proactive Refill"): {"kind": "proactive_refill"},
+    ("Birth Control", "Change Cadence"): {"kind": "change_cadence"},
+    ("Birth Control", "Change Medication"): {"kind": "change_medication"},
+    ("Birth Control", "Proactive Refill"): {"kind": "proactive_refill"},
+}
+
 EMR_BRIDGE_FILENAME = "emr_assist_vars.json"
 EMR_BRIDGE_PATH = os.path.join(os.getenv("TEMP") or os.getcwd(), EMR_BRIDGE_FILENAME)
+AD_HOC_SELECTOR_LOG_FILENAME = "ad_hoc_selector_log.jsonl"
+AD_HOC_SELECTOR_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), AD_HOC_SELECTOR_LOG_FILENAME
+)
 
 def _build_emr_bridge_payload(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "grabbed_vars": dict(grabbed_vars),
-        "tdcs": tdcs_value[0],
-        "tdcs_c": tdcs_c_value[0],
         "diagnoses": diagnoses[0],
         "medication": medication_value[0],
-        "td_satisfaction": td_satisfaction_value[0],
-        "td_side_effects": td_side_effects_value[0],
-        "ed": ed_value[0],
     }
     # Also flatten lab variables at the top-level for simple access in AHK
     payload.update(dict(grabbed_vars))
@@ -1695,8 +6317,8 @@ def _write_emr_bridge(payload: Dict[str, Any]) -> None:
     os.replace(tmp_path, EMR_BRIDGE_PATH)
     dprint(f"EMR bridge wrote: {EMR_BRIDGE_PATH}")
 
-
-_emr_bridge_hook: Optional[Callable[[Dict[str, Any]], None]] = None
+# Hook called after every emit_emr_bridge (used by JS overlay to push vars)
+_emr_bridge_hook: Optional[Callable] = None
 
 def emit_emr_bridge(extra: Optional[Dict[str, Any]] = None) -> None:
     payload: Dict[str, Any] = {}
@@ -1705,11 +6327,23 @@ def emit_emr_bridge(extra: Optional[Dict[str, Any]] = None) -> None:
         _write_emr_bridge(payload)
     except Exception as exc:
         print(f"EMR bridge write failed: {exc}")
+    # Notify JS overlay (if active) so it can refresh displayed variables
     if _emr_bridge_hook is not None:
         try:
+            print("[EMR BRIDGE] Calling overlay hook to push vars")
             _emr_bridge_hook(payload)
         except Exception:
             pass
+
+
+def append_ad_hoc_selector_log(entry: Dict[str, Any]) -> None:
+    try:
+        log_dir = os.path.dirname(AD_HOC_SELECTOR_LOG_PATH) or "."
+        os.makedirs(log_dir, exist_ok=True)
+        with open(AD_HOC_SELECTOR_LOG_PATH, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        print(f"Ad hoc selector log write failed: {exc}")
 
 # PMH options for Rx note (manual selection only; no auto-grab)
 PMH_OPTIONS = [
@@ -1737,6 +6371,293 @@ def build_pmh_text() -> str:
     except Exception:
         return "is noncontributory"
 
+
+def _canonicalize_template_visit_label(visit: Optional[str]) -> Optional[str]:
+    if not visit:
+        return None
+    text = str(visit).strip()
+    if not text:
+        return None
+    low = text.lower()
+    for label in TEMPLATE_CONFIG:
+        if low == label.lower() or label.lower() in low:
+            return label
+    if "contraception" in low:
+        return "Birth Control"
+    return None
+
+
+def _diagnosis_label_for_visit(visit_type: str) -> str:
+    if visit_type == "Hair Loss":
+        return "Androgenetic Alopecia"
+    if visit_type == "Photoaging":
+        return "Photoaging"
+    if visit_type == "Performance Anxiety":
+        return "Performance Anxiety"
+    if visit_type == "Birth Control":
+        return "Contraception Management"
+    return ""
+
+
+def _expand_sexual_health_diagnoses(dx_text: Optional[str]) -> str:
+    mappings = {
+        "ED": "Erectile Dysfunction",
+        "PE": "Premature Ejaculation",
+        "PE-like ejaculatory dysfunction": "PE-like ejaculatory dysfunction",
+        "Hair Loss": "Androgenetic Alopecia",
+    }
+    names: List[str] = []
+    for raw_part in str(dx_text or "").split(","):
+        cleaned = raw_part.strip()
+        if not cleaned:
+            continue
+        names.append(mappings.get(cleaned, cleaned))
+    return ", ".join(names)
+
+
+def get_quick_template_names_for_visit(visit_type: Optional[str]) -> List[str]:
+    canonical = _canonicalize_template_visit_label(visit_type)
+    if not canonical:
+        return []
+    names = [
+        template_name
+        for (visit_name, template_name), _spec in QUICK_TEMPLATE_REGISTRY.items()
+        if visit_name == canonical
+    ]
+    order = {name: index for index, name in enumerate(QUICK_TEMPLATE_DISPLAY_ORDER)}
+    return sorted(names, key=lambda name: (order.get(name, 999), name))
+
+
+def get_quick_template_spec(
+    visit_type: Optional[str], template_name: Optional[str]
+) -> Optional[Dict[str, str]]:
+    canonical = _canonicalize_template_visit_label(visit_type)
+    label = str(template_name or "").strip()
+    if not canonical or not label:
+        return None
+    return QUICK_TEMPLATE_REGISTRY.get((canonical, label))
+
+
+def calculate_dashboard_payroll(
+    visits_signed: int, payable_time: float
+) -> Dict[str, Any]:
+    if payable_time <= 0:
+        raise ValueError("payable_time must be greater than 0")
+    if visits_signed < 0:
+        raise ValueError("visits_signed must not be negative")
+
+    visits_per_hour = visits_signed / payable_time
+    if visits_per_hour >= 8:
+        tier = min(int(visits_per_hour), 20)
+        pay_per_hour = float(110 + (tier - 8) * 10)
+        rate_detail = f"Tiered hourly rate (${pay_per_hour:.2f}/hour)"
+    else:
+        pay_per_hour = float(visits_per_hour * 14.0)
+        rate_detail = "Converted from $14/visit fallback"
+
+    estimated_monthly_pay = payable_time * pay_per_hour
+    timestamp = datetime.now().strftime("%m/%d @ %H:%M")
+    return {
+        "timestamp": timestamp,
+        "payable_time": round(float(payable_time), 2),
+        "visits_signed": int(visits_signed),
+        "visits_per_hour": round(float(visits_per_hour), 2),
+        "pay_per_hour": round(float(pay_per_hour), 2),
+        "estimated_monthly_pay": round(float(estimated_monthly_pay), 2),
+        "rate_detail": rate_detail,
+        "saved": False,
+    }
+
+
+def append_payroll_calculation_markdown(snapshot: Dict[str, Any]) -> None:
+    target_dir = os.path.dirname(PAYROLL_CALCULATIONS_PATH) or "."
+    os.makedirs(target_dir, exist_ok=True)
+
+    row = (
+        f"| {snapshot.get('timestamp', '')} | "
+        f"{float(snapshot.get('payable_time', 0.0)):.2f} | "
+        f"{int(snapshot.get('visits_signed', 0))} | "
+        f"{float(snapshot.get('visits_per_hour', 0.0)):.2f} | "
+        f"{float(snapshot.get('pay_per_hour', 0.0)):.2f} | "
+        f"{float(snapshot.get('estimated_monthly_pay', 0.0)):.2f} |\n"
+    )
+
+    existing = ""
+    if os.path.exists(PAYROLL_CALCULATIONS_PATH):
+        try:
+            with open(PAYROLL_CALCULATIONS_PATH, "r", encoding="utf-8") as handle:
+                existing = handle.read()
+        except Exception:
+            existing = ""
+
+    if PAYROLL_CALCULATIONS_LEGACY_HEADER in existing:
+        existing = existing.replace(
+            PAYROLL_CALCULATIONS_LEGACY_HEADER,
+            PAYROLL_CALCULATIONS_HEADER,
+            1,
+        )
+
+    if PAYROLL_CALCULATIONS_HEADER not in existing:
+        prefix = existing.rstrip()
+        if prefix:
+            prefix += "\n\n"
+        existing = prefix + PAYROLL_CALCULATIONS_HEADER
+    elif existing and not existing.endswith("\n"):
+        existing += "\n"
+
+    existing += row
+    with open(PAYROLL_CALCULATIONS_PATH, "w", encoding="utf-8") as handle:
+        handle.write(existing)
+
+
+def _resolve_effective_template_visit_type() -> str:
+    visit_candidates = []
+    try:
+        if getattr(frame, "_js_overlay_active", False):
+            visit_candidates.append(getattr(frame, "_js_overlay_visit_type", None))
+    except Exception:
+        pass
+    try:
+        visit_candidates.append(getattr(frame, "_current_template_tab", None))
+    except Exception:
+        pass
+    for visit in visit_candidates:
+        canonical = _canonicalize_template_visit_label(visit)
+        if canonical:
+            return canonical
+    return "Hair Loss"
+
+
+def _get_active_medication_for_visit(visit_type: str) -> str:
+    try:
+        if visit_type == "Hair Loss" and hasattr(frame, "hair_med_text"):
+            return frame.hair_med_text.GetValue().strip() or medication_value[0]
+        if visit_type == "Sexual Health" and hasattr(frame, "sexual_health_med_text"):
+            return (
+                frame.sexual_health_med_text.GetValue().strip() or medication_value[0]
+            )
+        if visit_type == "Photoaging" and hasattr(frame, "photoaging_med_text"):
+            return frame.photoaging_med_text.GetValue().strip() or medication_value[0]
+        if visit_type == "Performance Anxiety" and hasattr(frame, "pa_med_text"):
+            return frame.pa_med_text.GetValue().strip() or medication_value[0]
+        if visit_type == "Birth Control" and hasattr(frame, "bc_med_text"):
+            return frame.bc_med_text.GetValue().strip() or medication_value[0]
+    except Exception:
+        pass
+    return medication_value[0]
+
+
+def _get_diagnosis_for_visit(visit_type: str) -> str:
+    if visit_type == "Sexual Health":
+        try:
+            dx_text = frame._get_sh_dx_text()
+        except Exception:
+            dx_text = diagnoses[0]
+        expanded = _expand_sexual_health_diagnoses(dx_text or diagnoses[0])
+        if expanded:
+            return expanded
+    return _diagnosis_label_for_visit(visit_type) or diagnoses[0] or "Diagnosis"
+
+
+def _quick_template_objective_line(visit_type: str) -> str:
+    if visit_type == "Hair Loss":
+        return ""
+    if visit_type == "Birth Control":
+        try:
+            bp_value = (
+                frame.bc_bp_text.GetValue().strip()
+                if hasattr(frame, "bc_bp_text")
+                else ""
+            )
+        except Exception:
+            bp_value = ""
+        return f"O: BP {bp_value}\n" if bp_value else "O: BP not required\n"
+    if visit_type == "Performance Anxiety":
+        vitals_parts: List[str] = []
+        try:
+            bp_value = (
+                frame.pa_bp_text.GetValue().strip()
+                if hasattr(frame, "pa_bp_text")
+                else ""
+            )
+            pulse_value = (
+                frame.pa_pulse_text.GetValue().strip()
+                if hasattr(frame, "pa_pulse_text")
+                else ""
+            )
+        except Exception:
+            bp_value = ""
+            pulse_value = ""
+        if bp_value:
+            vitals_parts.append(f"BP {bp_value}")
+        if pulse_value:
+            vitals_parts.append(f"Pulse {pulse_value}")
+        return (
+            f"O: {', '.join(vitals_parts)}\n"
+            if vitals_parts
+            else "O: BP not required\n"
+        )
+    if visit_type == "Sexual Health":
+        try:
+            bp_value = (
+                frame.sexual_health_bp_text.GetValue().strip()
+                if hasattr(frame, "sexual_health_bp_text")
+                else ""
+            )
+        except Exception:
+            bp_value = ""
+        if bp_value and bp_value.lower() != "nr":
+            return f"O: BP {bp_value}\n"
+    return "O: BP not required\n"
+
+
+def _build_quick_template_note(visit_type: str, template_name: str) -> str:
+    spec = get_quick_template_spec(visit_type, template_name)
+    if not spec:
+        raise KeyError(f"No quick template spec for {visit_type} / {template_name}")
+
+    medication = _get_active_medication_for_visit(visit_type) or "current treatment"
+    diagnosis = _get_diagnosis_for_visit(visit_type)
+    objective_line = _quick_template_objective_line(visit_type)
+    kind = spec.get("kind", "")
+
+    if kind == "change_cadence":
+        return (
+            "S: The patient wishes to change the cadence of their prescription. No health changes or side effects are reported.\n"
+            f"{objective_line}"
+            f"A: {diagnosis}\n"
+            f"P: Continue present treatment with {medication} and amended cadence.\n"
+            "Prescription written, follow-up per routine."
+        )
+    if kind == "change_number":
+        return (
+            "S: The patient wishes to change the dose number of their prescription. No health changes or side effects are reported.\n"
+            f"{objective_line}"
+            f"A: {diagnosis}\n"
+            f"P: Continue present treatment with {medication} and amended dose number.\n"
+            "Prescription written, follow-up per routine."
+        )
+    if kind == "change_medication":
+        return (
+            "S: The patient requests to change the medication they are taking to try to get a stronger effect. No health changes or side effects are reported.\n"
+            f"{objective_line}"
+            f"A: {diagnosis}\n"
+            f"P: Change treatment to {medication}.\n"
+            "Prescription written, follow-up per routine."
+        )
+    if kind == "proactive_refill":
+        bp_line = "" if visit_type == "Hair Loss" else "BP: not required.\n"
+        return (
+            "S: Patient was identified for proactive refill. Chart reviewed and has no contraindications.\n"
+            f"{bp_line}"
+            f"A: {diagnosis}\n"
+            f"P: Continue present treatment with {medication}.\n"
+            "Prescription written, follow-up per routine."
+        )
+
+    raise KeyError(f"Unsupported quick template kind: {kind}")
+
+
 # Auto Clicker variables
 auto_clicker_x = [2600]  # click coordinates x
 auto_clicker_y = [400]   # click coordinates y
@@ -1744,6 +6665,24 @@ auto_clicker_interval = [3]  # seconds between clicks
 auto_clicker_enabled = [False]  # clicking state
 auto_clicker_last_url = [""]  # last observed URL
 auto_clicker_thread = [None]  # thread reference
+
+KEEP_AWAKE_INTERVAL_SECONDS = 20.0
+KEEP_AWAKE_CLICK_TARGETS = [
+    {
+        "label": "Messages",
+        "selectors": [
+            '[data-testid="tab-messages"]',
+            "div.css-1hj5o6h.r-1awozwy.r-18u37iz.r-ahm1il.r-1777fci.r-b5h31w.r-1ah4tor",
+        ],
+        "text": "Messages",
+    },
+    {
+        "label": "Blank Page",
+        "selectors": [
+            r"body > div.css-1hj5o6h.r-13awgt0 > div > div.relative.min-h-0.flex-1 > div.flex.h-full.min-w-\[600px\].flex-1.flex-row.overflow-hidden > div > div:nth-child(2) > div.css-1hj5o6h.r-1niwhzg.r-5chvjn.r-gxnn5r.r-10g5efv > div > div > div.css-1hj5o6h.r-13awgt0 > div > div.css-1hj5o6h.r-ry2h4h.r-gxnn5r.r-fnigne.r-13yce4e.r-rs99b7.r-1mwlp6a > div > div > div > div:nth-child(2) > div",
+        ],
+    },
+]
 
 def window_tracker():
     global last_active_window
@@ -1803,337 +6742,94 @@ def _get_emr_text_cdp():
         print(f"CDP text grab failed: {e}")
         return None
 
-def grab_all_labs():
-    """Grab all lab values using EMR extraction method"""
-    finished = [False]
 
-    def do_grab():
-        original = ""
-        try:
-            new_content = None
-            used_clipboard = False
+def _is_grab_target_emr_url(url: str) -> bool:
+    try:
+        return url.startswith("https://emr.forhims.com") or url.startswith(
+            "http://emr.forhims.com"
+        )
+    except Exception:
+        return False
 
-            # --- CDP path (fast, no clipboard/focus interaction needed) ---
-            if USE_CDP_FOR_GRAB:
-                new_content = _get_emr_text_cdp()
-                if new_content:
-                    print(f"✅ CDP grab: {len(new_content)} chars")
 
-            # --- Clipboard path (when CDP is disabled or failed) ---
-            if not new_content:
-                used_clipboard = True
-                # If CDP mode was on but failed, need to hide frame for clipboard
-                if USE_CDP_FOR_GRAB:
-                    frame.Hide()
-                    time.sleep(0.1)
-
-                # Store original clipboard
-                try:
-                    original = pyperclip.paste()
-                except Exception:
-                    original = ""
-
-                # Clear clipboard with unique marker
-                pyperclip.copy("CLEARED_BY_METHOD_2")
-                time.sleep(0.3)
-
-                # Click screen center then Ctrl+A, Ctrl+C
-                screen_width, screen_height = pyautogui.size()
-                center_x, center_y = screen_width // 2, screen_height // 2
-
-                print(f"Clicking screen center ({center_x}, {center_y}) to focus EMR...")
-                pyautogui.click(center_x, center_y)
-                time.sleep(0.5)
-
-                print("Executing Ctrl+A to select all text...")
-                pyautogui.hotkey("ctrl", "a")
-                time.sleep(0.5)
-
-                print("Executing Ctrl+C to copy text...")
-                pyautogui.hotkey("ctrl", "c")
-                time.sleep(0.8)
-
-                new_content = pyperclip.paste()
-
-                # If clipboard grab also failed, try CDP as last-resort fallback
-                if not (new_content and new_content != "CLEARED_BY_METHOD_2" and new_content != original and len(new_content) > 50):
-                    try:
-                        grabber = BrowserEMRGrabber()
-                        if grabber.connect_to_chrome():
-                            fallback_text = grabber._get_page_text() or ""
-                            if len(fallback_text) > 50:
-                                new_content = fallback_text
-                                print(f"✅ Fallback page text used ({len(fallback_text)} chars)")
-                    except Exception as fe:
-                        print(f"Fallback text grab failed: {fe}")
-
-            if (new_content and
-                new_content != "CLEARED_BY_METHOD_2" and
-                new_content != original and
-                len(new_content) > 50):
-
-                print(f"Successfully grabbed {len(new_content)} characters from EMR")
-
-                # Clear any selection if we used clipboard
-                if used_clipboard:
-                    _clear_text_selection()
-                
-                # Parse the grabbed text for all lab values
-                for lab_name, lab_config in LABS_CONFIG.items():
-                    result = extract_lab_value_simple(lab_config, new_content)
-                    var_name = lab_config["var"]
-                    
-                    if result["found"]:
-                        grabbed_vars[var_name] = result["raw_value"]
-                        print(f"Found {lab_name}: {result['raw_value']} {result['unit']}")
-                    else:
-                        grabbed_vars[var_name] = ""
-                        print(f"Could not find {lab_name}")
-                
-                # Parse TDCS score from text
-                tdcs_score = parse_tdcs_score(new_content)
-                tdcs_value[0] = str(tdcs_score)
-
-                # Parse TDCS-C score from text
-                tdcs_c_score = parse_tdcsc_score(new_content)
-                tdcs_c_value[0] = str(tdcs_c_score) if tdcs_c_score is not None else "—"
-                
-                # Parse ED status from text
-                ed_status = parse_ed_status(new_content)
-                ed_value[0] = "He reports symptoms consistent with ED." if ed_status == "Yes" else "He denies symptoms of ED." if ed_status == "No" else "—"
-
-                # Parse questionnaire satisfaction and side effects
-                td_satisfaction_value[0] = parse_treatment_satisfaction(new_content)
-                td_side_effects_value[0] = parse_side_effects_response(new_content)
-
-                # Detect testosterone deficiency diagnosis from text (TD tab)
-                try:
-                    if detect_td_diagnosis(new_content):
-                        diagnoses[0] = "Testosterone Deficiency"
-                        try:
-                            frame.dx_td_cb.SetValue(True)
-                        except Exception:
-                            pass
-                        print("Detected Testosterone Deficiency diagnosis from text")
-                except Exception as dx_err:
-                    print(f"TD diagnosis detection error: {dx_err}")
-
-                # Extract TD medication from grabbed text
-                detected_med = extract_td_medication_from_text(new_content)
-                medication_value[0] = detected_med if detected_med else ""
-                if detected_med:
-                    print(f"Detected TD medication: {detected_med}")
-                
-                # Update UI on main thread
-                wx.CallAfter(update_ui_after_grab)
-
-                emit_emr_bridge({"context": "labs"})
-                
-                # Restore original clipboard
-                try:
-                    pyperclip.copy(original)
-                except Exception:
-                    pass
-                
-            else:
-                # Failure to grab: notify and ensure UI is restored
-                print("Failed to grab text from EMR")
-                # Restore original clipboard before notifying
-                try:
-                    pyperclip.copy(original)
-                except Exception:
-                    pass
-                def _show_fail_msg():
-                    wx.MessageBox(
-                        "Failed to grab text from EMR. Make sure EMR window is active.",
-                        "Error",
-                        wx.ICON_ERROR,
-                    )
-                    # Always bring the GUI back
-                    frame.Show()
-                    frame.Raise()
-                wx.CallAfter(_show_fail_msg)
-                
-        except Exception as e:
-            print(f"Error during grab: {e}")
-            # Restore original clipboard and UI on exceptions as well
-            try:
-                pyperclip.copy(original)
-            except Exception:
-                pass
-            def _show_err_msg():
-                wx.MessageBox(f"Error during grab: {e}", "Error", wx.ICON_ERROR)
-                frame.Show()
-                frame.Raise()
-            wx.CallAfter(_show_err_msg)
-        finally:
-            finished[0] = True
-
-    # Only hide frame for clipboard mode (CDP doesn't need screen interaction)
-    if not USE_CDP_FOR_GRAB:
-        frame.Hide()
-    time.sleep(0.1)
-    
-    # Watchdog: if the worker hangs, restore the UI after a timeout
-    def _watchdog():
-        if not finished[0]:
-            def _restore():
-                try:
-                    frame.Show()
-                    frame.Raise()
-                except Exception:
-                    pass
-                wx.MessageBox(
-                    "Variable grab took too long and was canceled. You can try again or focus the EMR window first.",
-                    "Grab Timeout",
-                    wx.ICON_WARNING,
-                )
-            wx.CallAfter(_restore)
-    timer = threading.Timer(7.0, _watchdog)
-    timer.daemon = True
-    timer.start()
-
-    # Run grab in thread
-    threading.Thread(target=do_grab, daemon=True).start()
-
-def update_ui_after_grab():
-    """Update UI with grabbed values"""
-    for lab_name, lab_config in LABS_CONFIG.items():
-        var_name = lab_config["var"]
-        if var_name in text_ctrls:
-            text_ctrls[var_name].SetValue(grabbed_vars[var_name])
-    
-    # Update TDCS and ED text fields
-    frame.tdcs_text.SetValue(str(tdcs_value[0]))
-    if hasattr(frame, "tdcs_c_text"):
-        frame.tdcs_c_text.SetValue(str(tdcs_c_value[0]))
-    frame.ed_text.SetValue("Yes" if "symptoms consistent with ED" in ed_value[0] else "No" if "denies symptoms of ED" in ed_value[0] else "—")
-
-    # Update TD medication text field
-    if hasattr(frame, "td_med_text"):
-        frame.td_med_text.SetValue(medication_value[0] if medication_value[0] else "")
-
-    # Update TD response and side effects text fields
-    if hasattr(frame, "td_response_text"):
-        frame.td_response_text.SetValue(td_satisfaction_value[0] if td_satisfaction_value[0] and td_satisfaction_value[0] != "—" else "")
-    if hasattr(frame, "td_side_effects_text"):
-        frame.td_side_effects_text.SetValue(td_side_effects_value[0] if td_side_effects_value[0] else "No side effects reported")
-    
-    # Show frame again
-    frame.Show()
-    frame.Raise()
-
-def insert_template_at_cursor():
+def insert_template_at_cursor(insert_source: str = "default"):
     """Insert the selected template at the active cursor position"""
     if not selected_template[0]:
         wx.MessageBox("Please select a template first", "No Template Selected", wx.ICON_WARNING)
         return
-    
+
     template_name = selected_template[0]
-    if template_name not in templates:
+    current_tab = _resolve_effective_template_visit_type()
+    quick_template_spec = get_quick_template_spec(current_tab, template_name)
+    if template_name not in templates and quick_template_spec is None:
         wx.MessageBox(f"Template '{template_name}' not found", "Template Error", wx.ICON_ERROR)
         return
-    
+
     frame.Hide()
     time.sleep(0.2)
-    
+
     try:
         # Get the template content
-        template_content = templates[template_name]
-        
+        template_content = templates.get(template_name, "")
+
         # Prepare variables for template substitution
         template_vars = {}
-        
-        # Add individual lab variables
-        for lab_name, lab_config in LABS_CONFIG.items():
-            var_name = lab_config["var"]
-            value = grabbed_vars.get(var_name, "")
+
+        # Add grabbed variables
+        for var_name, value in grabbed_vars.items():
             template_vars[var_name] = value
 
-        # Default PSA to "not done" when missing
-        if not template_vars.get("psa") or not template_vars.get("psa").strip():
-            template_vars["psa"] = "- not done -"
-        
-        # Add formatted lab values
-        lab_lines = []
-        for lab_name, lab_config in LABS_CONFIG.items():
-            var_name = lab_config["var"]
-            value = grabbed_vars.get(var_name, "")
-            if value.strip():
-                high_cb, low_cb = check_ctrls[var_name]
-                suffix = ""
-                if high_cb.GetValue():
-                    suffix = " (high)"
-                elif low_cb.GetValue():
-                    suffix = " (low)"
-                lab_lines.append(f"{lab_name}: {value} {lab_config['unit']}{suffix}")
-        
-        template_vars["lab_values_formatted"] = "\n".join(lab_lines) if lab_lines else "(none grabbed)"
-
         # Determine which tab we're inserting for
-        current_tab = getattr(frame, '_current_template_tab', 'T Deficiency')
+        current_tab = _resolve_effective_template_visit_type()
 
-        # ── T Deficiency: read ALL variables from widgets (isolated from other tabs) ──
-        if current_tab == "T Deficiency":
-            template_vars["tdcs"] = frame.tdcs_text.GetValue().strip() if hasattr(frame, "tdcs_text") else tdcs_value[0]
-            template_vars["tdcs_c"] = frame.tdcs_c_text.GetValue().strip() if hasattr(frame, "tdcs_c_text") else tdcs_c_value[0]
-            # ED status: widget shows Yes/No/—, template needs full sentence
-            ed_widget_val = frame.ed_text.GetValue().strip() if hasattr(frame, "ed_text") else "—"
-            if ed_widget_val == "Yes":
-                template_vars["ed_status"] = "He reports symptoms consistent with ED."
-            elif ed_widget_val == "No":
-                template_vars["ed_status"] = "He denies symptoms of ED."
-            else:
-                template_vars["ed_status"] = ed_widget_val
-            # Diagnoses: read from T-tab checkboxes (NOT shared diagnoses[0])
-            td_dx_parts = []
-            if hasattr(frame, "dx_td_cb") and frame.dx_td_cb.GetValue():
-                td_dx_parts.append("Testosterone Deficiency")
-            if hasattr(frame, "dx_ed_cb") and frame.dx_ed_cb.GetValue():
-                td_dx_parts.append("ED")
-            template_vars["diagnoses"] = ", ".join(td_dx_parts) if td_dx_parts else diagnoses[0]
-            template_vars["pmh"] = build_pmh_text()
-            # Response and side effects: read from visible T-tab widgets
-            template_vars["response"] = frame.td_response_text.GetValue().strip() if hasattr(frame, "td_response_text") and frame.td_response_text.GetValue().strip() else td_satisfaction_value[0]
-            template_vars["side_effects"] = frame.td_side_effects_text.GetValue().strip() if hasattr(frame, "td_side_effects_text") else td_side_effects_value[0]
-            # Medication: read from T-tab widget
-            active_med = frame.td_med_text.GetValue().strip() if hasattr(frame, "td_med_text") else ""
-            template_vars["medication"] = active_med if active_med else medication_value[0]
-            print(f"[TD INSERT DEBUG] tab={current_tab}, medication='{template_vars['medication']}', td_med_text='{active_med}', medication_value[0]='{medication_value[0]}', diagnoses='{template_vars['diagnoses']}', response='{template_vars['response']}', side_effects='{template_vars['side_effects']}'")
-        else:
-            # Non-T-Deficiency tabs: use globals as before
-            template_vars["tdcs"] = tdcs_value[0]
-            template_vars["tdcs_c"] = tdcs_c_value[0]
-            template_vars["ed_status"] = ed_value[0]
-            template_vars["diagnoses"] = diagnoses[0]
-            template_vars["pmh"] = build_pmh_text()
-            template_vars["response"] = td_satisfaction_value[0]
-            template_vars["side_effects"] = td_side_effects_value[0]
-            # Determine {medication} from the ACTIVE tab's text field
-            active_med = ""
-            if current_tab == "Hair Loss":
-                active_med = frame.hair_med_text.GetValue().strip() if hasattr(frame, "hair_med_text") else ""
-            elif current_tab == "Sexual Health":
-                active_med = frame.sexual_health_med_text.GetValue().strip() if hasattr(frame, "sexual_health_med_text") else ""
-            elif current_tab == "Photoaging":
-                active_med = frame.photoaging_med_text.GetValue().strip() if hasattr(frame, "photoaging_med_text") else ""
-            elif current_tab == "Performance Anxiety":
-                active_med = frame.pa_med_text.GetValue().strip() if hasattr(frame, "pa_med_text") else ""
-            elif current_tab == "Birth Control":
-                active_med = frame.bc_med_text.GetValue().strip() if hasattr(frame, "bc_med_text") else ""
-            template_vars["medication"] = active_med if active_med else medication_value[0]
-        
+        # Shared template vars
+        template_vars["diagnoses"] = diagnoses[0]
+        template_vars["pmh"] = build_pmh_text()
+        # Determine {medication} from the ACTIVE tab's text field
+        active_med = ""
+        if current_tab == "Hair Loss":
+            active_med = (
+                frame.hair_med_text.GetValue().strip()
+                if hasattr(frame, "hair_med_text")
+                else ""
+            )
+        elif current_tab == "Sexual Health":
+            active_med = (
+                frame.sexual_health_med_text.GetValue().strip()
+                if hasattr(frame, "sexual_health_med_text")
+                else ""
+            )
+        elif current_tab == "Photoaging":
+            active_med = (
+                frame.photoaging_med_text.GetValue().strip()
+                if hasattr(frame, "photoaging_med_text")
+                else ""
+            )
+        elif current_tab == "Performance Anxiety":
+            active_med = (
+                frame.pa_med_text.GetValue().strip()
+                if hasattr(frame, "pa_med_text")
+                else ""
+            )
+        elif current_tab == "Birth Control":
+            active_med = (
+                frame.bc_med_text.GetValue().strip()
+                if hasattr(frame, "bc_med_text")
+                else ""
+            )
+        template_vars["medication"] = active_med if active_med else medication_value[0]
+
         # ============================================================
         # Tab-specific variables (Hair, Sexual Health, Photoaging, PA)
         # ============================================================
-        
+
         # --- Hair Loss tab variables ---
         try:
             template_vars["hvar"] = frame.hair_hvar_text.GetValue().strip()
             template_vars["hsx"] = frame.hair_hsx_text.GetValue().strip()
-            
-            # (medication is resolved from active tab above — no per-tab override here)
-            
+
+            # (medication is resolved from active tab above â€” no per-tab override here)
+
             # Build objective_section from hair exam checkboxes
             hair_exam_findings = []
             if frame.hair_exam_front_hairline.GetValue():
@@ -2148,7 +6844,7 @@ def insert_template_at_cursor():
                 hair_exam_findings.append("confluent from the front hairline to the crown")
             if frame.hair_exam_near_front.GetValue():
                 hair_exam_findings.append("near the front with sparing of the hairline")
-            
+
             if hair_exam_findings:
                 exam_text = ", ".join(hair_exam_findings)
                 template_vars["objective_section"] = f"O: Images reviewed showing hair loss at {exam_text}\n\n"
@@ -2159,18 +6855,18 @@ def insert_template_at_cursor():
             template_vars["hvar"] = ""
             template_vars["hsx"] = ""
             template_vars["objective_section"] = ""
-        
+
         # --- Sexual Health tab variables ---
         try:
             bp_val = frame.sexual_health_bp_text.GetValue().strip()
             template_vars["bp"] = bp_val if bp_val else "not recorded"
-            
-            # (medication is resolved from active tab above — no per-tab override here)
-            
+
+            # (medication is resolved from active tab above â€” no per-tab override here)
+
             # Response text based on followup/initial
             sh_response = frame.sexual_health_response_choice.GetStringSelection() if hasattr(frame, 'sexual_health_response_choice') else ""
             template_vars["response_text"] = sh_response if sh_response else "a satisfactory response"
-            
+
             # Plan action text
             sh_plan = frame.sexual_health_plan_choice.GetStringSelection() if hasattr(frame, 'sexual_health_plan_choice') else ""
             template_vars["action_text"] = sh_plan if sh_plan else "Continue present treatment"
@@ -2202,13 +6898,13 @@ def insert_template_at_cursor():
             template_vars["past_ed_treatments"] = "none reported"
             template_vars["ros_positives"] = "none"
             template_vars["ros_negatives"] = ""
-        
+
         # --- Photoaging tab variables ---
         try:
             template_vars["retinoid_history"] = frame.photoaging_retinoid_text.GetValue().strip() if hasattr(frame, 'photoaging_retinoid_text') else ""
-            
-            # (medication is resolved from active tab above — no per-tab override here)
-            
+
+            # (medication is resolved from active tab above â€” no per-tab override here)
+
             # Build exam_text from photoaging exam checkboxes
             photoaging_exam_findings = []
             if hasattr(frame, 'photoaging_exam_fine_lines') and frame.photoaging_exam_fine_lines.GetValue():
@@ -2235,7 +6931,7 @@ def insert_template_at_cursor():
                 photoaging_exam_findings.append("acne scarring")
             if hasattr(frame, 'photoaging_exam_normal') and frame.photoaging_exam_normal.GetValue():
                 photoaging_exam_findings.append("no significant findings")
-            
+
             if photoaging_exam_findings:
                 template_vars["exam_text"] = "Images reviewed showing " + ", ".join(photoaging_exam_findings)
             else:
@@ -2243,11 +6939,11 @@ def insert_template_at_cursor():
         except AttributeError:
             template_vars["retinoid_history"] = ""
             template_vars["exam_text"] = "Images reviewed"
-        
+
         # --- Performance Anxiety tab variables ---
         try:
-            # (medication is resolved from active tab above — no per-tab override here)
-            
+            # (medication is resolved from active tab above â€” no per-tab override here)
+
             # Build subject_suffix from situational fears checkboxes
             fears = []
             if hasattr(frame, 'pa_fear_new') and frame.pa_fear_new.GetValue():
@@ -2257,7 +6953,7 @@ def insert_template_at_cursor():
             if hasattr(frame, 'pa_fear_pressure') and frame.pa_fear_pressure.GetValue():
                 fears.append("when feeling pressured")
             template_vars["subject_suffix"] = (" " + ", ".join(fears)) if fears else ""
-            
+
             # Build vitals_line from BP and pulse
             bp_val = frame.pa_bp_text.GetValue().strip() if hasattr(frame, 'pa_bp_text') else ""
             pulse_val = frame.pa_pulse_text.GetValue().strip() if hasattr(frame, 'pa_pulse_text') else ""
@@ -2270,7 +6966,7 @@ def insert_template_at_cursor():
                 template_vars["vitals_line"] = "O: " + ", ".join(vitals_parts) + "\n\n"
             else:
                 template_vars["vitals_line"] = ""
-            
+
             # Response for follow-up (only override when on PA tab to avoid clobbering T tab's response)
             if current_tab == "Performance Anxiety":
                 if hasattr(frame, 'pa_response_good_rb') and frame.pa_response_good_rb.GetValue():
@@ -2281,7 +6977,7 @@ def insert_template_at_cursor():
                     template_vars["response"] = "a poor"
                 else:
                     template_vars["response"] = "a satisfactory"
-            
+
             # Side effects phrase (only for PA tab)
             if current_tab == "Performance Anxiety":
                 if hasattr(frame, 'pa_se_none_rb') and frame.pa_se_none_rb.GetValue():
@@ -2296,24 +6992,47 @@ def insert_template_at_cursor():
             template_vars["subject_suffix"] = ""
             template_vars["vitals_line"] = ""
             template_vars["se_phrase"] = "without side effects"
-        
+
         # Format the template
-        try:
-            formatted_text = template_content.format(**template_vars)
-        except KeyError as e:
-            wx.MessageBox(f"Template error - missing variable: {e}", "Template Error", wx.ICON_ERROR)
-            frame.Show()
-            frame.Raise()
-            return
+        if quick_template_spec is not None:
+            formatted_text = _build_quick_template_note(current_tab, template_name)
+        else:
+            try:
+                formatted_text = template_content.format(**template_vars)
+            except KeyError as e:
+                wx.MessageBox(
+                    f"Template error - missing variable: {e}",
+                    "Template Error",
+                    wx.ICON_ERROR,
+                )
+                frame.Show()
+                frame.Raise()
+                return
+
+        # Most templates should start on the next line; SH - initial needs to
+        # continue inline after a single space instead.
+        leading_text = "\n"
+        if template_name == "SH Initial":
+            leading_text = " "
+        if insert_source == "overlay_ctx_menu":
+            leading_text = ""
+        if (
+            quick_template_spec is not None
+            and quick_template_spec.get("kind") == "proactive_refill"
+        ):
+            leading_text = "\n"
 
         # Type the text at cursor position
-        _type_template_text(formatted_text)
+        _type_template_text(formatted_text, leading_text=leading_text)
 
-        print(f"Inserted template '{template_name}': {repr(formatted_text[:100])}...")
-        
+        print(
+            f"Inserted template '{template_name}' from {insert_source}: "
+            f"{repr(formatted_text[:100])}..."
+        )
+
     except Exception as e:
         wx.MessageBox(f"Error inserting template: {e}", "Error", wx.ICON_ERROR)
-    
+
     frame.Show()
     frame.Raise()
 
@@ -2336,18 +7055,18 @@ def _wait_for_modifier_release(timeout: float = 1.0) -> None:
     print("[WARN] Timeout waiting for modifier key release")
 
 
-def _type_template_text(text: str, prepend_enter: bool = True, interval: float = 0.005) -> None:
+def _type_template_text(text: str, leading_text: str = "\n", interval: float = 0.005) -> None:
     """Insert template text quickly via clipboard paste, with typing fallback when needed."""
 
     def _fallback_type() -> None:
-        if prepend_enter:
-            pyautogui.press("enter")
+        if leading_text:
+            pyautogui.write(leading_text, interval=interval)
             time.sleep(0.02)
         pyautogui.typewrite(text, interval=interval)
 
     if not text:
-        if prepend_enter:
-            pyautogui.press("enter")
+        if leading_text:
+            pyautogui.write(leading_text, interval=interval)
             time.sleep(0.02)
         return
 
@@ -2363,11 +7082,8 @@ def _type_template_text(text: str, prepend_enter: bool = True, interval: float =
         pass
 
     try:
-        pyperclip.copy(text)
+        pyperclip.copy(f"{leading_text}{text}")
         time.sleep(0.05)
-        if prepend_enter:
-            pyautogui.press("enter")
-            time.sleep(0.02)
         pyautogui.hotkey("ctrl", "v")
         time.sleep(0.05)
     except pyperclip.PyperclipException:
@@ -2385,117 +7101,30 @@ def _type_template_text(text: str, prepend_enter: bool = True, interval: float =
                 pass
 
 def insert_template(template=None, dynamic_labs=False, rx_note=False, lab_message=False, event=None):
-    """Legacy function for backward compatibility with Clear All button"""
+    """Legacy function for backward compatibility"""
     frame.Hide()
     time.sleep(0.2)
-    if rx_note:
-        # Use external Rx Note template
-        tpl = templates.get("Rx Note")
-        if tpl:
-            # Build lab lines for {lab_values_formatted}
-            labs_lines = []
-            for lab_name, lab_config in LABS_CONFIG.items():
-                var_name = lab_config["var"]
-                value = grabbed_vars.get(var_name, "")
-                if value.strip():
-                    high_cb, low_cb = check_ctrls[var_name]
-                    suffix = ""
-                    if high_cb.GetValue():
-                        suffix = " (high)"
-                    elif low_cb.GetValue():
-                        suffix = " (low)"
-                    labs_lines.append(f"{lab_name}: {value} {lab_config['unit']}{suffix}")
-            lab_values_formatted = "\n".join(labs_lines) if labs_lines else "(none grabbed)"
-
-            # Read from T-tab widgets for isolation from other tabs
-            _td_med = frame.td_med_text.GetValue().strip() if hasattr(frame, "td_med_text") and frame.td_med_text.GetValue().strip() else medication_value[0]
-            _td_tdcs = frame.tdcs_text.GetValue().strip() if hasattr(frame, "tdcs_text") else tdcs_value[0]
-            _td_tdcs_c = frame.tdcs_c_text.GetValue().strip() if hasattr(frame, "tdcs_c_text") else tdcs_c_value[0]
-            _ed_w = frame.ed_text.GetValue().strip() if hasattr(frame, "ed_text") else ""
-            _td_ed = "He reports symptoms consistent with ED." if _ed_w == "Yes" else "He denies symptoms of ED." if _ed_w == "No" else ed_value[0]
-            _dx_parts = []
-            if hasattr(frame, "dx_td_cb") and frame.dx_td_cb.GetValue():
-                _dx_parts.append("Testosterone Deficiency")
-            if hasattr(frame, "dx_ed_cb") and frame.dx_ed_cb.GetValue():
-                _dx_parts.append("ED")
-            _td_dx = ", ".join(_dx_parts) if _dx_parts else diagnoses[0]
-            text = tpl.format(
-                tdcs=_td_tdcs,
-                tdcs_c=_td_tdcs_c,
-                ed_status=_td_ed,
-                pmh=build_pmh_text(),
-                lab_values_formatted=lab_values_formatted,
-                diagnoses=_td_dx,
-                medication=_td_med,
-            )
-            print(f"[TD LEGACY RX INSERT] medication='{_td_med}', diagnoses='{_td_dx}'")
-        else:
-            text = "Rx Note template missing"
-    elif lab_message:
-        tpl = templates.get("Lab Message")
-        if tpl:
-            _td_med = frame.td_med_text.GetValue().strip() if hasattr(frame, "td_med_text") and frame.td_med_text.GetValue().strip() else medication_value[0]
-            text = tpl.format(
-                total_testosterone=grabbed_vars.get('total_testosterone', ''),
-                free_testosterone=grabbed_vars.get('free_testosterone', ''),
-                medication=_td_med,
-            )
-            print(f"[TD LEGACY LAB MSG INSERT] medication='{_td_med}'")
-        else:
-            text = "Lab Message template missing"
-    elif dynamic_labs:
-        tpl = templates.get("Insert Labs")
-        if tpl:
-            lines = []
-            for lab_name, lab_config in LABS_CONFIG.items():
-                var_name = lab_config["var"]
-                value = grabbed_vars.get(var_name, "")
-                if value.strip():
-                    high_cb, low_cb = check_ctrls[var_name]
-                    suffix = ""
-                    if high_cb.GetValue():
-                        suffix = " (high)"
-                    elif low_cb.GetValue():
-                        suffix = " (low)"
-                    lines.append(f"{lab_name}: {value} {lab_config['unit']}{suffix}")
-            lab_values_formatted = "\n".join(lines) if lines else "(none grabbed)"
-            text = tpl.format(lab_values_formatted=lab_values_formatted)
-        else:
-            text = "Labs: (template missing)"
-    else:
-        try:
-            _td_med = frame.td_med_text.GetValue().strip() if hasattr(frame, "td_med_text") and frame.td_med_text.GetValue().strip() else medication_value[0]
-            _dx_parts = []
-            if hasattr(frame, "dx_td_cb") and frame.dx_td_cb.GetValue():
-                _dx_parts.append("Testosterone Deficiency")
-            if hasattr(frame, "dx_ed_cb") and frame.dx_ed_cb.GetValue():
-                _dx_parts.append("ED")
-            _td_dx = ", ".join(_dx_parts) if _dx_parts else diagnoses[0]
-            text = template.format(**grabbed_vars, tdcs=tdcs_value[0], tdcs_c=tdcs_c_value[0], diagnoses=_td_dx, medication=_td_med, ed=ed_value[0])
-        except KeyError as e:
-            wx.MessageBox(f"Missing variable: {e}", "Template Error", wx.ICON_ERROR)
-            frame.Show()
-            frame.Raise()
-            return
+    try:
+        text = template.format(
+            **grabbed_vars, diagnoses=diagnoses[0], medication=medication_value[0]
+        )
+    except KeyError as e:
+        wx.MessageBox(f"Missing variable: {e}", "Template Error", wx.ICON_ERROR)
+        frame.Show()
+        frame.Raise()
+        return
     _type_template_text(text)
     frame.Show()
     frame.Raise()
     print(f"Inserted template: {repr(text)}")
 
 def clear_all(event=None):
-    # Clear lab values and checkboxes
+    # Clear grabbed variables
     for var in grabbed_vars:
         grabbed_vars[var] = ""
-        text_ctrls[var].SetValue("")
-        high_cb, low_cb = check_ctrls[var]
-        high_cb.SetValue(False)
-        low_cb.SetValue(False)
-    
-    # Clear T Deficiency diagnosis checkboxes (do NOT touch Sexual Health checkboxes)
-    frame.dx_td_cb.SetValue(False)
-    frame.dx_ed_cb.SetValue(False)
+
     diagnoses[0] = ""
-    
+
     # Clear hair loss fields
     try:
         frame.sexual_health_hair_location_text.SetValue("")
@@ -2518,117 +7147,15 @@ def clear_all(event=None):
         frame.sexual_health_ros_neg_text.SetValue("")
     except Exception:
         pass
-    
-    # Reset TDCS and ED text fields to em dash
-    frame.tdcs_text.SetValue("—")
-    if hasattr(frame, "tdcs_c_text"):
-        frame.tdcs_c_text.SetValue("—")
-    frame.ed_text.SetValue("—")
-    tdcs_value[0] = "—"
-    tdcs_c_value[0] = "—"
-    ed_value[0] = "—"
-    # Reset PMH selections and summary
-    try:
-        pmh_selected.clear()
-        if hasattr(frame, 'pmh_summary'):
-            frame.update_pmh_summary()
-    except Exception:
-        pass
 
-    try:
-        if hasattr(frame, 'td_med_text'):
-            frame.td_med_text.SetValue("")
-            medication_value[0] = ""
-    except Exception:
-        pass
+    medication_value[0] = ""
 
-    # Clear T Deficiency response and side effects fields
-    try:
-        if hasattr(frame, 'td_response_text'):
-            frame.td_response_text.SetValue("")
-        if hasattr(frame, 'td_side_effects_text'):
-            frame.td_side_effects_text.SetValue("No side effects reported")
-    except Exception:
-        pass
-    td_satisfaction_value[0] = "—"
-    td_side_effects_value[0] = "No side effects reported"
-    
     print("All variables and UI elements cleared.")
-
-def show_clinical_matrix():
-    """Display the clinical decision matrix image in a separate window"""
-    # Get the directory where this script is located
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    image_path = os.path.join(script_dir, 'clincal_decision_matrix.png')
-    
-    if not os.path.exists(image_path):
-        wx.MessageBox(f"Image file not found: {image_path}", "Image Not Found", wx.ICON_ERROR)
-        return
-    
-    try:
-        # Create a new frame for the image with a defined size
-        window_width, window_height = 2100, 1285  # Define desired window size
-        parent_window = None
-        try:
-            parent_window = frame if isinstance(globals().get("frame"), wx.Window) else None
-        except Exception:
-            parent_window = None
-        frame_style = wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP | wx.FRAME_NO_TASKBAR | wx.FRAME_TOOL_WINDOW
-        if parent_window is not None:
-            frame_style |= wx.FRAME_FLOAT_ON_PARENT
-        image_frame = wx.Frame(parent_window, title="Clinical Decision Matrix",
-                               style=frame_style,
-                               size=(window_width, window_height))
-        panel = wx.Panel(image_frame)
-        
-        # Load the image
-        image = wx.Image(image_path, wx.BITMAP_TYPE_PNG)
-        
-        # Scale image to fit the window size with some padding
-        padding = 60  # Total padding (30px on each side)
-        target_width = window_width - padding
-        target_height = window_height - padding - 50  # Extra space for title bar and controls
-        
-        # Calculate scaling to fit within target size while maintaining aspect ratio
-        img_width, img_height = image.GetSize()
-        scale_w = target_width / img_width
-        scale_h = target_height / img_height
-        scale = min(scale_w, scale_h)  # Use smaller scale to ensure it fits
-        
-        # Ensure we don't scale up beyond original size
-        if scale > 1.0:
-            scale = 1.0
-        
-        new_width = int(img_width * scale)
-        new_height = int(img_height * scale)
-        
-        # Scale the image
-        scaled_image = image.Scale(new_width, new_height, wx.IMAGE_QUALITY_HIGH)
-        bitmap = wx.Bitmap(scaled_image)
-        image_ctrl = wx.StaticBitmap(panel, bitmap=bitmap)
-        
-        # Layout - center the image in the window
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(image_ctrl, 0, wx.ALL | wx.CENTER, 20)
-        panel.SetSizer(sizer)
-        
-        # Position window with upper right corner at screen's upper right corner
-        display_size = wx.GetDisplaySize()
-        x_pos = display_size.width - window_width
-        y_pos = 0
-        image_frame.SetPosition((x_pos, y_pos))
-        
-        image_frame.Show()
-        
-        print(f"Clinical decision matrix displayed - Window: {window_width}x{window_height}, Image: {new_width}x{new_height}")
-        
-    except Exception as e:
-        wx.MessageBox(f"Error loading image: {e}", "Image Load Error", wx.ICON_ERROR)
 
 
 class BrowserEMRGrabber:
     """Playwright-based EMR data extraction for reliable element grabbing"""
-    
+
     def __init__(self):
         self.driver = None
         self.wait = None
@@ -2653,7 +7180,7 @@ class BrowserEMRGrabber:
         self._cdp_last_check: float = 0.0
         self._pw_thread_id = None
         self._driver_thread_id = None
-    
+
     def _reset_text_caches(self):
         """Clear per-page text caches to avoid stale reads between grabs."""
         self._cache_latest_segment = None
@@ -2702,7 +7229,7 @@ class BrowserEMRGrabber:
                 self._pw_thread_id = current_thread
             return True
         except Exception as exc:
-            print(f"❌ Failed to connect to Chrome DevTools via Playwright: {exc}")
+            print(f"âŒ Failed to connect to Chrome DevTools via Playwright: {exc}")
             if self._cdp_browser is not None:
                 try:
                     self._cdp_browser.close()
@@ -2742,7 +7269,7 @@ class BrowserEMRGrabber:
             except Exception:
                 continue
         return pages[0] if pages else None
-        
+
     def connect_to_chrome(self):
         """Connect to existing Chrome debugging session with retries for transient attach failures."""
         # Reuse existing driver when possible
@@ -2782,9 +7309,9 @@ class BrowserEMRGrabber:
                 self._driver_thread_id = current_thread
 
                 if not self._ensure_emr_tab():
-                    dprint(f"⚠ Connected to Chrome but no EMR tab selected. Current page: {self.driver.current_url}")
+                    dprint(f"âš  Connected to Chrome but no EMR tab selected. Current page: {self.driver.current_url}")
                 else:
-                    dprint(f"✅ Playwright connected to EMR tab: {self.driver.current_url}")
+                    dprint(f"âœ… Playwright connected to EMR tab: {self.driver.current_url}")
                 return True
 
             except Exception as e:
@@ -2803,17 +7330,17 @@ class BrowserEMRGrabber:
                 if transient and attempt < 2:
                     time.sleep(0.6 + 0.3 * attempt)
                     continue
-                print(f"❌ Chrome connection failed: {e}")
+                print(f"âŒ Chrome connection failed: {e}")
                 return False
 
         if last_error:
-            print(f"❌ Chrome connection failed after retries: {last_error}")
+            print(f"âŒ Chrome connection failed after retries: {last_error}")
         return False
-    
+
     def disconnect(self):
         """Cleanup - but don't close the browser session"""
         if self.driver:
-            print("🔗 Keeping Chrome session open for continued EMR use")
+            print("ðŸ”— Keeping Chrome session open for continued EMR use")
             # Don't call driver.quit() - we want to keep the EMR session active
             self.driver = None
             self.wait = None
@@ -2863,6 +7390,8 @@ class BrowserEMRGrabber:
             self._pw_thread_id = None
 
     def fetch_patient_location_summary(self, debug_print=True) -> dict | None:
+        # Location feature disabled
+        return None
         summary: dict = {
             "state": None,
             "state_display": None,
@@ -3152,7 +7681,7 @@ class BrowserEMRGrabber:
                     self.driver.switch_to.window(h)
                     url = self.driver.current_url
                     if self._is_emr_url(url):
-                        print(f"🔀 Switched to EMR tab via window handle: {url}")
+                        print(f"ðŸ”€ Switched to EMR tab via window handle: {url}")
                         return True
                 except Exception:
                     continue
@@ -3172,7 +7701,7 @@ class BrowserEMRGrabber:
                             try:
                                 self.driver.switch_to.window(h)
                                 if self._is_emr_url(self.driver.current_url):
-                                    print(f"🔀 Activated and switched to EMR tab: {self.driver.current_url}")
+                                    print(f"ðŸ”€ Activated and switched to EMR tab: {self.driver.current_url}")
                                     return True
                             except Exception:
                                 continue
@@ -3184,7 +7713,7 @@ class BrowserEMRGrabber:
         except Exception as e:
             print(f"ensure_emr_tab error: {e}")
             return False
-    
+
     def _close_patient_edit_modal(self) -> None:
         """Exit the patient edit modal via the close icon (fallback to Escape)."""
         if not self.driver:
@@ -3266,178 +7795,271 @@ class BrowserEMRGrabber:
         if not self.driver:
             if not self.connect_to_chrome():
                 return None
-        
+
         try:
             # Ensure we're on an EMR tab before extracting
             if not self._ensure_emr_tab():
-                print(f"❌ No EMR tab found. Please open https://emr.forhims.com in your browser (debugging port {CDP_DEBUG_PORT}) and try again.")
-                print(f"📍 Current page: {self.driver.current_url}")
+                print(f"âŒ No EMR tab found. Please open https://emr.forhims.com in your browser (debugging port {CDP_DEBUG_PORT}) and try again.")
+                print(f"ðŸ“ Current page: {self.driver.current_url}")
                 return None
 
             # Always clear cached text snapshots before a new grab to prevent stale values
             self._reset_text_caches()
 
             overall_start = time.perf_counter()
-            dprint("🔍 Starting browser-based Sexual Health grab…")
-            dprint(f"📍 Current page: {self.driver.current_url}")
-            
-            # Define EMR element selectors for Sexual Health data
-            selectors = {
-                'medication_title': get_selector('sexual_health', 'medication', engine='selenium', selector_type='css') or '[data-testid="medication-title"]',
-                'medication_text': get_selector('sexual_health', 'medication_detail', engine='selenium', selector_type='css') or '[data-testid="medication-text"]',
-                'treatment_plan': get_selector('sexual_health', 'treatment_plan', engine='selenium', selector_type='css') or '[data-testid="proposedTreatmentPlan"]',
-                'current_dose': get_selector('sexual_health', 'current_dose', engine='selenium', selector_type='css') or '[data-testid="treatmentPlan"]',
-            }
-            
-            # Additional selectors to try if main ones don't work
-            fallback_selectors = {
-                'medication_alt1': '.medication-name, .med-name, [class*="medication"]',
-                'medication_alt2': '[class*="dose"], [class*="dosage"]',
-                'treatment_alt': '[class*="treatment"], [class*="plan"]',
-            }
-            
+            dprint("ðŸ” Starting browser-based Sexual Health grabâ€¦")
+            dprint(f"ðŸ“ Current page: {self.driver.current_url}")
+
             extracted_data = {}
-            
-            # Try to extract medication information
+
+            # Ranked Playwright narrow selector pilot for Sexual Health.
             t0 = time.perf_counter()
-            medication = self._extract_medication(selectors, fallback_selectors)
+            medication, medication_source, _ = self._resolve_ranked_playwright_value(
+                "sexual_health",
+                "medication",
+                "sexual_health_med",
+                lambda raw: self._extract_medication_from_text(raw) or "",
+            )
             if medication:
                 extracted_data['medication'] = medication
-                dprint(f"   ✅ Extracted medication: '{medication}' ({(time.perf_counter()-t0)*1000:.0f} ms)")
+                dprint(
+                    f"   âœ… Extracted medication: '{medication}' via {medication_source} ({(time.perf_counter()-t0)*1000:.0f} ms)"
+                )
 
             t1 = time.perf_counter()
             med_detail = self._extract_medication_detail_text()
             if med_detail:
                 extracted_data['intake_med_detail'] = med_detail
-                dprint(f"   ✅ Extracted medication detail: '{med_detail}' ({(time.perf_counter()-t1)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted medication detail: '{med_detail}' ({(time.perf_counter()-t1)*1000:.0f} ms)")
 
             intake_med_plain = self._strip_frequency_suffix(medication) if medication else ""
             if intake_med_plain:
                 extracted_data['intake_med_name'] = intake_med_plain
-            
-            # Try to extract effectiveness information (prefer fast text parsing)
+
             t2 = time.perf_counter()
-            # Keep text gathering fast: avoid iframe walks unless Hybrid mode is selected
-            try:
-                if USE_PLAYWRIGHT_FOR_SH:
-                    pre_text = self._get_all_text_across_frames(max_frames=4)
-                else:
-                    pre_text = self._get_page_text() or ""
-            except Exception:
-                pre_text = self._get_page_text() or ""
-            effectiveness = self._extract_effectiveness(full_text=pre_text)
+            effectiveness, effectiveness_source, _ = (
+                self._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "effectiveness",
+                    "sexual_health_effectiveness",
+                    lambda raw: self._extract_effectiveness(full_text=raw) or "",
+                )
+            )
             if effectiveness:
                 extracted_data['effectiveness'] = effectiveness
-                dprint(f"   ✅ Extracted effectiveness: '{effectiveness}' ({(time.perf_counter()-t2)*1000:.0f} ms)")
-            
-            # Try to extract blood pressure
+                dprint(
+                    f"   âœ… Extracted effectiveness: '{effectiveness}' via {effectiveness_source} ({(time.perf_counter()-t2)*1000:.0f} ms)"
+                )
+
             t3 = time.perf_counter()
-            blood_pressure = self._extract_blood_pressure()
+            blood_pressure, blood_pressure_source, _ = (
+                self._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "blood_pressure",
+                    "sexual_health_bp",
+                    lambda raw: normalize_blood_pressure_value(raw) or "",
+                )
+            )
+            if not blood_pressure:
+                blood_pressure = "nr"
             if blood_pressure:
                 extracted_data['blood_pressure'] = blood_pressure
-                dprint(f"   ✅ Extracted blood pressure: '{blood_pressure}' ({(time.perf_counter()-t3)*1000:.0f} ms)")
-            
+                dprint(
+                    f"   âœ… Extracted blood pressure: '{blood_pressure}' via {blood_pressure_source} ({(time.perf_counter()-t3)*1000:.0f} ms)"
+                )
+
             # Try to extract diagnoses from notes
             t4 = time.perf_counter()
             diagnoses = self._extract_diagnoses()
             if diagnoses:
                 extracted_data['diagnoses'] = diagnoses
-                dprint(f"   ✅ Extracted diagnoses: {diagnoses} ({(time.perf_counter()-t4)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted diagnoses: {diagnoses} ({(time.perf_counter()-t4)*1000:.0f} ms)")
 
             t5 = time.perf_counter()
             current_med_name, current_med_detail = self._extract_current_treatment_summary()
             if current_med_name:
                 extracted_data['current_med_name'] = current_med_name
-                dprint(f"   ✅ Current medication: '{current_med_name}' ({(time.perf_counter()-t5)*1000:.0f} ms)")
+                dprint(f"   âœ… Current medication: '{current_med_name}' ({(time.perf_counter()-t5)*1000:.0f} ms)")
             if current_med_detail:
                 extracted_data['current_med_detail'] = current_med_detail
-                dprint(f"   ✅ Current detail: '{current_med_detail}'")
-            
-            # Extract hair loss data if present
+                dprint(f"   âœ… Current detail: '{current_med_detail}'")
+
             t6 = time.perf_counter()
-            hair_loss_location = self._extract_hair_loss_location()
+            hair_loss_location, hair_loss_location_source, _ = (
+                self._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "hair_loss_location",
+                    "hair_loss_location",
+                    lambda raw: extract_hair_loss_location_from_text(raw) or "",
+                )
+            )
             if hair_loss_location:
                 extracted_data['hair_loss_location'] = hair_loss_location
-                dprint(f"   ✅ Extracted hair loss location: '{hair_loss_location}' ({(time.perf_counter()-t6)*1000:.0f} ms)")
-            
+                dprint(
+                    f"   âœ… Extracted hair loss location: '{hair_loss_location}' via {hair_loss_location_source} ({(time.perf_counter()-t6)*1000:.0f} ms)"
+                )
+
             t7 = time.perf_counter()
-            hair_loss_additional_sxx = self._extract_hair_loss_additional_sxx()
+            hair_loss_additional_sxx, hair_loss_additional_sxx_source, _ = (
+                self._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "hair_loss_additional_sxx",
+                    "hair_loss_additional_sxx",
+                    lambda raw: extract_hair_loss_additional_sxx_from_text(raw) or "",
+                )
+            )
             if hair_loss_additional_sxx:
                 extracted_data['hair_loss_additional_sxx'] = hair_loss_additional_sxx
-                dprint(f"   ✅ Extracted hair loss additional sxx: '{hair_loss_additional_sxx}' ({(time.perf_counter()-t7)*1000:.0f} ms)")
+                dprint(
+                    f"   âœ… Extracted hair loss additional sxx: '{hair_loss_additional_sxx}' via {hair_loss_additional_sxx_source} ({(time.perf_counter()-t7)*1000:.0f} ms)"
+                )
 
             # --- SH Initial visit fields ---
-            full_text = self._get_page_text()
+            full_text = self._get_sh_wide_fallback_text()
 
             t8 = time.perf_counter()
             patient_age = self._extract_patient_age(full_text=full_text)
             if patient_age:
                 extracted_data['patient_age'] = patient_age
-                dprint(f"   ✅ Extracted patient age: '{patient_age}' ({(time.perf_counter()-t8)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted patient age: '{patient_age}' ({(time.perf_counter()-t8)*1000:.0f} ms)")
 
             t9 = time.perf_counter()
             visit_type = self._extract_visit_type_from_header()
             if visit_type:
                 extracted_data['visit_type'] = visit_type
-                dprint(f"   ✅ Extracted visit type: '{visit_type}' ({(time.perf_counter()-t9)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted visit type: '{visit_type}' ({(time.perf_counter()-t9)*1000:.0f} ms)")
 
             t10 = time.perf_counter()
             ed_onset = self._extract_ed_onset(full_text=full_text)
             if ed_onset:
                 extracted_data['rapidity_of_onset'] = ed_onset
-                dprint(f"   ✅ Extracted ED onset: '{ed_onset}' ({(time.perf_counter()-t10)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted ED onset: '{ed_onset}' ({(time.perf_counter()-t10)*1000:.0f} ms)")
 
             t11 = time.perf_counter()
             ed_frequency = self._extract_ed_frequency(full_text=full_text)
             if ed_frequency:
                 extracted_data['frequency'] = ed_frequency
-                dprint(f"   ✅ Extracted ED frequency: '{ed_frequency}' ({(time.perf_counter()-t11)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted ED frequency: '{ed_frequency}' ({(time.perf_counter()-t11)*1000:.0f} ms)")
 
             t12 = time.perf_counter()
             ed_description = self._extract_ed_description(full_text=full_text)
             if ed_description:
                 extracted_data['ed_description'] = ed_description
-                dprint(f"   ✅ Extracted ED description: '{ed_description}' ({(time.perf_counter()-t12)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted ED description: '{ed_description}' ({(time.perf_counter()-t12)*1000:.0f} ms)")
 
             t13 = time.perf_counter()
             ed_characterization = self._extract_ed_characterization(full_text=full_text)
             if ed_characterization:
                 extracted_data['ed_characterization'] = ed_characterization
-                dprint(f"   ✅ Extracted ED characterization: '{ed_characterization}' ({(time.perf_counter()-t13)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted ED characterization: '{ed_characterization}' ({(time.perf_counter()-t13)*1000:.0f} ms)")
 
             t14 = time.perf_counter()
             ehs = self._extract_ehs_scores(full_text=full_text)
             if ehs:
                 extracted_data['ehs'] = ehs
-                dprint(f"   ✅ Extracted EHS: '{ehs}' ({(time.perf_counter()-t14)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted EHS: '{ehs}' ({(time.perf_counter()-t14)*1000:.0f} ms)")
 
             t15 = time.perf_counter()
             pep = self._extract_pep_score(full_text=full_text)
             if pep:
                 extracted_data['pep_score'] = pep
-                dprint(f"   ✅ Extracted PEP score: '{pep}' ({(time.perf_counter()-t15)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted PEP score: '{pep}' ({(time.perf_counter()-t15)*1000:.0f} ms)")
 
             t16 = time.perf_counter()
             past_treatments = self._extract_past_ed_treatments(full_text=full_text)
             if past_treatments:
                 extracted_data['past_ed_treatments'] = past_treatments
-                dprint(f"   ✅ Extracted past treatments: '{past_treatments}' ({(time.perf_counter()-t16)*1000:.0f} ms)")
+                dprint(f"   âœ… Extracted past treatments: '{past_treatments}' ({(time.perf_counter()-t16)*1000:.0f} ms)")
 
             t17 = time.perf_counter()
             ros_pos = self._extract_ros_positives(full_text=full_text)
             extracted_data['ros_positives'] = ros_pos if ros_pos else "none"
             ros_neg = self._extract_ros_negatives(ros_pos)
             extracted_data['ros_negatives'] = ros_neg
-            dprint(f"   ✅ Extracted ROS: +'{ros_pos}' / -'{ros_neg}' ({(time.perf_counter()-t17)*1000:.0f} ms)")
+            dprint(f"   âœ… Extracted ROS: +'{ros_pos}' / -'{ros_neg}' ({(time.perf_counter()-t17)*1000:.0f} ms)")
 
             if full_text:
                 extracted_data['full_text'] = full_text
-            
-            dprint(f"✅ Browser grab completed in {(time.perf_counter()-overall_start)*1000:.0f} ms. Found {len(extracted_data)} data types.")
+
+            dprint(f"âœ… Browser grab completed in {(time.perf_counter()-overall_start)*1000:.0f} ms. Found {len(extracted_data)} data types.")
             return extracted_data
-            
+
         except Exception as e:
-            print(f"❌ Browser grab error: {e}")
+            print(f"âŒ Browser grab error: {e}")
+            return None
+
+    def grab_hair_loss_data(self):
+        """Browser-driven Hair Loss extraction using ranked Playwright selectors first."""
+        if not self.driver:
+            if not self.connect_to_chrome():
+                return None
+
+        try:
+            if not self._ensure_emr_tab():
+                print(
+                    f"âŒ No EMR tab found. Please open https://emr.forhims.com in your browser (debugging port {CDP_DEBUG_PORT}) and try again."
+                )
+                print(f"ðŸ“ Current page: {self.driver.current_url}")
+                return None
+
+            self._reset_text_caches()
+
+            overall_start = time.perf_counter()
+            dprint("ðŸ” Starting browser-based Hair Loss grabâ€¦")
+            dprint(f"ðŸ“ Current page: {self.driver.current_url}")
+
+            extracted_data = {}
+
+            t0 = time.perf_counter()
+            medication, medication_source, _ = self._resolve_ranked_playwright_value(
+                "hair_loss",
+                "medication",
+                "hair_medication",
+                lambda raw: extract_hair_medication_from_text(raw) or "",
+            )
+            if medication:
+                extracted_data["medication"] = medication
+                dprint(
+                    f"   âœ… Extracted medication: '{medication}' via {medication_source} ({(time.perf_counter()-t0)*1000:.0f} ms)"
+                )
+
+            t1 = time.perf_counter()
+            response, response_source, _ = self._resolve_ranked_playwright_value(
+                "hair_loss",
+                "response",
+                "hair_response",
+                lambda raw: extract_hair_response_from_text(raw) or "",
+            )
+            if response:
+                extracted_data["response"] = response
+                dprint(
+                    f"   âœ… Extracted response: '{response}' via {response_source} ({(time.perf_counter()-t1)*1000:.0f} ms)"
+                )
+
+            t2 = time.perf_counter()
+            symptoms, symptoms_source, _ = self._resolve_ranked_playwright_value(
+                "hair_loss",
+                "symptoms",
+                "hair_symptoms",
+                lambda raw: extract_hair_symptoms_from_text(raw) or "",
+            )
+            if symptoms:
+                extracted_data["symptoms"] = symptoms
+                dprint(
+                    f"   âœ… Extracted symptoms: '{symptoms}' via {symptoms_source} ({(time.perf_counter()-t2)*1000:.0f} ms)"
+                )
+
+            full_text = self._get_sh_wide_fallback_text()
+            if full_text:
+                extracted_data["full_text"] = full_text
+
+            dprint(
+                f"âœ… Hair Loss browser grab completed in {(time.perf_counter()-overall_start)*1000:.0f} ms. Found {len(extracted_data)} data types."
+            )
+            return extracted_data
+
+        except Exception as e:
+            print(f"âŒ Hair Loss browser grab error: {e}")
             return None
 
     def _parse_intake_timestamp(self, text: str) -> Optional[datetime]:
@@ -3509,12 +8131,13 @@ class BrowserEMRGrabber:
             return self._cache_latest_segment
         self._cache_latest_segment = page_text
         return self._cache_latest_segment
-    
+
     def _extract_medication(self, selectors, fallback_selectors):
         """Extract medication quickly via DOM queries with Playwright; fall back to text parsing when needed.
-        The returned string appends a simple frequency suffix (", daily" or ", as-needed").
+        For Sexual Health and Performance Anxiety, the returned string appends a
+        simple frequency suffix (", daily" or ", as-needed").
         """
-        print("   🔍 Looking for medication-title element (including iframes)...")
+        print("   ðŸ” Looking for medication-title element (including iframes)...")
 
         latest_segment = self._get_latest_intake_text_segment() or ""
         latest_segment_lower = latest_segment.lower()
@@ -3533,7 +8156,7 @@ class BrowserEMRGrabber:
         try:
             # Ensure we're in the right frame where the element lives
             if not self._switch_to_frame_with_element(By.CSS_SELECTOR, selector, timeout_each=1.5, max_depth=3):
-                print("   ❌ medication-title not found in any frame")
+                print("   âŒ medication-title not found in any frame")
                 # Before returning, ensure we reset context
                 self._switch_to_default()
                 return ""
@@ -3541,65 +8164,40 @@ class BrowserEMRGrabber:
             # Found; get the element and read all text (innerText preserves line breaks better)
             element = self.driver.find_element(By.CSS_SELECTOR, selector)
             full_text = (element.get_attribute('innerText') or element.text or '').strip()
-            print(f"   ✅ medication-title text: '{full_text}'")
+            print(f"   âœ… medication-title text: '{full_text}'")
 
             if full_text:
                 # Normalize NBSP and build lines
                 norm_text = full_text.replace('\xa0', ' ')
                 lines = [line.strip() for line in norm_text.split('\n') if line.strip()]
-                # Regex detector for doses per month
-                doses_re = re.compile(r"(\d+)\s*doses?\s*per\s*month", re.IGNORECASE)
-                # Global flag and value based on any instance of the phrase in the element
-                doses_match_elem = doses_re.search(norm_text)
-                doses_in_elem = int(doses_match_elem.group(1)) if doses_match_elem else None
-                print(f"      ⏱ doses_in_elem: {doses_in_elem}")
 
                 # Also try to inspect a nearby container (parent) for the frequency line
-                doses_in_container = None
+                container_text = ""
                 try:
                     container = element.find_element(By.XPATH, "ancestor::*[self::div or self::section or self::article][1]")
                     container_text = (container.get_attribute('innerText') or container.text or '').replace('\xa0', ' ')
-                    dm = doses_re.search(container_text)
-                    doses_in_container = int(dm.group(1)) if dm else None
-                    print(f"      ⏱ doses_in_container: {doses_in_container}")
                 except Exception as ce:
-                    print(f"      ⚠️ Container scan failed: {ce}")
+                    print(f"      âš ï¸ Container scan failed: {ce}")
 
                 # Fallback to page body if needed
-                doses_in_body = None
-                if doses_in_elem is None and doses_in_container is None:
-                    try:
-                        source = latest_segment if latest_segment else (self._get_page_text() or '')
-                        body_text = source.replace('\xa0', ' ')
-                        dm_body = doses_re.search(body_text)
-                        doses_in_body = int(dm_body.group(1)) if dm_body else None
-                        print(f"      ⏱ doses_in_body: {doses_in_body}")
-                    except Exception as be:
-                        print(f"      ⚠️ Body scan failed: {be}")
+                body_text = ""
+                try:
+                    source = latest_segment if latest_segment else (self._get_page_text() or '')
+                    body_text = source.replace('\xa0', ' ')
+                except Exception as be:
+                    print(f"      âš ï¸ Body scan failed: {be}")
 
                 # Decide frequency from the best-available value
                 def compute_frequency(next_line: str) -> str:
-                    nl = (next_line or '').lower()
-                    # Next-line probe
-                    next_line_val = None
-                    try:
-                        m = doses_re.search(nl)
-                        next_line_val = int(m.group(1)) if m else None
-                    except Exception:
-                        next_line_val = None
-                    # Prefer element value, then container, then next-line, then body
-                    for v, src in [
-                        (doses_in_elem, 'elem'),
-                        (doses_in_container, 'container'),
-                        (next_line_val, 'next-line'),
-                        (doses_in_body, 'body'),
-                    ]:
-                        if v is not None:
-                            print(f"      🔎 frequency source: {src} -> {v} doses/month")
-                            return ", daily" if v >= 30 else ", as-needed"
-                    # Default if nothing detected
-                    print("      🔎 frequency source: none -> default as-needed")
-                    return ", as-needed"
+                    suffix = infer_medication_frequency_suffix_from_text(
+                        norm_text,
+                        container_text,
+                        next_line,
+                        body_text,
+                        group=group,
+                    )
+                    print(f"      ðŸ”Ž frequency suffix inferred: {suffix}")
+                    return suffix
 
                 def with_frequency(base_line: str, idx: int) -> str:
                     # Use computed frequency from multiple scopes
@@ -3607,7 +8205,7 @@ class BrowserEMRGrabber:
                     suffix = compute_frequency(next_line)
                     cleaned_line = self._sanitize_medication_line(base_line) or base_line.strip()
                     result = f"{cleaned_line}{suffix}"
-                    print(f"      ➕ Appending frequency (next='{next_line}'): '{result}'")
+                    print(f"      âž• Appending frequency (next='{next_line}'): '{result}'")
                     return result
 
                 # Primary pass: lines with known keywords and mg
@@ -3621,7 +8219,7 @@ class BrowserEMRGrabber:
                     print(f"      Checking line: '{line}' -> kws={found_keywords}, mg={has_mg}, nums={has_numbers}")
                     if found_keywords and has_mg and has_numbers:
                         result = with_frequency(line, idx)
-                        print(f"   🎯 MATCH! Returning: '{result}'")
+                        print(f"   ðŸŽ¯ MATCH! Returning: '{result}'")
                         return result
 
                 # Fallback: first line with 'mg' and numbers
@@ -3631,28 +8229,19 @@ class BrowserEMRGrabber:
                         continue
                     if 'mg' in lower and any(ch.isdigit() for ch in line):
                         result = with_frequency(line, idx)
-                        print(f"   🎯 Fallback MATCH (no keyword): Returning: '{result}'")
+                        print(f"   ðŸŽ¯ Fallback MATCH (no keyword): Returning: '{result}'")
                         return result
 
-            print("   ⚠️ medication-title element present but no matching line found")
+            print("   âš ï¸ medication-title element present but no matching line found")
         except Exception as e:
-            print(f"   ❌ Medication extraction error: {e}")
+            print(f"   âŒ Medication extraction error: {e}")
         finally:
             # Always reset back to default content for subsequent operations
             self._switch_to_default()
 
-        # If Selenium path didn't return, try Playwright as a fallback (can be slower)
-        if USE_PLAYWRIGHT_FOR_MED and sync_playwright is not None:
-            try:
-                med_pl = self._extract_medication_playwright(group=group)
-                if med_pl:
-                    return med_pl
-            except Exception as e:
-                print(f"   ⚠️ Playwright medication grab failed: {e}")
-
         # As a last resort, list visible medication-related elements in any frame for debugging
         try:
-            print("   🔍 Listing elements with 'medication' in data-testid (any frame)...")
+            print("   ðŸ” Listing elements with 'medication' in data-testid (any frame)...")
             # Search default first
             self._switch_to_default()
             elems = self.driver.find_elements(By.CSS_SELECTOR, '[data-testid*="medication"]')
@@ -3679,84 +8268,10 @@ class BrowserEMRGrabber:
                     except Exception:
                         pass
         except Exception as e2:
-            print(f"   ❌ Debug listing error: {e2}")
+            print(f"   âŒ Debug listing error: {e2}")
 
         return ""
 
-    def _extract_medication_playwright(self, group: str = 'sexual_health') -> str:
-        """Use Playwright (connected to existing Chrome via CDP) to read
-        [data-testid="medication-title"]. Returns an empty string if not found.
-
-        Also attempts to infer frequency from nearby text: if "30 doses per month"
-        appears in the medication text block or page content, appends ", daily",
-        otherwise appends ", as-needed".
-        """
-        try:
-            if sync_playwright is None:
-                return ""
-            with sync_playwright() as p:  # type: ignore
-                cdp_url = f"http://127.0.0.1:{CDP_DEBUG_PORT}"
-                browser = p.chromium.connect_over_cdp(cdp_url)
-                try:
-                    target_page = None
-                    # Find an EMR page among existing contexts/pages
-                    for context in browser.contexts:
-                        for page in context.pages:
-                            url = page.url or ""
-                            if self._is_emr_url(url):
-                                target_page = page
-                                break
-                        if target_page:
-                            break
-
-                    if not target_page:
-                        print("   ⚠️ Playwright: EMR page not found in existing Chrome session")
-                        return ""
-
-                    sel = get_selector(group, 'medication', engine='playwright', selector_type='css') or '[data-testid="medication-title"]'
-                    locator = target_page.locator(sel)
-                    text_val = ""
-                    try:
-                        # Prefer inner_text for preserving spacing/line breaks
-                        text_val = locator.first.inner_text(timeout=1500).strip()
-                    except Exception:
-                        # Try text_content as fallback
-                        try:
-                            text_val = (locator.first.text_content(timeout=1500) or "").strip()
-                        except Exception:
-                            text_val = ""
-
-                    if not text_val:
-                        return ""
-
-                    # Determine frequency from medication-text block or page HTML
-                    freq_suffix = ", as-needed"
-                    try:
-                        detail_sel = get_selector(group, 'medication_detail', engine='playwright', selector_type='css') or '[data-testid="medication-text"]'
-                        med_text_loc = target_page.locator(detail_sel)
-                        med_text_lower = ""
-                        try:
-                            med_text_lower = (med_text_loc.first.inner_text(timeout=800) or "").lower()
-                        except Exception:
-                            med_text_lower = (target_page.content() or "").lower()
-                        if "30 doses per month" in med_text_lower:
-                            freq_suffix = ", daily"
-                    except Exception:
-                        pass
-
-                    cleaned_text = self._sanitize_medication_line(text_val) or text_val.strip()
-                    result = f"{cleaned_text}{freq_suffix}"
-                    print(f"   ✅ Playwright medication-title: '{result}'")
-                    return result
-                finally:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"   ❌ Playwright connection/use error: {e}")
-            return ""
-    
     def _extract_medication_detail_text(self) -> str:
         selector = '[data-testid="medication-text"]'
         try:
@@ -3771,7 +8286,7 @@ class BrowserEMRGrabber:
             element = self.driver.find_element(By.CSS_SELECTOR, selector)
             return (element.get_attribute('innerText') or element.text or '').strip()
         except Exception as e:
-            print(f"   ❌ Medication detail extraction error: {e}")
+            print(f"   âŒ Medication detail extraction error: {e}")
             return ""
         finally:
             try:
@@ -3836,7 +8351,7 @@ class BrowserEMRGrabber:
         Fast-first approach across multiple question phrasings; returns 'Yes'/'No' or None.
         """
         try:
-            dprint("   🔍 Extracting treatment effectiveness…")
+            dprint("   ðŸ” Extracting treatment effectivenessâ€¦")
             t_start = time.perf_counter()
 
             def normalize_yes_no(value: Optional[str]) -> Optional[str]:
@@ -3967,16 +8482,6 @@ return null;
                 if normalized:
                     return normalized
 
-            # 4b) Playwright fallback (off by default unless enabled)
-            if USE_PLAYWRIGHT_FOR_SH and sync_playwright is not None:
-                try:
-                    val = self._extract_effectiveness_playwright()
-                    if val:
-                        dprint("      ✅ Effectiveness via Playwright fallback")
-                        return val
-                except Exception as e:
-                    dprint(f"      ⚠️ Playwright effectiveness read failed: {e}")
-
             # 5) Last resort: scan common chip class across frames and pick a visible 'Yes'/'No'
             class_selectors = ['div.css-1rynq56.r-cqee49.r-b88u0q']
             for sel in class_selectors:
@@ -4012,76 +8517,8 @@ return null;
                     return normalized
 
         except Exception as e:
-            dprint(f"   ❌ Effectiveness extraction error: {e}")
-        
-        return None
+            dprint(f"   âŒ Effectiveness extraction error: {e}")
 
-    def _extract_effectiveness_playwright(self) -> Optional[str]:
-        """Use Playwright (existing Chrome via CDP) to read the Yes/No chip near the effectiveness question."""
-        try:
-            if sync_playwright is None:
-                return None
-            with sync_playwright() as p:  # type: ignore
-                cdp_url = f"http://127.0.0.1:{CDP_DEBUG_PORT}"
-                browser = p.chromium.connect_over_cdp(cdp_url)
-                try:
-                    target_page = None
-                    for context in browser.contexts:
-                        for page in context.pages:
-                            url = page.url or ""
-                            if self._is_emr_url(url):
-                                target_page = page
-                                break
-                        if target_page:
-                            break
-                    if not target_page:
-                        return None
-
-                    # Try each known alias; also include provided concrete labels
-                    aliases = list(EFFECTIVENESS_QUESTION_ALIASES) + [
-                        "How’s your sexual health treatment going so far?",
-                        "Are you getting the results you want?",
-                    ]
-                    for alias in aliases:
-                        try:
-                            # Anchor on the question text (case-insensitive) via XPath, then find the row and right column chips
-                            q_xpath = (
-                                "xpath=//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '"
-                                + alias.lower()
-                                + "')]"
-                            )
-                            qloc = target_page.locator(q_xpath).first
-                            if not qloc or qloc.count() == 0:
-                                continue
-                            # Climb to row, then to right column
-                            row = qloc.locator(
-                                "xpath=ancestor::div[contains(@class,'py-4')][1]"
-                            )
-                            right = row.locator(
-                                "css=div.flex-1.w-auto, div.flex-1 >> nth=-1"
-                            )
-                            chip = right.locator("css=div.css-1rynq56.r-cqee49.r-b88u0q").first
-                            txt = (chip.text_content(timeout=1000) or "").strip()
-                            if txt and txt.lower() in ("yes", "no"):
-                                return txt.capitalize()
-                        except Exception:
-                            continue
-
-                    # Fallback: provided selector path without anchoring
-                    try:
-                        chip2 = target_page.locator(".flex-1 > .css-1hj5o6h > .css-1rynq56").first
-                        txt2 = (chip2.text_content(timeout=1000) or "").strip()
-                        if txt2 and txt2.lower() in ("yes", "no"):
-                            return txt2.capitalize()
-                    except Exception:
-                        pass
-                finally:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
-        except Exception:
-            return None
         return None
 
     # --- Robust DOM click for "Get next task" ---
@@ -4149,15 +8586,15 @@ return null;
             if not self._ensure_emr_tab():
                 return False
 
-            # Try Playwright first if available and preferred
-            if USE_PLAYWRIGHT_FOR_MED and sync_playwright is not None:
+            # Try Playwright first when available
+            if sync_playwright is not None:
                 try:
                     playwright_success = self._click_get_next_task_playwright()
                     if playwright_success:
                         return True
-                    print("   ⚠️ Playwright primary click failed; trying alternate strategy")
+                    print("   âš ï¸ Playwright primary click failed; trying alternate strategy")
                 except Exception as e:
-                    print(f"   ⚠️ Playwright click error; trying alternate strategy: {e}")
+                    print(f"   âš ï¸ Playwright click error; trying alternate strategy: {e}")
 
             wait = WebDriverWait(self.driver, 4)
 
@@ -4326,7 +8763,7 @@ return null;
         try:
             if sync_playwright is None:
                 return False
-                
+
             with sync_playwright() as p:  # type: ignore
                 cdp_url = f"http://127.0.0.1:{CDP_DEBUG_PORT}"
                 browser = p.chromium.connect_over_cdp(cdp_url)
@@ -4343,7 +8780,7 @@ return null;
                             break
 
                     if not target_page:
-                        print("   ⚠️ Playwright: EMR page not found in existing Chrome session")
+                        print("   âš ï¸ Playwright: EMR page not found in existing Chrome session")
                         return False
 
                     # Get selector from grab_points.py for Playwright
@@ -4358,16 +8795,16 @@ return null;
                     # Try to click the button
                     locator = target_page.locator(playwright_selector)
                     locator.first.click(timeout=3000)
-                    print(f"   ✅ Playwright clicked 'Get next task' button using selector: {playwright_selector}")
+                    print(f"   âœ… Playwright clicked 'Get next task' button using selector: {playwright_selector}")
                     return True
-                    
+
                 finally:
                     try:
                         browser.close()
                     except Exception:
                         pass
         except Exception as e:
-            print(f"   ❌ Playwright 'Get next task' click error: {e}")
+            print(f"   âŒ Playwright 'Get next task' click error: {e}")
             return False
 
             # Try default context and then dive into iframes
@@ -4409,7 +8846,7 @@ return null;
         except Exception as e:
             print(f"click_get_next_task error: {e}")
             return False
-    
+
     def _extract_blood_pressure(self):
         """Extract blood pressure information from the provided CSS class.
         Prefer exact element text like '90-139/50-80' or a reading like '120/80'.
@@ -4421,8 +8858,6 @@ return null;
                 if not text:
                     return None
                 sentinel = "None of the above - Patient is not required to report BP"
-                if sentinel in text:
-                    return 'nr'
                 # Plausible BP regexes
                 dash = r"[-\u2012\u2013\u2014\u2212]"
                 range_pat = re.compile(rf"\b(\d{{2,3}})\s*{dash}\s*(\d{{2,3}})\s*/\s*(\d{{2,3}})\s*{dash}\s*(\d{{2,3}})\b")
@@ -4434,6 +8869,34 @@ return null;
                 for i, l in enumerate(low):
                     if ('blood pressure' in l) or (' bp' in l) or ('bp:' in l) or ('blood-pressure' in l):
                         anchors.append(i)
+                for anchor_idx in anchors:
+                    for j in range(anchor_idx + 1, min(len(lines), anchor_idx + 6)):
+                        candidate = lines[j].strip()
+                        if not candidate:
+                            continue
+                        if candidate == sentinel:
+                            return "nr"
+                        if candidate.lower().startswith("show unselected answers"):
+                            break
+                        m = range_pat.search(candidate)
+                        if m:
+                            s1, s2, d1, d2 = map(int, m.groups())
+                            if (
+                                70 <= s1 <= 250
+                                and 70 <= s2 <= 250
+                                and 30 <= d1 <= 150
+                                and 30 <= d2 <= 150
+                                and s1 <= s2
+                                and d1 <= d2
+                            ):
+                                return f"{s1}-{s2}/{d1}-{d2}"
+                        m = single_pat.search(candidate)
+                        if m:
+                            s, d = map(int, m.groups())
+                            if 70 <= s <= 250 and 30 <= d <= 150 and s > d:
+                                return f"{s}/{d}"
+                if sentinel in text and not anchors:
+                    return "nr"
                 windows = []
                 for a in anchors or [0]:
                     windows.append((max(0, a), min(len(lines), a + 80)))
@@ -4449,6 +8912,23 @@ return null;
                         s, d = map(int, m.groups())
                         if 70 <= s <= 250 and 30 <= d <= 150 and s > d:
                             return f"{s}/{d}"
+                m = range_pat.search(text)
+                if m:
+                    s1, s2, d1, d2 = map(int, m.groups())
+                    if (
+                        70 <= s1 <= 250
+                        and 70 <= s2 <= 250
+                        and 30 <= d1 <= 150
+                        and 30 <= d2 <= 150
+                        and s1 <= s2
+                        and d1 <= d2
+                    ):
+                        return f"{s1}-{s2}/{d1}-{d2}"
+                m = single_pat.search(text)
+                if m:
+                    s, d = map(int, m.groups())
+                    if 70 <= s <= 250 and 30 <= d <= 150 and s > d:
+                        return f"{s}/{d}"
                 return None
 
             if FAST_MODE_BP:
@@ -4459,10 +8939,7 @@ return null;
                     pre_text = None
                 if not pre_text:
                     try:
-                        if USE_PLAYWRIGHT_FOR_SH:
-                            pre_text = self._get_all_text_across_frames(max_frames=3)
-                        else:
-                            pre_text = self._get_page_text() or ''
+                        pre_text = self._get_page_text() or ""
                     except Exception:
                         pre_text = ''
                 quick = _bp_from_text(pre_text)
@@ -4475,23 +8952,14 @@ return null;
                     if body_text and body_text != pre_text:
                         quick = _bp_from_text(body_text)
                 if quick:
-                    print(f"   ✅ BP (fast text): '{quick}' ({(time.perf_counter()-fast_start)*1000:.0f} ms)")
+                    print(f"   âœ… BP (fast text): '{quick}' ({(time.perf_counter()-fast_start)*1000:.0f} ms)")
                     return quick
-                # Playwright fallback before giving up in fast mode
-                if USE_PLAYWRIGHT_FOR_SH and sync_playwright is not None:
-                    try:
-                        val = self._extract_blood_pressure_playwright()
-                        if val:
-                            print(f"   ✅ BP (Playwright): '{val}'")
-                            return val
-                    except Exception as e:
-                        print(f"   ⚠️ BP Playwright fallback failed: {e}")
                 # In fast mode, skip slow DOM scans entirely
                 elapsed_ms = (time.perf_counter()-fast_start)*1000
-                print(f"   ⏭️ BP fast mode (no match in text after {elapsed_ms:.0f} ms) → returning 'nr'")
+                print(f"   â­ï¸ BP fast mode (no match in text after {elapsed_ms:.0f} ms) â†’ returning 'nr'")
                 return 'nr'
 
-            print("   🔍 Extracting blood pressure via class selector…")
+            print("   ðŸ” Extracting blood pressure via class selectorâ€¦")
             latest_segment = self._get_latest_intake_text_segment() or ''
             latest_segment_lower = latest_segment.lower()
             class_selectors = [
@@ -4561,7 +9029,7 @@ return null;
                 if answers:
                     chosen = pick_bp_text(answers)
                     if chosen:
-                        print(f"   ✅ Blood pressure (answers near question '{q}'): '{chosen}'")
+                        print(f"   âœ… Blood pressure (answers near question '{q}'): '{chosen}'")
                         return chosen
                 # Positional right-half text near question
                 try:
@@ -4571,7 +9039,7 @@ return null;
                 if near:
                     chosen = pick_bp_text(near)
                     if chosen:
-                        print(f"   ✅ Blood pressure (positional near '{q}'): '{chosen}'")
+                        print(f"   âœ… Blood pressure (positional near '{q}'): '{chosen}'")
                         return chosen
 
             # 1) Try within a frame that contains the selector
@@ -4587,7 +9055,7 @@ return null;
                         print(f"      Found {len(texts)} candidates in-frame for '{sel}' -> {texts[:3]}")
                         chosen = pick_bp_text(texts)
                         if chosen:
-                            print(f"   ✅ Blood pressure: '{chosen}'")
+                            print(f"   âœ… Blood pressure: '{chosen}'")
                             return chosen
                 except Exception as e:
                     print(f"      Selector '{sel}' search error: {e}")
@@ -4603,7 +9071,7 @@ return null;
                 texts = texts_pref or [t for t in texts if t]
                 chosen = pick_bp_text(texts)
                 if chosen:
-                    print(f"   ✅ Blood pressure (default): '{chosen}'")
+                    print(f"   âœ… Blood pressure (default): '{chosen}'")
                     return chosen
             except Exception:
                 pass
@@ -4621,7 +9089,7 @@ return null;
                     texts = texts_pref or [t for t in texts if t]
                     chosen = pick_bp_text(texts)
                     if chosen:
-                        print(f"   ✅ Blood pressure (frame): '{chosen}'")
+                        print(f"   âœ… Blood pressure (frame): '{chosen}'")
                         return chosen
                 except Exception:
                     pass
@@ -4635,7 +9103,7 @@ return null;
             #    then try regex with date/physiology guards to avoid false positives like '11/09'.
             body = latest_segment if latest_segment else (self._get_page_text() or '')
             if sentinel in body:
-                print("   ✅ BP sentinel text found in body; returning 'nr'")
+                print("   âœ… BP sentinel text found in body; returning 'nr'")
                 return 'nr'
 
             # If we're on a Sexual Health page/template but there is no BP content at all,
@@ -4656,7 +9124,7 @@ return null;
                 (" bp:" in low_body)
             )
             if (visit == 'Sexual Health') and not bp_token_present:
-                print("   ✅ No BP questions or values detected on Sexual Health page; defaulting to 'nr'")
+                print("   âœ… No BP questions or values detected on Sexual Health page; defaulting to 'nr'")
                 return 'nr'
 
             # Try range-like first with plausibility checks
@@ -4666,10 +9134,10 @@ return null;
                 if (70 <= s1 <= 250 and 70 <= s2 <= 250 and 30 <= d1 <= 150 and 30 <= d2 <= 150
                         and s1 <= s2 and d1 <= d2):
                     val = m.group(0).strip()
-                    print(f"   🎯 BP range candidate accepted: '{val}'")
+                    print(f"   ðŸŽ¯ BP range candidate accepted: '{val}'")
                     return val
                 else:
-                    print(f"   ↩︎ Ignoring implausible BP range '{m.group(0)}'")
+                    print(f"   â†©ï¸Ž Ignoring implausible BP range '{m.group(0)}'")
 
             # Then single reading like 120/80, but avoid dates like 11/09/1975 using negative lookahead
             single_pat = re.compile(r"\b(\d{2,3})\s*/\s*(\d{2,3})\b(?!\s*/\s*\d{2,4})")
@@ -4677,72 +9145,16 @@ return null;
                 s, d = map(int, m.groups())
                 if 70 <= s <= 250 and 30 <= d <= 150 and s > d:
                     val = m.group(0).strip()
-                    print(f"   🎯 BP single candidate accepted: '{val}'")
+                    print(f"   ðŸŽ¯ BP single candidate accepted: '{val}'")
                     return val
                 else:
-                    print(f"   ↩︎ Ignoring implausible BP single '{m.group(0)}'")
+                    print(f"   â†©ï¸Ž Ignoring implausible BP single '{m.group(0)}'")
 
         except Exception as e:
-            print(f"   ❌ Blood pressure extraction error: {e}")
+            print(f"   âŒ Blood pressure extraction error: {e}")
 
         return 'nr'  # Default value if nothing matched
 
-    def _extract_blood_pressure_playwright(self) -> Optional[str]:
-        """Use Playwright to read the selected BP chip near the BP question."""
-        try:
-            if sync_playwright is None:
-                return None
-            with sync_playwright() as p:  # type: ignore
-                cdp_url = f"http://127.0.0.1:{CDP_DEBUG_PORT}"
-                browser = p.chromium.connect_over_cdp(cdp_url)
-                try:
-                    target_page = None
-                    for context in browser.contexts:
-                        for page in context.pages:
-                            url = page.url or ""
-                            if self._is_emr_url(url):
-                                target_page = page
-                                break
-                        if target_page:
-                            break
-                    if not target_page:
-                        return None
-
-                    # Anchor on question and fetch right-hand chip text
-                    q = "What was your last blood pressure reading?"
-                    try:
-                        qloc = target_page.locator(
-                            "xpath=//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), '" + q.lower() + "')]"
-                        ).first
-                        row = qloc.locator("xpath=ancestor::div[contains(@class,'py-4')][1]")
-                        right = row.locator("css=div.flex-1.w-auto, div.flex-1 >> nth=-1")
-                        chip = right.locator("css=div.css-1rynq56.r-cqee49.r-b88u0q").first
-                        txt = (chip.text_content(timeout=1000) or "").strip()
-                        if txt:
-                            return txt
-                    except Exception:
-                        pass
-
-                    # Fallback: grab first visible chip text that looks like BP
-                    try:
-                        chips = target_page.locator("div.css-1rynq56.r-cqee49.r-b88u0q")
-                        for i in range(min(chips.count(), 20)):
-                            t = (chips.nth(i).text_content(timeout=500) or "").strip()
-                            if not t:
-                                continue
-                            if re.search(r"\d{2,3}\s*/\s*\d{2,3}", t) or "90/50-80" in t or "139/90" in t:
-                                return t
-                    except Exception:
-                        pass
-                finally:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
-        except Exception:
-            return None
-        return None
-    
     def _extract_diagnoses(self):
         """Extract Sexual Health diagnoses with robust mapping and negation handling.
         Returns a list containing any of: 'ED', 'PE', 'PE-like ejaculatory dysfunction'.
@@ -4931,8 +9343,7 @@ return null;
                 text = None
             if not text:
                 try:
-                    # Skip iframe traversal in Text-only mode for speed
-                    text = (self._get_all_text_across_frames(max_frames=3) if USE_PLAYWRIGHT_FOR_SH else (self._get_page_text() or ''))
+                    text = self._get_page_text() or ""
                 except Exception:
                     text = ''
 
@@ -4944,111 +9355,17 @@ return null;
                 if mapped:
                     return mapped
 
-            # 3) Playwright fallback (notes scan via data-testid)
-            if USE_PLAYWRIGHT_FOR_SH and sync_playwright is not None:
-                try:
-                    mapped_pl = self._extract_diagnoses_playwright()
-                    if mapped_pl:
-                        return mapped_pl
-                except Exception:
-                    pass
-
         except Exception as e:
-            print(f"   ❌ Diagnosis extraction error: {e}")
+            print(f"   âŒ Diagnosis extraction error: {e}")
         return []
 
-    def _extract_diagnoses_playwright(self) -> list[str]:
-        """Use Playwright to read recent note contents and map 'A:' lines to canonical diagnoses."""
-        try:
-            if sync_playwright is None:
-                return []
-            with sync_playwright() as p:  # type: ignore
-                cdp_url = f"http://127.0.0.1:{CDP_DEBUG_PORT}"
-                browser = p.chromium.connect_over_cdp(cdp_url)
-                try:
-                    target_page = None
-                    for context in browser.contexts:
-                        for page in context.pages:
-                            url = page.url or ""
-                            if self._is_emr_url(url):
-                                target_page = page
-                                break
-                        if target_page:
-                            break
-                    if not target_page:
-                        return []
-                    # Collect note texts
-                    notes = []
-                    try:
-                        loc = target_page.locator("[data-testid^='note-content-']")
-                        count = loc.count()
-                        for i in range(min(count, 10)):
-                            txt = (loc.nth(i).text_content(timeout=800) or "").strip()
-                            if txt:
-                                notes.append(txt)
-                    except Exception:
-                        pass
-                    if not notes:
-                        return []
-                    blob = "\n".join(notes)
-                    # Extract 'A:' lines
-                    assessments = []
-                    for line in blob.splitlines():
-                        l = line.strip()
-                        if l.lower().startswith('a:'):
-                            assessments.append(l[2:].strip())
-                    search_texts = assessments if assessments else [blob]
-                    # Map using same canonicalization as main method
-                    specs = [
-                        {
-                            'canonical': 'ED',
-                            'syn': [r"\bED\b", r"\bE\.D\.", r"erectile\s+dysfunction", r"impotence", r"erection[^\n\r]{0,30}dysfunction"],
-                            'neg': [r"denies?[^\n\r]{0,30}(?:ed|erectile\s+dysfunction|impotence)", r"no[^\n\r]{0,20}(?:ed|erectile\s+dysfunction|impotence)", r"without[^\n\r]{0,20}(?:ed|erectile\s+dysfunction|impotence)"],
-                        },
-                        {
-                            'canonical': 'PE',
-                            'syn': [r"\bPE\b", r"\bP\.E\.", r"premature\s+ejaculation", r"early\s+ejaculation", r"rapid\s+ejaculation", r"climax[^\n\r]{0,20}(?:too\s+)?soon"],
-                            'neg': [r"denies?[^\n\r]{0,30}(?:pe|premature\s+ejaculation|early\s+ejaculation)", r"no[^\n\r]{0,20}(?:pe|premature\s+ejaculation)", r"without[^\n\r]{0,20}(?:pe|premature\s+ejaculation)"],
-                        },
-                        {
-                            'canonical': 'PE-like ejaculatory dysfunction',
-                            'syn': [r"pe-like\s+ejaculatory\s+dysfunction", r"ejaculatory\s+dysfunction", r"climax[^\n\r]{0,30}dysfunction", r"ejaculatory\s+disorder"],
-                            'neg': [r"denies?[^\n\r]{0,30}ejaculatory\s+(?:dysfunction|disorder)", r"no[^\n\r]{0,20}ejaculatory\s+(?:dysfunction|disorder)", r"without[^\n\r]{0,20}ejaculatory\s+(?:dysfunction|disorder)"],
-                        },
-                        {
-                            'canonical': 'Hair Loss',
-                            'syn': [r"\bhair loss\b", r"male\s+pattern\s+hair\s+loss", r"\bmhpl\b", r"androgenic\s+alopecia"],
-                            'neg': [r"denies?[^\n\r]{0,30}hair\s+loss", r"no[^\n\r]{0,20}hair\s+loss", r"without[^\n\r]{0,20}hair\s+loss"],
-                        },
-                    ]
-                    out: list[str] = []
-                    seen = set()
-                    for text in search_texts:
-                        for spec in specs:
-                            if any(re.search(p, text, re.IGNORECASE) for p in spec['neg']):
-                                continue
-                            if any(re.search(p, text, re.IGNORECASE) for p in spec['syn']):
-                                k = spec['canonical'].lower()
-                                if k not in seen:
-                                    out.append(spec['canonical'])
-                                    seen.add(k)
-                    return out
-                finally:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
-        except Exception:
-            return []
-        return []
-    
     def _extract_hair_loss_location(self) -> str:
         """Extract hair loss location from the EMR page.
         Uses fallback selector to find the specific element for hair loss location.
         """
         try:
             self._switch_to_default()
-            
+
             # Possible hair loss location options
             location_patterns = [
                 "Thinning at the hairline",
@@ -5057,23 +9374,23 @@ return null;
                 "Redness and irritation found at sites of hair loss",
                 "I'll take a photo of my head instead"
             ]
-            
+
             # Try the specific fallback selector first
             fallback_selector = "div:nth-of-type(1) > div:nth-of-type(4) > div > div:nth-of-type(2) > div:nth-of-type(1) > div > div > div > div > div > div > div:nth-of-type(4) > div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(44) > div > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1)"
-            
+
             try:
                 element = self.driver.find_element(By.CSS_SELECTOR, fallback_selector)
                 text = (element.get_attribute('innerText') or element.text or '').strip()
                 if text in location_patterns:
-                    print(f"   ✅ Found hair loss location via fallback selector: '{text}'")
+                    print(f"   âœ… Found hair loss location via fallback selector: '{text}'")
                     return text
             except Exception as e:
-                print(f"   ⚠️ Fallback selector failed: {e}")
-            
+                print(f"   âš ï¸ Fallback selector failed: {e}")
+
             # If fallback fails, search all elements with the generic class
             elements = self.driver.find_elements(By.CSS_SELECTOR, "div.css-1rynq56.r-cqee49.r-b88u0q")
-            print(f"   🔍 Searching {len(elements)} elements for hair loss location...")
-            
+            print(f"   ðŸ” Searching {len(elements)} elements for hair loss location...")
+
             # Collect all matching text
             matches = []
             for element in elements:
@@ -5081,34 +9398,34 @@ return null;
                     text = (element.get_attribute('innerText') or element.text or '').strip()
                     if text in location_patterns:
                         matches.append(text)
-                        print(f"   ✅ Found match: '{text}'")
+                        print(f"   âœ… Found match: '{text}'")
                 except Exception:
                     continue
-            
+
             if matches:
                 # Return comma-separated list of unique matches
                 result = ", ".join(sorted(set(matches)))
-                print(f"   ✅ Hair loss location extracted: '{result}'")
+                print(f"   âœ… Hair loss location extracted: '{result}'")
                 return result
-            
-            print(f"   ⚠️ No hair loss location found")
+
+            print(f"   âš ï¸ No hair loss location found")
             return ""
         except Exception as e:
-            print(f"   ❌ Hair loss location extraction error: {e}")
+            print(f"   âŒ Hair loss location extraction error: {e}")
             return ""
         finally:
             try:
                 self._switch_to_default()
             except Exception:
                 pass
-    
+
     def _extract_hair_loss_additional_sxx(self) -> str:
         """Extract additional hair loss symptoms from the EMR page.
         Uses fallback selector to find the specific element for hair loss additional symptoms.
         """
         try:
             self._switch_to_default()
-            
+
             # Possible additional symptom options
             symptom_patterns = [
                 "No, none of these",
@@ -5116,58 +9433,58 @@ return null;
                 "Patches of rough, scaly skin or scarring",
                 "Pustules or crusting"
             ]
-            
+
             # Try the specific fallback selector first
             fallback_selector = "div:nth-of-type(1) > div:nth-of-type(4) > div > div:nth-of-type(2) > div:nth-of-type(1) > div > div > div > div > div > div > div:nth-of-type(4) > div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(43) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div"
-            
+
             try:
                 element = self.driver.find_element(By.CSS_SELECTOR, fallback_selector)
                 text = (element.get_attribute('innerText') or element.text or '').strip()
                 if text == "No, none of these":
-                    print(f"   ✅ Found 'No, none of these' via fallback selector")
+                    print(f"   âœ… Found 'No, none of these' via fallback selector")
                     return "none, denies burning, pain, patches of rough scaly skin, scarring, pustules, and crusting"
                 elif text in symptom_patterns:
-                    print(f"   ✅ Found hair loss additional sxx via fallback selector: '{text}'")
+                    print(f"   âœ… Found hair loss additional sxx via fallback selector: '{text}'")
                     return text
             except Exception as e:
-                print(f"   ⚠️ Fallback selector failed: {e}")
-            
+                print(f"   âš ï¸ Fallback selector failed: {e}")
+
             # If fallback fails, search all elements with the generic class
             elements = self.driver.find_elements(By.CSS_SELECTOR, "div.css-1rynq56.r-cqee49.r-b88u0q")
-            print(f"   🔍 Searching {len(elements)} elements for hair loss additional sxx...")
-            
+            print(f"   ðŸ” Searching {len(elements)} elements for hair loss additional sxx...")
+
             # Special case: if "No, none of these" is found, return the special text
             none_of_these_found = False
             other_symptoms = []
-            
+
             for element in elements:
                 try:
                     text = (element.get_attribute('innerText') or element.text or '').strip()
                     if text == "No, none of these":
                         none_of_these_found = True
-                        print(f"   ✅ Found: '{text}'")
+                        print(f"   âœ… Found: '{text}'")
                     elif text in symptom_patterns:
                         other_symptoms.append(text)
-                        print(f"   ✅ Found symptom: '{text}'")
+                        print(f"   âœ… Found symptom: '{text}'")
                 except Exception:
                     continue
-            
+
             # If "No, none of these" was selected
             if none_of_these_found and not other_symptoms:
                 result = "none, denies burning, pain, patches of rough scaly skin, scarring, pustules, and crusting"
-                print(f"   ✅ Hair loss additional sxx extracted: '{result}'")
+                print(f"   âœ… Hair loss additional sxx extracted: '{result}'")
                 return result
-            
+
             # Otherwise return comma-separated list of symptoms
             if other_symptoms:
                 result = ", ".join(sorted(set(other_symptoms)))
-                print(f"   ✅ Hair loss additional sxx extracted: '{result}'")
+                print(f"   âœ… Hair loss additional sxx extracted: '{result}'")
                 return result
-            
-            print(f"   ⚠️ No hair loss additional sxx found")
+
+            print(f"   âš ï¸ No hair loss additional sxx found")
             return ""
         except Exception as e:
-            print(f"   ❌ Hair loss additional sxx extraction error: {e}")
+            print(f"   âŒ Hair loss additional sxx extraction error: {e}")
             return ""
         finally:
             try:
@@ -5224,7 +9541,7 @@ return null;
                         pass
             return ""
         except Exception as e:
-            print(f"   ❌ Patient age extraction error: {e}")
+            print(f"   âŒ Patient age extraction error: {e}")
             return ""
 
     def _extract_visit_type_from_header(self) -> str:
@@ -5248,7 +9565,7 @@ return null;
                 return "premature ejaculation"
             return "sexual health"
         except Exception as e:
-            print(f"   ❌ Visit type extraction error: {e}")
+            print(f"   âŒ Visit type extraction error: {e}")
             return "sexual health"
 
     def _extract_ed_onset(self, full_text: Optional[str] = None) -> str:
@@ -5292,7 +9609,7 @@ return null;
                         return "sudden"
             return ""
         except Exception as e:
-            print(f"   ❌ ED onset extraction error: {e}")
+            print(f"   âŒ ED onset extraction error: {e}")
             return ""
 
     def _extract_ed_frequency(self, full_text: Optional[str] = None) -> str:
@@ -5331,7 +9648,7 @@ return null;
                     return answers[0].strip().lower()
             return ""
         except Exception as e:
-            print(f"   ❌ ED frequency extraction error: {e}")
+            print(f"   âŒ ED frequency extraction error: {e}")
             return ""
 
     def _extract_ed_description(self, full_text: Optional[str] = None) -> str:
@@ -5369,7 +9686,7 @@ return null;
                     return answers[0].strip().lower()
             return ""
         except Exception as e:
-            print(f"   ❌ ED description extraction error: {e}")
+            print(f"   âŒ ED description extraction error: {e}")
             return ""
 
     def _extract_ed_characterization(self, full_text: Optional[str] = None) -> str:
@@ -5420,7 +9737,7 @@ return null;
                     return answers[0].strip().lower()
             return ""
         except Exception as e:
-            print(f"   ❌ ED characterization extraction error: {e}")
+            print(f"   âŒ ED characterization extraction error: {e}")
             return ""
 
     def _extract_ehs_scores(self, full_text: Optional[str] = None) -> str:
@@ -5446,7 +9763,7 @@ return null;
                 "on a scale.*hardness",
             ]
 
-            # EHS answer mapping: text → numeric score
+            # EHS answer mapping: text â†’ numeric score
             ehs_map = {
                 "no erection": 0,
                 "penis is larger but not hard": 1,
@@ -5500,17 +9817,17 @@ return null;
                 return str(best)
             return ""
         except Exception as e:
-            print(f"   ❌ EHS extraction error: {e}")
+            print(f"   âŒ EHS extraction error: {e}")
             return ""
 
     def _extract_pep_score(self, full_text: Optional[str] = None) -> str:
         """Extract PEP (Premature Ejaculation Profile) score from intake questionnaire.
         PEP = average of 4 questions (each scored 0-4):
-          Q1) Control over ejaculation           (direct:  poor=1, fair=2, good=3 …)
-          Q2) Ejaculation-related distress        (reverse: quite a bit=1, not at all=4 …)
-          Q3) Satisfaction with sex life           (direct:  fair=2, good=3 …)
-          Q4) Relationship difficulty from PE      (reverse: quite a bit=1, not at all=4 …)
-        Severity: ≤2 = Severe, 2-3 = Moderate, 3-3.5 = Mild
+          Q1) Control over ejaculation           (direct:  poor=1, fair=2, good=3 â€¦)
+          Q2) Ejaculation-related distress        (reverse: quite a bit=1, not at all=4 â€¦)
+          Q3) Satisfaction with sex life           (direct:  fair=2, good=3 â€¦)
+          Q4) Relationship difficulty from PE      (reverse: quite a bit=1, not at all=4 â€¦)
+        Severity: â‰¤2 = Severe, 2-3 = Moderate, 3-3.5 = Mild
         Returns e.g. '1.2 (Severe)' or ''.
         """
         try:
@@ -5521,7 +9838,7 @@ return null;
             low = [ln.lower() for ln in lines]
 
             # Each PEP question: (list-of-anchor-regexes, score_map_dict)
-            # Direct scoring: better answer → higher score
+            # Direct scoring: better answer â†’ higher score
             direct_map = {
                 "very poor": 0, "no control": 0,
                 "poor": 1,
@@ -5529,7 +9846,7 @@ return null;
                 "good": 3, "satisfied": 3,
                 "very good": 4, "very satisfied": 4, "excellent": 4, "complete": 4,
             }
-            # Reverse scoring: worse answer → lower score (more distress/difficulty = lower)
+            # Reverse scoring: worse answer â†’ lower score (more distress/difficulty = lower)
             reverse_map = {
                 "extremely": 0, "very much": 0,
                 "quite a bit": 1, "much": 1, "a lot": 1,
@@ -5595,7 +9912,7 @@ return null;
                     v = float(m.group(1))
                     if 0 <= v <= 5:
                         return v
-                # Text mapping — try longest match first to avoid partial hits
+                # Text mapping â€” try longest match first to avoid partial hits
                 for key in sorted(score_map.keys(), key=len, reverse=True):
                     if key in ans_low:
                         return float(score_map[key])
@@ -5617,7 +9934,7 @@ return null;
                                 score = _score_answer(ans, q["score_map"])
                                 if score is not None:
                                     individual_scores.append(score)
-                                    dprint(f"      PEP Q{len(individual_scores)}: anchor='{anchor}' answer='{ans}' → {score}")
+                                    dprint(f"      PEP Q{len(individual_scores)}: anchor='{anchor}' answer='{ans}' â†’ {score}")
                                     found = True
                                     break
                             if found:
@@ -5637,7 +9954,7 @@ return null;
                 return f"{avg_rounded} ({severity})"
             return ""
         except Exception as e:
-            print(f"   ❌ PEP score extraction error: {e}")
+            print(f"   âŒ PEP score extraction error: {e}")
             return ""
 
     def _extract_past_ed_treatments(self, full_text: Optional[str] = None) -> str:
@@ -5696,7 +10013,7 @@ return null;
                     return ", ".join(a.strip() for a in answers if a.strip())
             return ""
         except Exception as e:
-            print(f"   ❌ Past ED treatments extraction error: {e}")
+            print(f"   âŒ Past ED treatments extraction error: {e}")
             return ""
 
     def _extract_ros_positives(self, full_text: Optional[str] = None) -> str:
@@ -5770,7 +10087,7 @@ return null;
                 return ", ".join(positives)
             return "none"
         except Exception as e:
-            print(f"   ❌ ROS positives extraction error: {e}")
+            print(f"   âŒ ROS positives extraction error: {e}")
             return ""
 
     def _extract_ros_negatives(self, ros_positives: str = "") -> str:
@@ -5792,10 +10109,10 @@ return null;
                 return "denies " + ", ".join(negatives)
             return "no additional negatives"
         except Exception as e:
-            print(f"   ❌ ROS negatives generation error: {e}")
+            print(f"   âŒ ROS negatives generation error: {e}")
             return ""
 
-    def _extract_medication_from_text(self, text: str) -> str:
+    def _extract_medication_from_text(self, text: str, group: str = "sexual_health") -> str:
         """Heuristic medication extractor for Sexual Health from plain text.
         Primary rule: pick the med line immediately after a header line that reads 'Treatment'.
         Fallback: first med-like line (contains mg and digits, ideally with known med keyword).
@@ -5854,19 +10171,12 @@ return null;
             def infer_freq() -> str:
                 # Prefer next few lines near the chosen index
                 nearby = "\n".join(lines[chosen_idx+1: chosen_idx+4]) if chosen_idx >= 0 else ''
-                m = doses_re.search(nearby) or doses_re.search(text)
-                if m:
-                    try:
-                        v = int(m.group(1))
-                        return ", daily" if v >= 30 else ", as-needed"
-                    except Exception:
-                        return ", as-needed"
-                return ", as-needed"
+                return infer_medication_frequency_suffix_from_text(nearby, text, group=group)
             base_line = self._sanitize_medication_line(chosen) or chosen.strip()
             return f"{base_line}{infer_freq()}"
         except Exception:
             return ""
-    
+
     def _get_page_text(self):
         """Get all text content from the page as fallback"""
         if self._cache_body_text is not None:
@@ -5890,7 +10200,7 @@ return null;
                 self._cache_body_text = self.driver.find_element(By.TAG_NAME, 'body').text
             return self._cache_body_text
         except Exception as e:
-            print(f"   ❌ Could not get page text: {e}")
+            print(f"   âŒ Could not get page text: {e}")
             return None
 
     def _get_all_text_across_frames(self, max_frames: int = 6) -> str:
@@ -5934,7 +10244,7 @@ return null;
                     except Exception:
                         pass
         except Exception as e:
-            print(f"   ❌ Frame text collection error: {e}")
+            print(f"   âŒ Frame text collection error: {e}")
         finally:
             self._switch_to_default()
         self._cache_all_text = "\n\n".join(parts)
@@ -6025,6 +10335,312 @@ return null;
             return None
         except Exception:
             return None
+
+    @staticmethod
+    def _preview_narrow_grab_text(value: Optional[str], limit: int = 120) -> str:
+        text = str(value or "").replace("\n", " ").strip()
+        if len(text) > limit:
+            return text[: limit - 3] + "..."
+        return text
+
+    def _log_narrow_grab(self, var_id: str, message: str) -> None:
+        print(f"[NARROW GRAB] {var_id} | {message}")
+
+    def _normalize_ranked_yes_no(self, value: str) -> str:
+        stripped = str(value or "").strip()
+        if not stripped:
+            return ""
+        match = re.match(r"^\W*(yes|no)\b", stripped, re.IGNORECASE)
+        if match:
+            return match.group(1).capitalize()
+        condensed = re.sub(r"[^a-z]", "", stripped.lower())
+        if condensed.startswith("yes"):
+            return "Yes"
+        if condensed.startswith("no"):
+            return "No"
+        return stripped
+
+    def _normalize_ranked_pa_options(self, raw_value: str, options: List[str]) -> str:
+        lines = [line.strip() for line in str(raw_value or "").splitlines() if line.strip()]
+        mapped = self._map_lines_to_known_options(lines, options)
+        if mapped:
+            return ", ".join(mapped)
+        return str(raw_value or "").strip()
+
+    def _normalize_ranked_pa_symptoms(self, raw_value: str) -> str:
+        lines = [line.strip() for line in str(raw_value or "").splitlines() if line.strip()]
+        mapped = self._map_lines_to_known_options(lines, PA_SYMPTOM_OPTIONS)
+        if mapped:
+            return ", ".join(mapped)
+        keyword_lines = [
+            line for line in lines if any(keyword in line.lower() for keyword in PA_SYMPTOM_KEYWORDS)
+        ]
+        mapped = self._map_lines_to_known_options(keyword_lines, PA_SYMPTOM_OPTIONS)
+        if mapped:
+            return ", ".join(mapped)
+        return str(raw_value or "").strip()
+
+    def _normalize_ranked_target_medication(self, var_id: str, raw_value: str) -> str:
+        normalized = str(raw_value or "").strip()
+        if not normalized:
+            return ""
+        if var_id == "hair_medication":
+            return extract_hair_medication_from_text(normalized) or normalized
+
+        med_group = {
+            "sexual_health_med": "sexual_health",
+            "pa_medication": "performance_anxiety",
+            "bc_medication": "birth_control",
+            "photoaging_medication": "photoaging",
+        }.get(var_id, "")
+        base_line = self._sanitize_medication_line(normalized) or normalized
+        if not med_group:
+            return base_line
+
+        context_text = self._get_sh_wide_fallback_text() or self._cache_latest_segment or ""
+        suffix = infer_medication_frequency_suffix_from_text(normalized, context_text, group=med_group)
+        if suffix:
+            return f"{base_line}{suffix}"
+
+        combined_text = normalized
+        if context_text and context_text not in normalized:
+            combined_text = f"{normalized}\n{context_text}"
+        return self._extract_medication_from_text(combined_text, group=med_group) or base_line
+
+    def _normalize_ranked_selector_value(self, var_id: str, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return ""
+
+        if var_id in {"hair_medication", "sexual_health_med", "pa_medication", "bc_medication", "photoaging_medication"}:
+            return self._normalize_ranked_target_medication(var_id, normalized)
+        if var_id == "hair_response":
+            return extract_hair_response_from_text(normalized) or normalized
+        if var_id == "hair_symptoms":
+            return extract_hair_symptoms_from_text(normalized) or normalized
+        if var_id == "hair_loss_location":
+            return extract_hair_loss_location_from_text(normalized) or normalized
+        if var_id == "hair_loss_additional_sxx":
+            return extract_hair_loss_additional_sxx_from_text(normalized) or normalized
+        if var_id == "sexual_health_effectiveness":
+            return self._extract_effectiveness(full_text=normalized) or self._normalize_ranked_yes_no(normalized)
+        if var_id == "sexual_health_bp":
+            return normalize_blood_pressure_value(normalized) or normalized
+        if var_id in {"pa_bp", "bc_bp"}:
+            return normalize_blood_pressure_value(normalized) or normalized
+        if var_id == "pa_situations":
+            return self._normalize_ranked_pa_options(normalized, PA_SITUATION_OPTIONS)
+        if var_id == "pa_symptoms":
+            return self._normalize_ranked_pa_symptoms(normalized)
+        if var_id == "bc_lmp":
+            return normalized
+        return normalized
+
+    def _parse_ranked_selector_candidate(self, var_id: str, raw_text: str, parser, accept_fn) -> Tuple[str, bool, str]:
+        try:
+            parsed_value = parser(raw_text)
+        except Exception as exc:
+            return "", False, f"parser error: {exc}"
+
+        try:
+            accepted = bool(accept_fn(parsed_value))
+        except Exception:
+            accepted = False
+        if accepted:
+            return str(parsed_value or ""), True, "parser"
+
+        fallback_value = self._normalize_ranked_selector_value(var_id, raw_text)
+        try:
+            fallback_accepted = bool(accept_fn(fallback_value))
+        except Exception:
+            fallback_accepted = False
+        if fallback_accepted:
+            return str(fallback_value or ""), True, "fallback"
+
+        return str(parsed_value or ""), False, "parser"
+
+    def _get_ranked_playwright_raw_texts(
+        self, selector: str, limit: int = 3
+    ) -> List[str]:
+        selector = (selector or "").strip()
+        if not selector:
+            return []
+        page = self._get_cdp_emr_page()
+        if page is None:
+            return []
+        contexts: List[Any] = [page]
+        try:
+            contexts.extend(frame for frame in page.frames if frame != page.main_frame)
+        except Exception:
+            pass
+        texts: List[str] = []
+
+        def collect(require_visible: bool) -> bool:
+            for context in contexts:
+                try:
+                    locator = context.locator(selector)
+                    count = min(locator.count(), max(limit, 1))
+                except Exception:
+                    continue
+                for idx in range(count):
+                    try:
+                        item = locator.nth(idx)
+                        if require_visible:
+                            try:
+                                if not item.is_visible(timeout=400):
+                                    continue
+                            except Exception:
+                                pass
+                        try:
+                            raw_text = (item.inner_text(timeout=500) or "").strip()
+                        except Exception:
+                            raw_text = ""
+                        if not raw_text:
+                            try:
+                                raw_text = (
+                                    item.text_content(timeout=500) or ""
+                                ).strip()
+                            except Exception:
+                                raw_text = ""
+                        raw_text = raw_text.replace("\xa0", " ").strip()
+                        if raw_text and raw_text not in texts:
+                            texts.append(raw_text)
+                            if len(texts) >= limit:
+                                return True
+                    except Exception:
+                        continue
+            return bool(texts)
+
+        if collect(require_visible=True):
+            return texts
+        collect(require_visible=False)
+        return texts
+
+    def _get_sh_wide_fallback_text(self) -> str:
+        try:
+            text = self._get_all_text_across_frames(max_frames=4) or ""
+        except Exception:
+            text = ""
+        if text:
+            return text
+        try:
+            text = self._get_page_text() or ""
+            if text:
+                return text
+        except Exception:
+            pass
+        return (
+            self._cache_all_text
+            or self._cache_body_text
+            or self._cache_latest_segment
+            or ""
+        )
+
+    def _resolve_ranked_playwright_value(
+        self,
+        group: str,
+        key: str,
+        var_id: str,
+        parser,
+        accept=None,
+    ) -> Tuple[str, str, str]:
+        selectors = get_ranked_playwright_selectors(group, key)
+        accept_fn = accept or (lambda value: bool(str(value or "").strip()))
+        for idx, selector in enumerate(selectors, start=1):
+            self._log_narrow_grab(
+                var_id, f"trying selector {idx}/{len(selectors)} | selector={selector}"
+            )
+            raw_candidates = self._get_ranked_playwright_raw_texts(selector, limit=6)
+            if not raw_candidates:
+                self._log_narrow_grab(
+                    var_id, f"selector {idx} produced no visible text"
+                )
+                continue
+            for candidate_idx, raw_text in enumerate(raw_candidates, start=1):
+                self._log_narrow_grab(
+                    var_id,
+                    f"selector {idx} candidate {candidate_idx}/{len(raw_candidates)} raw={self._preview_narrow_grab_text(raw_text)}",
+                )
+                parsed_value, accepted, parse_status = self._parse_ranked_selector_candidate(
+                    var_id,
+                    raw_text,
+                    parser,
+                    accept_fn,
+                )
+                if parse_status.startswith("parser error:"):
+                    self._log_narrow_grab(
+                        var_id,
+                        f"selector {idx} candidate {candidate_idx} {parse_status}",
+                    )
+                    continue
+                status = "accepted" if accepted else "rejected"
+                self._log_narrow_grab(
+                    var_id,
+                    f"selector {idx} candidate {candidate_idx} {parse_status} {status} | parsed={self._preview_narrow_grab_text(parsed_value)}",
+                )
+                if accepted:
+                    self._log_narrow_grab(
+                        var_id,
+                        f"accepted from ranked selector #{idx} candidate #{candidate_idx}",
+                    )
+                    return (
+                        str(parsed_value or ""),
+                        f"ranked selector #{idx} candidate #{candidate_idx}",
+                        raw_text,
+                    )
+
+            if len(raw_candidates) > 1:
+                combined_text = "\n".join(raw_candidates).strip()
+                if combined_text:
+                    self._log_narrow_grab(
+                        var_id,
+                        f"selector {idx} combined raw={self._preview_narrow_grab_text(combined_text)}",
+                    )
+                    parsed_value, accepted, parse_status = self._parse_ranked_selector_candidate(
+                        var_id,
+                        combined_text,
+                        parser,
+                        accept_fn,
+                    )
+                    if parse_status.startswith("parser error:"):
+                        self._log_narrow_grab(
+                            var_id, f"selector {idx} combined {parse_status}"
+                        )
+                        continue
+                    status = "accepted" if accepted else "rejected"
+                    self._log_narrow_grab(
+                        var_id,
+                        f"selector {idx} combined {parse_status} {status} | parsed={self._preview_narrow_grab_text(parsed_value)}",
+                    )
+                    if accepted:
+                        self._log_narrow_grab(
+                            var_id,
+                            f"accepted from ranked selector #{idx} combined text",
+                        )
+                        return (
+                            str(parsed_value or ""),
+                            f"ranked selector #{idx} combined",
+                            combined_text,
+                        )
+
+        self._log_narrow_grab(var_id, "falling back to wide data grab")
+        wide_text = self._get_sh_wide_fallback_text()
+        try:
+            parsed_value = parser(wide_text)
+        except Exception as exc:
+            self._log_narrow_grab(var_id, f"wide parser error: {exc}")
+            return "", "wide data grab", wide_text
+        accepted = False
+        try:
+            accepted = bool(accept_fn(parsed_value))
+        except Exception:
+            accepted = False
+        status = "accepted" if accepted else "rejected"
+        self._log_narrow_grab(
+            var_id,
+            f"wide parser {status} | parsed={self._preview_narrow_grab_text(parsed_value)}",
+        )
+        return str(parsed_value or ""), "wide data grab", wide_text
 
     def _parse_pa_options_from_text(self, text: str, question_substring: str, options: list[str]) -> list[str]:
         """Given full page text and a question substring, collect matching options that appear nearby.
@@ -6127,10 +10743,10 @@ return null;
                 "contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '" + qt + "')"
                 "]"
             )
-            print(f"   🔎 Seeking question: '{question_text_lower_contains}'")
+            print(f"   ðŸ”Ž Seeking question: '{question_text_lower_contains}'")
             el = self._find_element_in_frames_by_xpath(xpath, timeout_each=timeout_each, max_depth=max_depth)
             if el is None:
-                print("      ↩︎ Question not found in any frame")
+                print("      â†©ï¸Ž Question not found in any frame")
                 return []
             right_col = None
             # Ascend to the flex row container of this question
@@ -6157,9 +10773,9 @@ return null;
                     except Exception:
                         pass
                     right_col = left_col.find_element(By.XPATH, "following-sibling::div[contains(@class,'flex-1')][1]")
-                    print("      🔁 Used sibling-based right column detection")
+                    print("      ðŸ” Used sibling-based right column detection")
                 except Exception:
-                    print("      ↩︎ Could not locate flex row ancestor or sibling right column")
+                    print("      â†©ï¸Ž Could not locate flex row ancestor or sibling right column")
                     return []
 
             # Within the right column, find the selected chips
@@ -6191,7 +10807,7 @@ return null;
                             test_chips = []
                         if test_chips:
                             chips = test_chips
-                            print("      🔁 Found chips in ancestor container")
+                            print("      ðŸ” Found chips in ancestor container")
                             break
                         # Heuristic: if parent has multiple direct div children, use the last one as right column
                         try:
@@ -6209,7 +10825,7 @@ return null;
                                 test_chips = []
                             if test_chips:
                                 chips = test_chips
-                                print("      🔁 Used last-child-as-right-column heuristic")
+                                print("      ðŸ” Used last-child-as-right-column heuristic")
                                 break
                         # Move up to parent
                         try:
@@ -6217,7 +10833,7 @@ return null;
                         except Exception:
                             break
                 except Exception as ce:
-                    print(f"      ⚠️ Ancestor scan error: {ce}")
+                    print(f"      âš ï¸ Ancestor scan error: {ce}")
             vals = []
             for c in chips:
                 try:
@@ -6228,7 +10844,7 @@ return null;
                 txt = (c.get_attribute('innerText') or c.text or '').strip()
                 if txt:
                     vals.append(txt)
-            print(f"      ✅ Found {len(vals)} selected answers: {vals[:5]}")
+            print(f"      âœ… Found {len(vals)} selected answers: {vals[:5]}")
             # Deduplicate preserving order
             seen = set()
             out = []
@@ -6243,7 +10859,7 @@ return null;
 
             # Ultimate fallback: build a page-wide map of question->answers by scanning visible blocks
             try:
-                print("      🔎 Page-wide fallback scan for question/answers")
+                print("      ðŸ”Ž Page-wide fallback scan for question/answers")
                 self._switch_to_default()
                 blocks = []
                 try:
@@ -6281,7 +10897,7 @@ return null;
                             vals2.append(txt2)
                     if vals2:
                         best = vals2
-                        print(f"      ✅ Fallback block matched with {len(best)} answers")
+                        print(f"      âœ… Fallback block matched with {len(best)} answers")
                         break
                 if best:
                     # Deduplicate
@@ -6294,11 +10910,11 @@ return null;
                             seen.add(k)
                     return out2
             except Exception as e2:
-                print(f"      ⚠️ Page-wide fallback error: {e2}")
+                print(f"      âš ï¸ Page-wide fallback error: {e2}")
 
             return []
         except Exception as e:
-            print(f"   ❌ _get_selected_answers_by_question error: {e}")
+            print(f"   âŒ _get_selected_answers_by_question error: {e}")
             return []
 
     def _collect_selected_chip_texts(self, max_depth: int = 3) -> list[str]:
@@ -6492,10 +11108,10 @@ return null;
                 "contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '" + qt + "')"
                 "]"
             )
-            print(f"   🔎 Positional fallback seeking question: '{question_text_lower_contains}'")
+            print(f"   ðŸ”Ž Positional fallback seeking question: '{question_text_lower_contains}'")
             el = self._find_element_in_frames_by_xpath(xpath, timeout_each=1.2, max_depth=3)
             if el is None:
-                print("      ↩︎ Question not found for positional fallback")
+                print("      â†©ï¸Ž Question not found for positional fallback")
                 return []
 
             # Compute geometry in the current frame context
@@ -6569,12 +11185,12 @@ return null;
                     seen.add(key)
 
             if out:
-                print(f"      ✅ Positional fallback collected {len(out)} texts: {out[:6]}")
+                print(f"      âœ… Positional fallback collected {len(out)} texts: {out[:6]}")
             else:
-                print("      ↩︎ Positional fallback found 0 texts")
+                print("      â†©ï¸Ž Positional fallback found 0 texts")
             return out
         except Exception as e:
-            print(f"   ❌ Positional fallback error: {e}")
+            print(f"   âŒ Positional fallback error: {e}")
             return []
 
     # --- Performance Anxiety helpers ---
@@ -6585,7 +11201,7 @@ return null;
         Returns 'nr' if unavailable.
         """
         try:
-            print("   🔍 Extracting pulse/HR…")
+            print("   ðŸ” Extracting pulse/HRâ€¦")
             preferred_phrases = [
                 '60-100 bpm',
                 'Less than 60 bpm',
@@ -6610,7 +11226,7 @@ return null;
                         l = lines[i]
                         for phrase in preferred_phrases:
                             if phrase.lower() in l.lower():
-                                print(f"   ✅ Pulse/HR (anchored phrase): '{phrase}'")
+                                print(f"   âœ… Pulse/HR (anchored phrase): '{phrase}'")
                                 return phrase
                     # Else, collect first plausible integer (30-220) possibly followed by 'bpm'
                     num_pat = re.compile(r"\b(\d{2,3})\b")
@@ -6622,7 +11238,7 @@ return null;
                             except Exception:
                                 continue
                             if 30 <= val <= 220:
-                                print(f"   ✅ Pulse/HR (anchored numeric): '{val}'")
+                                print(f"   âœ… Pulse/HR (anchored numeric): '{val}'")
                                 return str(val)
 
             def pick_pulse_text(candidates):
@@ -6652,7 +11268,7 @@ return null;
                 texts = [(e.get_attribute('innerText') or e.text or '').strip() for e in elems]
                 chosen = pick_pulse_text(texts)
                 if chosen:
-                    print(f"   ✅ Pulse/HR (default): '{chosen}'")
+                    print(f"   âœ… Pulse/HR (default): '{chosen}'")
                     return chosen
             except Exception:
                 pass
@@ -6669,7 +11285,7 @@ return null;
                     texts = [(e.get_attribute('innerText') or e.text or '').strip() for e in elems]
                     chosen = pick_pulse_text(texts)
                     if chosen:
-                        print(f"   ✅ Pulse/HR (frame): '{chosen}'")
+                        print(f"   âœ… Pulse/HR (frame): '{chosen}'")
                         return chosen
                 except Exception:
                     pass
@@ -6684,7 +11300,7 @@ return null;
             # Check phrases
             for phrase in preferred_phrases:
                 if phrase.lower() in body.lower():
-                    print(f"   ✅ Pulse/HR (body phrase): '{phrase}'")
+                    print(f"   âœ… Pulse/HR (body phrase): '{phrase}'")
                     return phrase
             # Then numeric
             chosen = None
@@ -6700,10 +11316,10 @@ return null;
             except Exception:
                 pass
             if chosen:
-                print(f"   ✅ Pulse/HR (body): '{chosen}'")
+                print(f"   âœ… Pulse/HR (body): '{chosen}'")
                 return chosen
         except Exception as e:
-            print(f"   ❌ Pulse extraction error: {e}")
+            print(f"   âŒ Pulse extraction error: {e}")
         return 'nr'
 
     def _collect_selected_checkbox_labels(self, max_frames: int = 10):
@@ -6792,7 +11408,7 @@ return null;
 
         try:
             if not self._ensure_emr_tab():
-                print("❌ No EMR tab found for Performance Anxiety grab.")
+                print("âŒ No EMR tab found for Performance Anxiety grab.")
                 return None
 
             data = {}
@@ -6827,7 +11443,7 @@ return null;
                 'what situational fears make you nervous or anxious',
                 PA_SITUATION_OPTIONS,
             )
-            print(f"   📌 Situations (text-parse): {len(situations)} -> {situations[:5]}")
+            print(f"   ðŸ“Œ Situations (text-parse): {len(situations)} -> {situations[:5]}")
 
             # Symptoms: options + keyword-line mapped to known options
             parsed_symptoms = self._parse_pa_options_from_text(
@@ -6848,7 +11464,7 @@ return null;
                 if k and k not in seen_sym:
                     symptoms.append(s.strip())
                     seen_sym.add(k)
-            print(f"   📌 Symptoms (text-parse): {len(symptoms)} -> {symptoms[:5]}")
+            print(f"   ðŸ“Œ Symptoms (text-parse): {len(symptoms)} -> {symptoms[:5]}")
 
             # Final fallback: parse full text across frames near question anchors using known option lists
             if not situations or not symptoms:
@@ -6864,7 +11480,7 @@ return null;
                     )
                     if parsed_situations:
                         situations = parsed_situations
-                        print(f"   🧭 Text-parse Situations: {len(situations)} -> {situations[:5]}")
+                        print(f"   ðŸ§­ Text-parse Situations: {len(situations)} -> {situations[:5]}")
                 parsed_symptoms = self._parse_pa_options_from_text(
                     full,
                     'do you experience any of the following symptoms when you are anxious',
@@ -6886,7 +11502,7 @@ return null;
                             merged.append(s.strip())
                             seenm.add(k)
                     symptoms = merged
-                    print(f"   🧭 Text-parse+Keywords Symptoms: {len(symptoms)} -> {symptoms[:6]}")
+                    print(f"   ðŸ§­ Text-parse+Keywords Symptoms: {len(symptoms)} -> {symptoms[:6]}")
 
             if situations:
                 data['situations_text'] = ", ".join(situations)
@@ -6895,7 +11511,7 @@ return null;
 
             return data
         except Exception as e:
-            print(f"❌ Performance Anxiety grab error: {e}")
+            print(f"âŒ Performance Anxiety grab error: {e}")
             return None
 
     def _infer_visit_type_from_text(self) -> Optional[str]:
@@ -6911,7 +11527,7 @@ return null;
         low = text.lower()
         for keyword, label in VISIT_TYPE_FALLBACK_KEYWORDS:
             if keyword in low:
-                print(f"   🧭 Text fallback visit type via '{keyword}': '{label}'")
+                print(f"   ðŸ§­ Text fallback visit type via '{keyword}': '{label}'")
                 return label
         return None
 
@@ -7008,8 +11624,9 @@ return null;
         return None
 
     def _get_section_header(self) -> str | None:
-        """Try to read the main section header like 'Hair Loss', 'Sexual Health', 'Testosterone', 'Photoaging'
-        from the element described by the user or via a text-based XPath. Searches across iframes.
+        """Try to read the main section header like 'Hair Loss', 'Sexual Health', 'Testosterone',
+        'Photoaging', 'Performance Anxiety', 'Birth Control' from the page header element
+        or via a text-based XPath. Searches across iframes.
         """
         try:
             # Serve from cache if fresh (10s)
@@ -7029,7 +11646,7 @@ return null;
                         txt = (el.get_attribute('innerText') or el.text or '').strip()
                         self._switch_to_default()
                         if txt:
-                            print(f"   🏷️ Section header via CSS '{sel}': '{txt}'")
+                            print(f"   ðŸ·ï¸ Section header via CSS '{sel}': '{txt}'")
                             self._cache_section_header = txt
                             self._cache_section_header_time = time.time()
                             return txt
@@ -7038,7 +11655,15 @@ return null;
                     continue
 
             # Next, try XPath matching the known section names ignoring case and whitespace
-            options = ["hair loss", "sexual health", "testosterone", "photoaging"]
+            options = [
+                "hair loss",
+                "sexual health",
+                "photoaging",
+                "performance anxiety",
+                "birth control",
+                "premature ejaculation",
+                "contraception",
+            ]
             preds = " or ".join([
                 f"normalize-space(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))='{opt}'" for opt in options
             ])
@@ -7046,7 +11671,7 @@ return null;
             el = self._find_element_in_frames_by_xpath(xpath, timeout_each=0.8, max_depth=2)
             if el is not None:
                 txt = (el.get_attribute('innerText') or el.text or '').strip()
-                print(f"   🏷️ Section header via XPath: '{txt}'")
+                print(f"   ðŸ·ï¸ Section header via XPath: '{txt}'")
                 self._cache_section_header = txt
                 self._cache_section_header_time = time.time()
                 return txt
@@ -7058,14 +11683,14 @@ return null;
                 self._cache_section_header_time = time.time()
                 return inferred
         except Exception as e:
-            print(f"   ❌ Section header detection error: {e}")
+            print(f"   âŒ Section header detection error: {e}")
         finally:
             self._switch_to_default()
         return None
 
     def detect_visit_type(self) -> str | None:
         """Return canonical visit type name based on section header text.
-        Returns one of: 'Hair Loss', 'Sexual Health', 'Testosterone', 'Photoaging' or None.
+        Returns one of the keys from VISIT_TAB_INDICES, 'EMR Dashboard', or None.
         """
         # Serve from cache if fresh (10s)
         if (time.time() - getattr(self, '_cache_visit_type_time', 0)) < 10 and self._cache_visit_type:
@@ -7082,13 +11707,13 @@ return null;
             return None
         low = txt.strip().lower()
         mapping = {
-            'hair loss': 'Hair Loss',
-            'sexual health': 'Sexual Health',
-            'testosterone': 'T Deficiency',
-            'photoaging': 'Photoaging',
-            'performance anxiety': 'Performance Anxiety',
-            't deficiency': 'T Deficiency',
-            'td/ed': 'T Deficiency',
+            "hair loss": "Hair Loss",
+            "sexual health": "Sexual Health",
+            "premature ejaculation": "Sexual Health",
+            "photoaging": "Photoaging",
+            "performance anxiety": "Performance Anxiety",
+            "birth control": "Birth Control",
+            "contraception": "Birth Control",
         }
         for key, val in mapping.items():
             if key in low:
@@ -7104,7 +11729,7 @@ return null;
 
         try:
             if not self._ensure_emr_tab():
-                print("❌ No EMR tab found for Birth Control grab.")
+                print("âŒ No EMR tab found for Birth Control grab.")
                 return None
 
             data: Dict[str, Any] = {}
@@ -7151,6 +11776,101 @@ return null;
                             pass
                 return ""
 
+            def _birth_control_bp_strategy_order() -> List[str]:
+                default_order = [
+                    "combined_selector",
+                    "split_selector",
+                    "generic_extractor",
+                ]
+                try:
+                    spec = get_variable_selector_spec("Birth Control", var_id="bc_bp")
+                except Exception:
+                    spec = {}
+                raw_rules = spec.get("parser_rules") if isinstance(spec, dict) else []
+                if not isinstance(raw_rules, list):
+                    return default_order
+
+                mapping = {
+                    "combined": "combined_selector",
+                    "combined_selector": "combined_selector",
+                    "blood_pressure": "combined_selector",
+                    "blood_pressure_selector": "combined_selector",
+                    "split": "split_selector",
+                    "split_selector": "split_selector",
+                    "systolic_diastolic": "split_selector",
+                    "pair": "split_selector",
+                    "pair_selector": "split_selector",
+                    "generic": "generic_extractor",
+                    "generic_extractor": "generic_extractor",
+                    "page": "generic_extractor",
+                    "page_extractor": "generic_extractor",
+                }
+                normalized: List[str] = []
+                for rule in raw_rules:
+                    if isinstance(rule, str):
+                        candidate = rule.strip().lower()
+                    elif isinstance(rule, dict):
+                        candidate = (
+                            str(
+                                rule.get("strategy")
+                                or rule.get("source")
+                                or rule.get("mode")
+                                or ""
+                            )
+                            .strip()
+                            .lower()
+                        )
+                    else:
+                        continue
+                    strategy = mapping.get(candidate)
+                    if strategy and strategy not in normalized:
+                        normalized.append(strategy)
+                return normalized or default_order
+
+            def _birth_control_bp_from_combined_selector() -> str:
+                raw_text = _read_text_for_selectors(
+                    _get_selector_candidates("birth_control", "blood_pressure")
+                )
+                return normalize_blood_pressure_value(raw_text)
+
+            def _birth_control_bp_from_split_selectors() -> str:
+                systolic_text = _read_text_for_selectors(
+                    _get_selector_candidates("birth_control", "systolic_bp")
+                )
+                diastolic_text = _read_text_for_selectors(
+                    _get_selector_candidates("birth_control", "diastolic_bp")
+                )
+                systolic_match = re.search(r"\b(\d{2,3})\b", systolic_text or "")
+                diastolic_match = re.search(r"\b(\d{2,3})\b", diastolic_text or "")
+                if not systolic_match or not diastolic_match:
+                    return ""
+                systolic = int(systolic_match.group(1))
+                diastolic = int(diastolic_match.group(1))
+                if (
+                    70 <= systolic <= 250
+                    and 30 <= diastolic <= 150
+                    and systolic > diastolic
+                ):
+                    return f"{systolic}/{diastolic}"
+                return ""
+
+            def _extract_birth_control_bp() -> str:
+                for strategy in _birth_control_bp_strategy_order():
+                    candidate = ""
+                    try:
+                        if strategy == "combined_selector":
+                            candidate = _birth_control_bp_from_combined_selector()
+                        elif strategy == "split_selector":
+                            candidate = _birth_control_bp_from_split_selectors()
+                        elif strategy == "generic_extractor":
+                            candidate = self._extract_blood_pressure() or ""
+                    except Exception:
+                        candidate = ""
+                    normalized = normalize_blood_pressure_value(candidate)
+                    if normalized and normalized != "nr":
+                        return normalized
+                return "nr"
+
             try:
                 med = self._extract_medication({'group': 'birth_control'}, {}) or ''
             except Exception:
@@ -7176,22 +11896,7 @@ return null;
             except Exception:
                 pass
 
-            try:
-                bp_val = self._extract_blood_pressure() or 'nr'
-            except Exception:
-                bp_val = 'nr'
-
-            try:
-                systolic_text = _read_text_for_selectors(_get_selector_candidates('birth_control', 'systolic_bp'))
-                diastolic_text = _read_text_for_selectors(_get_selector_candidates('birth_control', 'diastolic_bp'))
-                systolic = re.search(r"\b(\d{2,3})\b", systolic_text or '')
-                diastolic = re.search(r"\b(\d{2,3})\b", diastolic_text or '')
-                if systolic and diastolic:
-                    bp_val = f"{systolic.group(1)}/{diastolic.group(1)}"
-            except Exception:
-                pass
-
-            data['blood_pressure'] = bp_val or 'nr'
+            data["blood_pressure"] = _extract_birth_control_bp()
 
             try:
                 full_text = self._get_all_text_across_frames()
@@ -7274,7 +11979,7 @@ return null;
 
             return data
         except Exception as exc:
-            print(f"❌ Birth Control grab error: {exc}")
+            print(f"âŒ Birth Control grab error: {exc}")
             return None
 
 
@@ -7341,7 +12046,7 @@ class TemplatePopup(wx.Frame):
         dropdown_row.Add(config_btn, 0, wx.ALL, 5)
         
         # Refresh button
-        refresh_btn = wx.Button(panel, label="↻", size=(30, -1))
+        refresh_btn = wx.Button(panel, label="â†»", size=(30, -1))
         refresh_btn.SetToolTip("Refresh list")
         refresh_btn.Bind(wx.EVT_BUTTON, self.on_refresh)
         dropdown_row.Add(refresh_btn, 0, wx.ALL, 5)
@@ -7477,6 +12182,10 @@ class TemplatePopup(wx.Frame):
 
 
 class MyFrame(wx.Frame):
+    GUI_TOGGLE_HOTKEY_NAME = "ctrl+alt+h"
+    GUI_TOGGLE_WX_MODIFIERS = wx.MOD_CONTROL | wx.MOD_ALT
+    GUI_TOGGLE_WX_KEYCODE = ord("H")
+
     @property
     def _selenium_grabber_cache(self):
         """Backwards-compatible access to the browser grabber cache."""
@@ -7501,18 +12210,154 @@ class MyFrame(wx.Frame):
         except Exception as exc:
             print(f"Browser grabber creation error: {exc}")
             return None, False
+
+    def _grab_text_with_playwright(self, method: Optional[str] = None) -> Optional[str]:
+        """Grab EMR page text via Playwright using the configured strategy."""
+        selected_method = (
+            (method or PLAYWRIGHT_TEXT_GRAB_METHOD or "inner_text_body").strip().lower()
+        )
+        if sync_playwright is None:
+            print("Playwright text grab unavailable: playwright is not installed")
+            return None
+
+        try:
+            with sync_playwright() as p:  # type: ignore
+                browser = p.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{CDP_DEBUG_PORT}"
+                )
+                try:
+                    target_page = None
+                    for context in browser.contexts:
+                        for page in context.pages:
+                            if _is_grab_target_emr_url(page.url or ""):
+                                target_page = page
+                                break
+                        if target_page:
+                            break
+
+                    if not target_page:
+                        print(
+                            "Playwright text grab: EMR page not found in existing Chrome session"
+                        )
+                        return None
+
+                    if selected_method == "inner_text_body":
+                        text = target_page.inner_text("body", timeout=4000)
+                    elif selected_method == "evaluate_inner_text":
+                        text = target_page.evaluate("() => document.body.innerText")
+                    elif selected_method == "text_content_body":
+                        text = target_page.text_content("body", timeout=4000) or ""
+                    elif selected_method == "evaluate_text_content":
+                        text = target_page.evaluate(
+                            "() => document.body.textContent || ''"
+                        )
+                    elif selected_method == "inner_text_with_notes":
+                        body_text = target_page.inner_text("body", timeout=4000)
+                        notes_text = target_page.evaluate(
+                            """() => Array.from(document.querySelectorAll('[data-testid^=\"note-content-\"]'))
+                                .map((el) => (el.textContent || '').trim())
+                                .filter(Boolean)
+                                .join('\\n\\n---\\n\\n')"""
+                        )
+                        text = (
+                            body_text
+                            if not notes_text
+                            else f"{body_text}\n\n=== Previous Notes ===\n\n{notes_text}"
+                        )
+                    else:
+                        raise ValueError(
+                            f"Unsupported PLAYWRIGHT_TEXT_GRAB_METHOD: {selected_method}"
+                        )
+
+                    cleaned = (text or "").strip()
+                    if cleaned:
+                        print(
+                            f"Playwright text grab ({selected_method}) returned {len(cleaned)} chars"
+                        )
+                        return cleaned
+
+                    print(
+                        f"Playwright text grab ({selected_method}) returned no usable text"
+                    )
+                    return None
+                finally:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            print(f"Playwright text grab ({selected_method}) failed: {exc}")
+            return None
+
+    def _grab_text_via_clipboard(self) -> Optional[str]:
+        """Grab currently visible EMR text via Ctrl+A/Ctrl+C and restore clipboard."""
+        original = ""
+        try:
+            original = pyperclip.paste()
+        except Exception:
+            original = ""
+
+        self.Hide()
+        time.sleep(0.1)
+        try:
+            screen_width, screen_height = pyautogui.size()
+            center_x, center_y = screen_width // 2, screen_height // 2
+            pyautogui.click(center_x, center_y)
+            time.sleep(0.3)
+            pyautogui.hotkey("ctrl", "a")
+            time.sleep(0.2)
+            pyautogui.hotkey("ctrl", "c")
+            time.sleep(0.5)
+            clip_text = pyperclip.paste() or ""
+            _clear_text_selection()
+            return clip_text.strip() or None
+        finally:
+            try:
+                pyperclip.copy(original)
+            except Exception:
+                pass
+            wx.CallAfter(self.Show)
+
+    def _grab_emr_text_for_parsing(
+        self,
+        *,
+        min_length: int = 30,
+        prefer_playwright: Optional[bool] = None,
+    ) -> Tuple[Optional[str], str]:
+        """Return EMR text for parsing and the source label used."""
+        use_playwright = (
+            USE_PLAYWRIGHT_TEXT_GRAB
+            if prefer_playwright is None
+            else bool(prefer_playwright)
+        )
+
+        if use_playwright:
+            text = self._grab_text_with_playwright()
+            if text and len(text) >= min_length:
+                return text, f"playwright:{PLAYWRIGHT_TEXT_GRAB_METHOD}"
+            print(
+                "Playwright text grab was empty or too short; trying clipboard fallback"
+            )
+
+        if USE_CLIPBOARD_FOR_TEXT:
+            text = self._grab_text_via_clipboard()
+            if text and len(text) >= min_length:
+                return text, "clipboard"
+
+        return None, ""
+
     def __init__(self):
         global templates
-        
+
         # Load templates first
         templates = load_templates_from_file()
-        
+
         super().__init__(
             None,
             title=panel_title,
             style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX) | wx.STAY_ON_TOP
         )
-        
+
         panel = wx.Panel(self)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -7522,8 +12367,8 @@ class MyFrame(wx.Frame):
         # Visit type status line just under the tab strip (updates live)
         self.visit_type_text = wx.StaticText(panel, label="Visit type: Unknown")
         self.visit_type_text.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_ITALIC, wx.FONTWEIGHT_NORMAL))
-        self.patient_location_text = wx.StaticText(panel, label="Location: —")
-        self.patient_location_text.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_ITALIC, wx.FONTWEIGHT_NORMAL))
+        self.patient_location_text = wx.StaticText(panel, label="")
+        self.patient_location_text.Hide()
         self._last_visit_tab = None
         self._last_location_summary = None
         self._location_worker = None
@@ -7531,205 +12376,17 @@ class MyFrame(wx.Frame):
         self._custom_cdp_hotkey_handles = []
         self._custom_cdp_hotkeys_active = []
         self._custom_cdp_hotkeys_registered = False
+        self._playwright_click_paths = load_playwright_click_paths_config()
+        self._playwright_click_paths_path = get_playwright_click_paths_path()
         self._gui_hidden = False
         self._gui_toggle_hotkey_handle = None
         self._gui_toggle_hotkey_id = None
         self._gui_toggle_hotkey_method = None
         self._gui_visible_sliver = GUI_HIDDEN_VISIBLE_WIDTH
-        self._js_overlay_active = False
-        self._js_overlay_visit_type = None
-        self._js_overlay_dark_mode = False
-        self._js_overlay_cmd_queue = queue.Queue()
-        self._js_overlay_thread = None
-        self._js_overlay_page = None
-        self._js_overlay_show_error_on_fail = True
-
-        # --- Tab 1: Main tools (recreate existing UI on this panel) ---
-        tab1 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
-        tab1.SetupScrolling(scroll_x=False, scroll_y=True)
-        tab1_sizer = wx.BoxSizer(wx.VERTICAL)
-
-        # Template dropdown row at top of tab
-        self.tab1_template_dropdown = self.create_template_dropdown_row_inline(tab1, tab1_sizer, "T Deficiency")
-
-        # Grab All Labs button at the top (Tab 1)
-        grab_btn = wx.Button(tab1, label="Grab", size=(200, 40))
-        grab_btn.Bind(wx.EVT_BUTTON, lambda event: grab_all_labs())
-        grab_btn.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        tab1_sizer.Add(grab_btn, 0, wx.ALL | wx.CENTER, 10)
-
-        # Grab mode toggle for Tab 1
-        gm_row1 = wx.BoxSizer(wx.HORIZONTAL)
-        gm_label1 = wx.StaticText(tab1, label="Grab mode:", size=(120, -1))
-        self.grab_mode_choice_tab1 = wx.Choice(tab1, choices=["CDP / Playwright (fast)", "Clipboard (select all + copy)"])
-        self.grab_mode_choice_tab1.SetSelection(0 if USE_CDP_FOR_GRAB else 1)
-        self.grab_mode_choice_tab1.Bind(wx.EVT_CHOICE, lambda evt: self._on_grab_mode_change(evt))
-        self.grab_mode_choice_tab1.SetToolTip("CDP: reads browser DOM directly (fast, no screen interaction). Clipboard: hides GUI, Ctrl+A/Ctrl+C from EMR.")
-        gm_row1.Add(gm_label1, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        gm_row1.Add(self.grab_mode_choice_tab1, 0, wx.ALL, 5)
-        tab1_sizer.Add(gm_row1, 0, wx.EXPAND)
-
-        # TDCS text field
-        tdcs_row = wx.BoxSizer(wx.HORIZONTAL)
-        tdcs_label = wx.StaticText(tab1, label="TDCS Score:", size=(120, -1))
-        self.tdcs_text = wx.TextCtrl(tab1, size=(100, -1))
-        self.tdcs_text.SetValue("—")  # Default to em dash
-        tdcs_row.Add(tdcs_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        tdcs_row.Add(self.tdcs_text, 0, wx.ALL, 5)
-        tab1_sizer.Add(tdcs_row, 0, wx.EXPAND)
-
-        # TDCS-C text field
-        tdcs_c_row = wx.BoxSizer(wx.HORIZONTAL)
-        tdcs_c_label = wx.StaticText(tab1, label="TDCS-C Score:", size=(120, -1))
-        self.tdcs_c_text = wx.TextCtrl(tab1, size=(100, -1))
-        self.tdcs_c_text.SetValue("—")  # Default to em dash
-        tdcs_c_row.Add(tdcs_c_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        tdcs_c_row.Add(self.tdcs_c_text, 0, wx.ALL, 5)
-        tab1_sizer.Add(tdcs_c_row, 0, wx.EXPAND)
-
-        # ED Status text field  
-        ed_row = wx.BoxSizer(wx.HORIZONTAL)
-        ed_label = wx.StaticText(tab1, label="ED Status:", size=(120, -1))
-        self.ed_text = wx.TextCtrl(tab1, size=(200, -1))
-        self.ed_text.SetValue("—")  # Default to em dash
-        ed_row.Add(ed_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        ed_row.Add(self.ed_text, 0, wx.ALL, 5)
-        tab1_sizer.Add(ed_row, 0, wx.EXPAND)
-
-        # Create lab value displays (text field + checkboxes only, no grab buttons)
-        for lab_name, lab_config in LABS_CONFIG.items():
-            row = wx.BoxSizer(wx.HORIZONTAL)
-            label = wx.StaticText(tab1, label=lab_name, size=(120, -1))
-            txt = wx.TextCtrl(tab1, size=(200, -1))
-            high_cb = wx.CheckBox(tab1, label="High")
-            low_cb = wx.CheckBox(tab1, label="Low")
-            
-            var_name = lab_config["var"]
-            text_ctrls[var_name] = txt
-            check_ctrls[var_name] = (high_cb, low_cb)
-            
-            row.Add(label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-            row.Add(txt, 1, wx.ALL | wx.EXPAND, 5)
-            row.Add(high_cb, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-            row.Add(low_cb, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-            tab1_sizer.Add(row, 0, wx.EXPAND)
-
-        # Medication text field (populated from grabbed data)
-        med_row = wx.BoxSizer(wx.HORIZONTAL)
-        med_label = wx.StaticText(tab1, label="Medication:", size=(120, -1))
-        self.td_med_text = wx.TextCtrl(tab1, size=(350, -1))
-        med_row.Add(med_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        med_row.Add(self.td_med_text, 0, wx.ALL, 5)
-        tab1_sizer.Add(med_row, 0, wx.EXPAND)
-
-        # Response text field (populated from grabbed questionnaire data)
-        resp_row = wx.BoxSizer(wx.HORIZONTAL)
-        resp_label = wx.StaticText(tab1, label="Response:", size=(120, -1))
-        self.td_response_text = wx.TextCtrl(tab1, size=(350, -1))
-        self.td_response_text.SetHint("e.g. satisfied, much better, no change")
-        resp_row.Add(resp_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        resp_row.Add(self.td_response_text, 0, wx.ALL, 5)
-        tab1_sizer.Add(resp_row, 0, wx.EXPAND)
-
-        # Side Effects text field (populated from grabbed questionnaire data)
-        se_row = wx.BoxSizer(wx.HORIZONTAL)
-        se_label = wx.StaticText(tab1, label="Side Effects:", size=(120, -1))
-        self.td_side_effects_text = wx.TextCtrl(tab1, size=(350, -1))
-        self.td_side_effects_text.SetValue("No side effects reported")
-        se_row.Add(se_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        se_row.Add(self.td_side_effects_text, 0, wx.ALL, 5)
-        tab1_sizer.Add(se_row, 0, wx.EXPAND)
-
-        # Dx label
-        dx_label = wx.StaticText(tab1, label="Dx:")
-        tab1_sizer.Add(dx_label, 0, wx.LEFT | wx.TOP, 10)
-
-        # Dx checkboxes
-        dx_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.dx_td_cb = wx.CheckBox(tab1, label="Testosterone Deficiency")
-        self.dx_ed_cb = wx.CheckBox(tab1, label="ED")
-        self.dx_td_cb.Bind(wx.EVT_CHECKBOX, self.on_dx_checkbox)
-        self.dx_ed_cb.Bind(wx.EVT_CHECKBOX, self.on_dx_checkbox)
-        dx_row.Add(self.dx_td_cb, 0, wx.ALL, 5)
-        dx_row.Add(self.dx_ed_cb, 0, wx.ALL, 5)
-        tab1_sizer.Add(dx_row, 0, wx.EXPAND)
-
-        # PMH selector for Rx Note (manual multi-select)
-        pmh_box = wx.StaticBox(tab1, label="PMH (for Rx Note)")
-        pmh_sizer = wx.StaticBoxSizer(pmh_box, wx.VERTICAL)
-        pmh_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.pmh_select_btn = wx.Button(tab1, label="Select PMH…")
-        self.pmh_select_btn.Bind(wx.EVT_BUTTON, lambda evt: self.open_pmh_dialog())
-        pmh_row.Add(self.pmh_select_btn, 0, wx.ALL, 5)
-        self.pmh_summary = wx.StaticText(tab1, label="Current: none (noncontributory)")
-        pmh_row.Add(self.pmh_summary, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        pmh_sizer.Add(pmh_row, 0, wx.EXPAND)
-        tab1_sizer.Add(pmh_sizer, 0, wx.EXPAND | wx.ALL, 5)
-        # Initialize PMH summary based on current selection
-        self.update_pmh_summary()
-
-        # Template buttons section (show only intended static buttons for this tab)
-        template_label = wx.StaticText(tab1, label="Templates:")
-        tab1_sizer.Add(template_label, 0, wx.LEFT | wx.TOP, 10)
-
-        # Create template buttons
-        for tbtn in TEMPLATE_BUTTONS:
-            btn = wx.Button(tab1, label=tbtn["label"])
-            # Optional tooltips for static buttons that map to hotkeys
-            tooltip_text = None
-            if tbtn.get("dynamic_labs"):
-                btn.Bind(wx.EVT_BUTTON, partial(insert_template, dynamic_labs=True))
-            elif tbtn.get("rx_note"):
-                # Prefer template if present; fallback to legacy builder
-                def _do_rx_btn():
-                    try:
-                        if 'Rx Note' in templates:
-                            self.insert_specific_template('Rx Note')
-                        elif 'Rx note' in templates:
-                            self.insert_specific_template('Rx note')
-                        elif 'RxNote' in templates:
-                            self.insert_specific_template('RxNote')
-                        else:
-                            insert_template(rx_note=True)
-                    except Exception:
-                        insert_template(rx_note=True)
-                btn.Bind(wx.EVT_BUTTON, lambda event: _do_rx_btn())
-                tooltip_text = "Rx note (Ctrl+Alt+N)"
-            elif tbtn.get("lab_message"):
-                # Prefer Lab Message template; fallback to legacy builder
-                def _do_labmsg_btn():
-                    try:
-                        if 'Lab Message' in templates:
-                            self.insert_specific_template('Lab Message')
-                        else:
-                            insert_template(lab_message=True)
-                    except Exception:
-                        insert_template(lab_message=True)
-                btn.Bind(wx.EVT_BUTTON, lambda event: _do_labmsg_btn())
-                tooltip_text = "Lab Message (Ctrl+Alt+F)"
-            elif tbtn.get("referral_note"):
-                btn.Bind(wx.EVT_BUTTON, lambda event: self.insert_specific_template('Referral note'))
-                tooltip_text = "Referral note (Ctrl+Alt+C)"
-            elif tbtn.get("template_name"):
-                tpl_name = tbtn["template_name"]
-                btn.Bind(wx.EVT_BUTTON, lambda event, name=tpl_name: self.insert_specific_template(name))
-                tooltip_text = tpl_name
-            elif tbtn.get("clear_all"):
-                btn.Bind(wx.EVT_BUTTON, clear_all)
-            elif tbtn.get("show_matrix"):
-                btn.Bind(wx.EVT_BUTTON, lambda event: show_clinical_matrix())
-            else:
-                btn.Bind(wx.EVT_BUTTON, partial(insert_template, tbtn.get("template")))
-            if tooltip_text:
-                btn.SetToolTip(tooltip_text)
-            tab1_sizer.Add(btn, 0, wx.ALL, 5)
-
-        # Finish Tab 1
-        tab1.SetSizer(tab1_sizer)
-        tab1.Layout()
 
         # --- Tab 2: Hair Loss tools ---
-        tab2 = wx.Panel(self.notebook)
+        tab2 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab2.SetupScrolling(scroll_x=False, scroll_y=True)
         tab2_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -7746,10 +12403,14 @@ class MyFrame(wx.Frame):
         # Grab mode toggle for Tab 2
         gm_row2 = wx.BoxSizer(wx.HORIZONTAL)
         gm_label2 = wx.StaticText(tab2, label="Grab mode:", size=(120, -1))
-        self.grab_mode_choice_tab2 = wx.Choice(tab2, choices=["CDP / Playwright (fast)", "Clipboard (select all + copy)"])
-        self.grab_mode_choice_tab2.SetSelection(0 if USE_CDP_FOR_GRAB else 1)
+        self.grab_mode_choice_tab2 = wx.Choice(
+            tab2, choices=["Playwright text grab", "Clipboard (select all + copy)"]
+        )
+        self.grab_mode_choice_tab2.SetSelection(0 if USE_PLAYWRIGHT_TEXT_GRAB else 1)
         self.grab_mode_choice_tab2.Bind(wx.EVT_CHOICE, lambda evt: self._on_grab_mode_change(evt))
-        self.grab_mode_choice_tab2.SetToolTip("CDP: reads browser DOM directly (fast, no screen interaction). Clipboard: hides GUI, Ctrl+A/Ctrl+C from EMR.")
+        self.grab_mode_choice_tab2.SetToolTip(
+            f"Playwright text grab uses PLAYWRIGHT_TEXT_GRAB_METHOD={PLAYWRIGHT_TEXT_GRAB_METHOD}. Clipboard hides GUI and uses Ctrl+A/Ctrl+C from EMR."
+        )
         gm_row2.Add(gm_label2, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         gm_row2.Add(self.grab_mode_choice_tab2, 0, wx.ALL, 5)
         tab2_sizer.Add(gm_row2, 0, wx.EXPAND)
@@ -7781,10 +12442,10 @@ class MyFrame(wx.Frame):
         # Hair loss exam findings
         hair_exam_label = wx.StaticText(tab2, label="Exam findings (from images):")
         tab2_sizer.Add(hair_exam_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         # Hair exam checkboxes - organized in rows
         hair_exam_sizer = wx.BoxSizer(wx.VERTICAL)
-        
+
         # Row 1
         hair_exam_row1 = wx.BoxSizer(wx.HORIZONTAL)
         self.hair_exam_front_hairline = wx.CheckBox(tab2, label="front hairline")
@@ -7794,27 +12455,27 @@ class MyFrame(wx.Frame):
         hair_exam_row1.Add(self.hair_exam_top_crown, 0, wx.ALL, 5)
         hair_exam_row1.Add(self.hair_exam_widening_part, 0, wx.ALL, 5)
         hair_exam_sizer.Add(hair_exam_row1, 0, wx.EXPAND)
-        
-        # Row 2  
+
+        # Row 2
         hair_exam_row2 = wx.BoxSizer(wx.HORIZONTAL)
         self.hair_exam_diffuse_thinning = wx.CheckBox(tab2, label="diffuse thinning")
         self.hair_exam_confluent = wx.CheckBox(tab2, label="confluent from the front hairline to the crown")
         hair_exam_row2.Add(self.hair_exam_diffuse_thinning, 0, wx.ALL, 5)
         hair_exam_row2.Add(self.hair_exam_confluent, 0, wx.ALL, 5)
         hair_exam_sizer.Add(hair_exam_row2, 0, wx.EXPAND)
-        
+
         # Row 3
         hair_exam_row3 = wx.BoxSizer(wx.HORIZONTAL)
         self.hair_exam_near_front = wx.CheckBox(tab2, label="near the front with sparing of the hairline")
         hair_exam_row3.Add(self.hair_exam_near_front, 0, wx.ALL, 5)
         hair_exam_sizer.Add(hair_exam_row3, 0, wx.EXPAND)
-        
+
         tab2_sizer.Add(hair_exam_sizer, 0, wx.EXPAND)
 
         # Hair loss template buttons
         hair_template_label = wx.StaticText(tab2, label="Templates:")
         tab2_sizer.Add(hair_template_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         hair_btn_row = wx.BoxSizer(wx.HORIZONTAL)
         insert_hair_btn = wx.Button(tab2, label="Insert Hair Note (Follow-up)")
         insert_hair_btn.Bind(wx.EVT_BUTTON, lambda event: self.insert_hair_note(followup=True))
@@ -7827,7 +12488,7 @@ class MyFrame(wx.Frame):
         # Tooltip: System-wide when Hair Loss tab is selected
         insert_initial_btn.SetToolTip("Insert Hair Note (Initial) (Ctrl+Alt+N)")
         hair_btn_row.Add(insert_initial_btn, 0, wx.ALL, 5)
-        
+
         tab2_sizer.Add(hair_btn_row, 0, wx.EXPAND)
 
         # Limited Check-in note button on its own row
@@ -7837,15 +12498,16 @@ class MyFrame(wx.Frame):
         # Tooltip: System-wide when Hair Loss tab is selected
         limited_checkin_btn.SetToolTip("Limited Check-in note (Ctrl+Alt+C)")
         hair_btn_row2.Add(limited_checkin_btn, 0, wx.ALL, 5)
-        print("✅ LIMITED CHECK-IN NOTE BUTTON CREATED SUCCESSFULLY!")  # Debug output
-        
+        print("LIMITED CHECK-IN NOTE BUTTON CREATED SUCCESSFULLY!")  # Debug output
+
         tab2_sizer.Add(hair_btn_row2, 0, wx.EXPAND)
 
         tab2.SetSizer(tab2_sizer)
         tab2.Layout()
 
         # --- Tab 3: Photoaging tools ---
-        tab3 = wx.Panel(self.notebook)
+        tab3 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab3.SetupScrolling(scroll_x=False, scroll_y=True)
         tab3_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -7860,10 +12522,14 @@ class MyFrame(wx.Frame):
         # Grab mode toggle for Tab 3
         gm_row3 = wx.BoxSizer(wx.HORIZONTAL)
         gm_label3 = wx.StaticText(tab3, label="Grab mode:", size=(120, -1))
-        self.grab_mode_choice_tab3 = wx.Choice(tab3, choices=["CDP / Playwright (fast)", "Clipboard (select all + copy)"])
-        self.grab_mode_choice_tab3.SetSelection(0 if USE_CDP_FOR_GRAB else 1)
+        self.grab_mode_choice_tab3 = wx.Choice(
+            tab3, choices=["Playwright text grab", "Clipboard (select all + copy)"]
+        )
+        self.grab_mode_choice_tab3.SetSelection(0 if USE_PLAYWRIGHT_TEXT_GRAB else 1)
         self.grab_mode_choice_tab3.Bind(wx.EVT_CHOICE, lambda evt: self._on_grab_mode_change(evt))
-        self.grab_mode_choice_tab3.SetToolTip("CDP: reads browser DOM directly (fast, no screen interaction). Clipboard: hides GUI, Ctrl+A/Ctrl+C from EMR.")
+        self.grab_mode_choice_tab3.SetToolTip(
+            f"Playwright text grab uses PLAYWRIGHT_TEXT_GRAB_METHOD={PLAYWRIGHT_TEXT_GRAB_METHOD}. Clipboard hides GUI and uses Ctrl+A/Ctrl+C from EMR."
+        )
         gm_row3.Add(gm_label3, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         gm_row3.Add(self.grab_mode_choice_tab3, 0, wx.ALL, 5)
         tab3_sizer.Add(gm_row3, 0, wx.EXPAND)
@@ -7896,10 +12562,10 @@ class MyFrame(wx.Frame):
         # Photoaging exam findings
         photoaging_exam_label = wx.StaticText(tab3, label="Exam findings (from images):")
         tab3_sizer.Add(photoaging_exam_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         # Photoaging exam checkboxes - organized in rows
         photoaging_exam_sizer = wx.BoxSizer(wx.VERTICAL)
-        
+
         # Row 1
         photoaging_exam_row1 = wx.BoxSizer(wx.HORIZONTAL)
         self.photoaging_exam_fine_lines = wx.CheckBox(tab3, label="Fine lines")
@@ -7909,7 +12575,7 @@ class MyFrame(wx.Frame):
         photoaging_exam_row1.Add(self.photoaging_exam_wrinkles, 0, wx.ALL, 5)
         photoaging_exam_row1.Add(self.photoaging_exam_crows_feet, 0, wx.ALL, 5)
         photoaging_exam_sizer.Add(photoaging_exam_row1, 0, wx.EXPAND)
-        
+
         # Row 2
         photoaging_exam_row2 = wx.BoxSizer(wx.HORIZONTAL)
         self.photoaging_exam_pigmentation = wx.CheckBox(tab3, label="Pigmentation changes")
@@ -7919,7 +12585,7 @@ class MyFrame(wx.Frame):
         photoaging_exam_row2.Add(self.photoaging_exam_age_spots, 0, wx.ALL, 5)
         photoaging_exam_row2.Add(self.photoaging_exam_melasma, 0, wx.ALL, 5)
         photoaging_exam_sizer.Add(photoaging_exam_row2, 0, wx.EXPAND)
-        
+
         # Row 3
         photoaging_exam_row3 = wx.BoxSizer(wx.HORIZONTAL)
         self.photoaging_exam_texture_changes = wx.CheckBox(tab3, label="Texture changes")
@@ -7929,7 +12595,7 @@ class MyFrame(wx.Frame):
         photoaging_exam_row3.Add(self.photoaging_exam_enlarged_pores, 0, wx.ALL, 5)
         photoaging_exam_row3.Add(self.photoaging_exam_loss_elasticity, 0, wx.ALL, 5)
         photoaging_exam_sizer.Add(photoaging_exam_row3, 0, wx.EXPAND)
-        
+
         # Row 4
         photoaging_exam_row4 = wx.BoxSizer(wx.HORIZONTAL)
         self.photoaging_exam_inflammation = wx.CheckBox(tab3, label="Signs of inflammation")
@@ -7939,25 +12605,26 @@ class MyFrame(wx.Frame):
         photoaging_exam_row4.Add(self.photoaging_exam_scarring, 0, wx.ALL, 5)
         photoaging_exam_row4.Add(self.photoaging_exam_normal, 0, wx.ALL, 5)
         photoaging_exam_sizer.Add(photoaging_exam_row4, 0, wx.EXPAND)
-        
+
         tab3_sizer.Add(photoaging_exam_sizer, 0, wx.EXPAND)
 
         # Photoaging template buttons
         photoaging_template_label = wx.StaticText(tab3, label="Templates:")
         tab3_sizer.Add(photoaging_template_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         photoaging_btn_row = wx.BoxSizer(wx.HORIZONTAL)
         insert_photoaging_btn = wx.Button(tab3, label="Insert Photoaging Note")
         insert_photoaging_btn.Bind(wx.EVT_BUTTON, lambda event: self.insert_photoaging_note())
         photoaging_btn_row.Add(insert_photoaging_btn, 0, wx.ALL, 5)
-        
+
         tab3_sizer.Add(photoaging_btn_row, 0, wx.EXPAND)
 
         tab3.SetSizer(tab3_sizer)
         tab3.Layout()
 
         # --- Tab 4: Sexual Health tools ---
-        tab4 = wx.Panel(self.notebook)
+        tab4 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab4.SetupScrolling(scroll_x=False, scroll_y=True)
         tab4_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -7974,10 +12641,14 @@ class MyFrame(wx.Frame):
         # Grab mode toggle for Sexual Health (unified CDP vs Clipboard)
         gm_row4 = wx.BoxSizer(wx.HORIZONTAL)
         gm_label4 = wx.StaticText(tab4, label="Grab mode:", size=(120, -1))
-        self.grab_mode_choice_tab4 = wx.Choice(tab4, choices=["CDP / Playwright (fast)", "Clipboard (select all + copy)"])
-        self.grab_mode_choice_tab4.SetSelection(0 if USE_CDP_FOR_GRAB else 1)
+        self.grab_mode_choice_tab4 = wx.Choice(
+            tab4, choices=["Playwright text grab", "Clipboard (select all + copy)"]
+        )
+        self.grab_mode_choice_tab4.SetSelection(0 if USE_PLAYWRIGHT_TEXT_GRAB else 1)
         self.grab_mode_choice_tab4.Bind(wx.EVT_CHOICE, lambda evt: self._on_grab_mode_change(evt))
-        self.grab_mode_choice_tab4.SetToolTip("CDP: reads browser DOM directly (fast, no screen interaction). Clipboard: hides GUI, Ctrl+A/Ctrl+C from EMR.")
+        self.grab_mode_choice_tab4.SetToolTip(
+            f"Playwright text grab uses PLAYWRIGHT_TEXT_GRAB_METHOD={PLAYWRIGHT_TEXT_GRAB_METHOD}. Clipboard hides GUI and uses Ctrl+A/Ctrl+C from EMR."
+        )
         gm_row4.Add(gm_label4, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         gm_row4.Add(self.grab_mode_choice_tab4, 0, wx.ALL, 5)
         tab4_sizer.Add(gm_row4, 0, wx.EXPAND)
@@ -8008,7 +12679,7 @@ class MyFrame(wx.Frame):
         tab4_sizer.Add(bp_row, 0, wx.EXPAND)
 
         # --- SH Initial visit fields (auto-populated by Grab, editable) ---
-        sh_initial_label = wx.StaticText(tab4, label="── Initial Visit ──")
+        sh_initial_label = wx.StaticText(tab4, label="â”€â”€ Initial Visit â”€â”€")
         sh_initial_label.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_ITALIC, wx.FONTWEIGHT_BOLD))
         tab4_sizer.Add(sh_initial_label, 0, wx.LEFT | wx.TOP, 10)
 
@@ -8150,7 +12821,7 @@ class MyFrame(wx.Frame):
         # Sexual health diagnosis checkboxes
         sexual_health_dx_label = wx.StaticText(tab4, label="Diagnosis:")
         tab4_sizer.Add(sexual_health_dx_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         sexual_health_dx_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.sexual_health_dx_ed = wx.CheckBox(tab4, label="ED")
         self.sexual_health_dx_pe = wx.CheckBox(tab4, label="PE")
@@ -8169,7 +12840,7 @@ class MyFrame(wx.Frame):
         # Sexual health template buttons
         sexual_health_template_label = wx.StaticText(tab4, label="Templates:")
         tab4_sizer.Add(sexual_health_template_label, 0, wx.LEFT | wx.TOP, 10)
-        
+
         # Row 1: follow-up and plan note
         sexual_health_btn_row = wx.BoxSizer(wx.HORIZONTAL)
         insert_sexual_health_btn = wx.Button(tab4, label="Insert Follow-up Note")
@@ -8191,7 +12862,7 @@ class MyFrame(wx.Frame):
         sh_change_med_btn = wx.Button(tab4, label="Change med")
         sh_change_med_btn.Bind(wx.EVT_BUTTON, lambda event: self.insert_sh_change_medication())
         sexual_health_btn_row2.Add(sh_change_med_btn, 0, wx.ALL, 5)
-        
+
         # Row 3: Hair loss button
         sexual_health_btn_row3 = wx.BoxSizer(wx.HORIZONTAL)
         insert_hair_info_btn = wx.Button(tab4, label="Insert Hair Info")
@@ -8243,7 +12914,7 @@ class MyFrame(wx.Frame):
             accel_entries.append(ent)
         # Attach the accelerator table to Tab 4 so shortcuts work when this tab has focus
         tab4.SetAcceleratorTable(wx.AcceleratorTable(accel_entries))
-        
+
         tab4_sizer.Add(sexual_health_btn_row, 0, wx.EXPAND)
         tab4_sizer.Add(sexual_health_btn_row2, 0, wx.EXPAND)
         tab4_sizer.Add(sexual_health_btn_row3, 0, wx.EXPAND)
@@ -8258,7 +12929,8 @@ class MyFrame(wx.Frame):
         self.clicker_method_mode = "cdp"
 
         # --- Tab 5: Auto Clicker ---
-        tab5 = wx.Panel(self.notebook)
+        tab5 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab5.SetupScrolling(scroll_x=False, scroll_y=True)
         tab5_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Auto Clicker title
@@ -8268,14 +12940,14 @@ class MyFrame(wx.Frame):
 
         # Control buttons - vertical layout
         clicker_controls = wx.BoxSizer(wx.VERTICAL)
-        
+
         self.clicker_start_btn = wx.Button(tab5, label="Start Autoclick: Dashboard", size=(280, 40))
         self.clicker_start_btn.Bind(wx.EVT_BUTTON, lambda event: self.toggle_auto_clicker())
         self.clicker_start_btn.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        
+
         self.clicker_test_btn = wx.Button(tab5, label="Detect Browser", size=(280, 30))
         self.clicker_test_btn.Bind(wx.EVT_BUTTON, lambda event: self.test_chrome_connection())
-        
+
         # Detect Tab button uses browser-based header detection to switch tabs
         self.detect_tab_btn = wx.Button(tab5, label="Detect Tab", size=(280, 30))
         self.detect_tab_btn.Bind(wx.EVT_BUTTON, lambda event: self.detect_visit_type_and_switch_tab())
@@ -8283,17 +12955,17 @@ class MyFrame(wx.Frame):
         # Quick Next Task button - clicks floating button then "Get Next Task"
         self.quick_next_btn = wx.Button(tab5, label="Quick Next Task", size=(280, 30))
         self.quick_next_btn.Bind(wx.EVT_BUTTON, lambda event: self.quick_next_task())
-        
+
         # Start Autoclick: In-Visit - runs quick_next_task repeatedly at interval until URL changes
         self.clicker_invisit_btn = wx.Button(tab5, label="Start Autoclick: In-Visit", size=(280, 40))
         self.clicker_invisit_btn.Bind(wx.EVT_BUTTON, lambda event: self.toggle_invisit_clicker())
         self.clicker_invisit_btn.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        
-        # Auto-Refresh Page - refreshes current tab every 3 minutes ±30%
+
+        # Auto-Refresh Page - refreshes current tab every 3 minutes Â±30%
         self.page_refresh_btn = wx.Button(tab5, label="Start Auto-Refresh Page", size=(280, 40))
         self.page_refresh_btn.Bind(wx.EVT_BUTTON, lambda event: self.toggle_page_refresh())
         self.page_refresh_btn.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        
+
         self.clicker_status_text = wx.StaticText(tab5, label="Status: STOPPED")
         self.clicker_status_text.SetForegroundColour(wx.Colour(255, 0, 0))  # Red
 
@@ -8303,9 +12975,17 @@ class MyFrame(wx.Frame):
         clicker_controls.Add(self.quick_next_btn, 0, wx.ALL | wx.EXPAND, 5)
         clicker_controls.Add(self.clicker_invisit_btn, 0, wx.ALL | wx.EXPAND, 5)
         clicker_controls.Add(self.page_refresh_btn, 0, wx.ALL | wx.EXPAND, 5)
-        self.js_overlay_btn = wx.Button(tab5, label="Switch to JS Overlay", size=(280, 34))
+
+        # Switch to JS overlay button
+        self.js_overlay_btn = wx.Button(tab5, label="âš¡ Switch to JS Overlay")
+        self.js_overlay_btn.SetBackgroundColour(wx.Colour(18, 174, 230))
+        self.js_overlay_btn.SetForegroundColour(wx.Colour(0, 34, 51))
+        self.js_overlay_btn.SetFont(
+            wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        )
         self.js_overlay_btn.Bind(wx.EVT_BUTTON, self.inject_js_overlay)
         clicker_controls.Add(self.js_overlay_btn, 0, wx.ALL | wx.EXPAND, 5)
+
         clicker_controls.Add(self.clicker_status_text, 0, wx.ALL | wx.CENTER, 8)
         tab5_sizer.Add(clicker_controls, 0, wx.EXPAND | wx.ALL, 10)
 
@@ -8313,7 +12993,7 @@ class MyFrame(wx.Frame):
         info_row = wx.BoxSizer(wx.HORIZONTAL)
         self.clicker_method_text = wx.StaticText(tab5, label="Click method: CDP (0)")
         self.clicker_method_text.SetForegroundColour(wx.Colour(30, 144, 255))  # DodgerBlue for CDP
-        self.clicker_last_text = wx.StaticText(tab5, label="Last click: —")
+        self.clicker_last_text = wx.StaticText(tab5, label="Last click: â€”")
         info_row.Add(self.clicker_method_text, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         info_row.AddSpacer(20)
         info_row.Add(self.clicker_last_text, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
@@ -8335,7 +13015,7 @@ class MyFrame(wx.Frame):
         # Settings
         settings_box = wx.StaticBox(tab5, label="Click Settings")
         settings_sizer = wx.StaticBoxSizer(settings_box, wx.VERTICAL)
-        
+
         # Coordinates
         coord_row = wx.BoxSizer(wx.HORIZONTAL)
         coord_label = wx.StaticText(tab5, label="Click Position:")
@@ -8347,7 +13027,7 @@ class MyFrame(wx.Frame):
         coord_row.Add(wx.StaticText(tab5, label="Y:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         coord_row.Add(self.clicker_y_text, 0, wx.ALL, 5)
         settings_sizer.Add(coord_row, 0, wx.EXPAND)
-        
+
         # Interval
         interval_row = wx.BoxSizer(wx.HORIZONTAL)
         interval_label = wx.StaticText(tab5, label="Interval (seconds):")
@@ -8371,41 +13051,58 @@ class MyFrame(wx.Frame):
 
         tab5_sizer.Add(settings_sizer, 0, wx.EXPAND | wx.ALL, 10)
 
-        custom_hotkey_box = wx.StaticBox(tab5, label="CDP Hotkeys")
+        custom_hotkey_box = wx.StaticBox(tab5, label="Playwright Click Paths")
         custom_hotkey_sizer = wx.StaticBoxSizer(custom_hotkey_box, wx.VERTICAL)
         custom_note = wx.StaticText(
             tab5,
-            label="Edit the CUSTOM_CDP_HOTKEYS list near the auto-hide helpers to change these shortcuts.")
+            label=f"These selector-driven click paths are loaded from {PLAYWRIGHT_CLICK_PATHS_FILENAME}. Edit the file, then reload to apply changes.",
+        )
         custom_note.Wrap(520)
         custom_hotkey_sizer.Add(custom_note, 0, wx.ALL | wx.EXPAND, 6)
-        if self.CUSTOM_CDP_HOTKEYS:
-            for entry in self.CUSTOM_CDP_HOTKEYS:
-                hotkey_label = entry.get("hotkey", "")
-                description = entry.get("description") or ""
-                line = f"{hotkey_label}"
-                if description:
-                    line = f"{line} — {description}"
-                custom_hotkey_sizer.Add(wx.StaticText(tab5, label=line), 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
-        else:
-            custom_hotkey_sizer.Add(wx.StaticText(tab5, label="No custom CDP hotkeys defined."), 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+        custom_hotkey_btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.playwright_click_paths_edit_btn = wx.Button(
+            tab5, label="Edit Settings", size=(140, 28)
+        )
+        self.playwright_click_paths_reload_btn = wx.Button(
+            tab5, label="Reload Settings", size=(140, 28)
+        )
+        self.playwright_click_paths_edit_btn.Bind(
+            wx.EVT_BUTTON, self.on_edit_playwright_click_paths
+        )
+        self.playwright_click_paths_reload_btn.Bind(
+            wx.EVT_BUTTON, self.on_reload_playwright_click_paths
+        )
+        custom_hotkey_btn_row.Add(self.playwright_click_paths_edit_btn, 0, wx.ALL, 4)
+        custom_hotkey_btn_row.Add(self.playwright_click_paths_reload_btn, 0, wx.ALL, 4)
+        custom_hotkey_sizer.Add(
+            custom_hotkey_btn_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 2
+        )
+        self.playwright_click_paths_text = wx.StaticText(tab5, label="")
+        self.playwright_click_paths_text.Wrap(520)
+        custom_hotkey_sizer.Add(
+            self.playwright_click_paths_text,
+            0,
+            wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND,
+            6,
+        )
         tab5_sizer.Add(custom_hotkey_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
         # URL Monitor
         url_box = wx.StaticBox(tab5, label="URL Monitor")
         url_sizer = wx.StaticBoxSizer(url_box, wx.VERTICAL)
-        
+
         self.clicker_url_text = wx.StaticText(tab5, label="Current URL: Not detected")
         self.clicker_url_text.Wrap(600)
         url_sizer.Add(self.clicker_url_text, 0, wx.ALL | wx.EXPAND, 5)
-        
+
         tab5_sizer.Add(url_sizer, 1, wx.EXPAND | wx.ALL, 10)
 
         # Instructions
         instructions = wx.StaticText(tab5, 
-            label=f"Instructions:\n• Set click coordinates and interval\n• Click 'Start Clicking' to begin\n• Clicking auto-stops when URL changes\n• Chrome/Thorium must be running with remote debugging (--remote-debugging-port={CDP_DEBUG_PORT})")
+            label=f"Instructions:\nâ€¢ Set click coordinates and interval\nâ€¢ Click 'Start Clicking' to begin\nâ€¢ Clicking auto-stops when URL changes\nâ€¢ Chrome/Thorium must be running with remote debugging (--remote-debugging-port={CDP_DEBUG_PORT})")
         instructions.Wrap(600)
         tab5_sizer.Add(instructions, 0, wx.ALL | wx.EXPAND, 10)
-        
+
         # Initialize in-visit clicker state
         self.invisit_running = False
         self.invisit_thread = None
@@ -8414,7 +13111,8 @@ class MyFrame(wx.Frame):
         tab5.Layout()
 
         # --- Tab 6: Performance Anxiety ---
-        tab6 = wx.Panel(self.notebook)
+        tab6 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab6.SetupScrolling(scroll_x=False, scroll_y=True)
         tab6_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -8429,10 +13127,14 @@ class MyFrame(wx.Frame):
         # Grab mode toggle for Tab 6
         gm_row6 = wx.BoxSizer(wx.HORIZONTAL)
         gm_label6 = wx.StaticText(tab6, label="Grab mode:", size=(120, -1))
-        self.grab_mode_choice_tab6 = wx.Choice(tab6, choices=["CDP / Playwright (fast)", "Clipboard (select all + copy)"])
-        self.grab_mode_choice_tab6.SetSelection(0 if USE_CDP_FOR_GRAB else 1)
+        self.grab_mode_choice_tab6 = wx.Choice(
+            tab6, choices=["Playwright text grab", "Clipboard (select all + copy)"]
+        )
+        self.grab_mode_choice_tab6.SetSelection(0 if USE_PLAYWRIGHT_TEXT_GRAB else 1)
         self.grab_mode_choice_tab6.Bind(wx.EVT_CHOICE, lambda evt: self._on_grab_mode_change(evt))
-        self.grab_mode_choice_tab6.SetToolTip("CDP: reads browser DOM directly (fast, no screen interaction). Clipboard: hides GUI, Ctrl+A/Ctrl+C from EMR.")
+        self.grab_mode_choice_tab6.SetToolTip(
+            f"Playwright text grab uses PLAYWRIGHT_TEXT_GRAB_METHOD={PLAYWRIGHT_TEXT_GRAB_METHOD}. Clipboard hides GUI and uses Ctrl+A/Ctrl+C from EMR."
+        )
         gm_row6.Add(gm_label6, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         gm_row6.Add(self.grab_mode_choice_tab6, 0, wx.ALL, 5)
         tab6_sizer.Add(gm_row6, 0, wx.EXPAND)
@@ -8509,7 +13211,8 @@ class MyFrame(wx.Frame):
         tab6.Layout()
 
         # --- Tab 7: Birth Control ---
-        tab7 = wx.Panel(self.notebook)
+        tab7 = scrolled.ScrolledPanel(self.notebook, style=wx.VSCROLL)
+        tab7.SetupScrolling(scroll_x=False, scroll_y=True)
         tab7_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Template dropdown row at top of tab
@@ -8524,10 +13227,14 @@ class MyFrame(wx.Frame):
         # Grab mode toggle for Tab 7
         gm_row7 = wx.BoxSizer(wx.HORIZONTAL)
         gm_label7 = wx.StaticText(tab7, label="Grab mode:", size=(120, -1))
-        self.grab_mode_choice_tab7 = wx.Choice(tab7, choices=["CDP / Playwright (fast)", "Clipboard (select all + copy)"])
-        self.grab_mode_choice_tab7.SetSelection(0 if USE_CDP_FOR_GRAB else 1)
+        self.grab_mode_choice_tab7 = wx.Choice(
+            tab7, choices=["Playwright text grab", "Clipboard (select all + copy)"]
+        )
+        self.grab_mode_choice_tab7.SetSelection(0 if USE_PLAYWRIGHT_TEXT_GRAB else 1)
         self.grab_mode_choice_tab7.Bind(wx.EVT_CHOICE, lambda evt: self._on_grab_mode_change(evt))
-        self.grab_mode_choice_tab7.SetToolTip("CDP: reads browser DOM directly (fast, no screen interaction). Clipboard: hides GUI, Ctrl+A/Ctrl+C from EMR.")
+        self.grab_mode_choice_tab7.SetToolTip(
+            f"Playwright text grab uses PLAYWRIGHT_TEXT_GRAB_METHOD={PLAYWRIGHT_TEXT_GRAB_METHOD}. Clipboard hides GUI and uses Ctrl+A/Ctrl+C from EMR."
+        )
         gm_row7.Add(gm_label7, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         gm_row7.Add(self.grab_mode_choice_tab7, 0, wx.ALL, 5)
         tab7_sizer.Add(gm_row7, 0, wx.EXPAND)
@@ -8620,7 +13327,6 @@ class MyFrame(wx.Frame):
         tab7.Layout()
 
         # Add tabs to notebook
-        self.notebook.AddPage(tab1, "T Deficiency")
         self.notebook.AddPage(tab2, "Hair Loss")
         self.notebook.AddPage(tab3, "Photoaging")
         self.notebook.AddPage(tab4, "Sexual Health")
@@ -8628,17 +13334,14 @@ class MyFrame(wx.Frame):
         self.notebook.AddPage(tab6, "Performance Anxiety")
         self.notebook.AddPage(tab7, "Birth Control")
 
-        # Record index for T Deficiency, Sexual Health and Hair Loss tabs so we can toggle global hotkeys based on selection
+        # Record index for Sexual Health, Hair Loss, etc. tabs so we can toggle global hotkeys based on selection
         try:
-            self._tab_index_t_def = None
             self._tab_index_sexual_health = None
             self._tab_index_hair_loss = None
             self._tab_index_performance_anxiety = None
             self._tab_index_birth_control = None
             for i in range(self.notebook.GetPageCount()):
                 page = self.notebook.GetPage(i)
-                if page is tab1:
-                    self._tab_index_t_def = i
                 if page is tab4:
                     self._tab_index_sexual_health = i
                 if page is tab2:
@@ -8648,42 +13351,42 @@ class MyFrame(wx.Frame):
                 if page is tab7:
                     self._tab_index_birth_control = i
         except Exception:
-            self._tab_index_t_def = 0       # Fallback to known order
-            self._tab_index_sexual_health = 3  # Fallback to known order
-            self._tab_index_hair_loss = 1      # Fallback to known order
-            self._tab_index_performance_anxiety = 5
-            self._tab_index_birth_control = 6
+            self._tab_index_sexual_health = 2  # Fallback to known order
+            self._tab_index_hair_loss = 0  # Fallback to known order
+            self._tab_index_performance_anxiety = 4
+            self._tab_index_birth_control = 5
 
         # Add the visit-type line just under the tabs area, then the notebook
         top_info_sizer = wx.BoxSizer(wx.HORIZONTAL)
         info_label_sizer = wx.BoxSizer(wx.VERTICAL)
-        info_label_sizer.Add(self.visit_type_text, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 8)
-        info_label_sizer.Add(self.patient_location_text, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
+        info_label_sizer.Add(
+            self.visit_type_text, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 8
+        )
         top_info_sizer.Add(info_label_sizer, 1, wx.EXPAND)
-        
+
         # Edit Templates button (opens template file for current tab)
         self.edit_templates_btn = wx.Button(panel, label="Edit Templates")
         self.edit_templates_btn.SetToolTip("Edit template text file for current tab (opens in Notepad)")
         self.edit_templates_btn.Bind(wx.EVT_BUTTON, self.on_edit_templates_global)
         top_info_sizer.Add(self.edit_templates_btn, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 8)
-        
+
         self.detect_visit_btn = wx.Button(panel, label="Detect Visit")
         self.detect_visit_btn.SetToolTip("Detect the active EMR visit type and switch to that tab")
         self.detect_visit_btn.Bind(wx.EVT_BUTTON, lambda evt: self.detect_visit_type_and_switch_tab())
         top_info_sizer.Add(self.detect_visit_btn, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 8)
-        
+
         main_sizer.Add(top_info_sizer, 0, wx.EXPAND)
-        
+
         # Track current tab for Edit Templates button
-        self._current_template_tab = "T Deficiency"
+        self._current_template_tab = "Hair Loss"
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_notebook_page_changed)
-        
+
         main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
 
         # Initialize auto-refresh state
         self.auto_refresh_enabled = False
         self.auto_refresh_thread = None
-        
+
         # Initialize page refresh state
         self.page_refresh_running = False
         self.page_refresh_thread = None
@@ -8702,18 +13405,30 @@ class MyFrame(wx.Frame):
         self._cdp_last_visit_key = None
         self._cdp_last_grab_key = None
         self._cdp_last_display = None
+        # JS overlay state
+        self._js_overlay_active = False
+        self._js_overlay_visit_type = None
+        self._js_overlay_dark_mode = False
+        self._overlay_keep_awake_enabled = False
+        self._overlay_keep_awake_next_click_ts = 0.0
+        self._overlay_keep_awake_target_index = 0
+        self._overlay_keep_awake_baseline_url = ""
+        self._js_overlay_cmd_queue = queue.Queue()
+        self._js_overlay_thread = None
+        self._js_overlay_page = None  # Set by overlay thread, read-only elsewhere
+        self._js_overlay_show_error_on_fail = True
         # Start CDP visit-type monitor (no flicker)
         self._start_cdp_visit_monitor()
-        
+
         # URL monitoring disabled per user request
 
         panel.SetSizer(main_sizer)
         panel.Layout()
-        
+
         # Get screen dimensions and set window to full height
         display_size = wx.GetDisplaySize()
         screen_height = display_size.GetHeight()
-        
+
         self.Fit()
         self.SetMinSize((600, 800))
         self.SetSize((700, screen_height - 100))  # Full height minus taskbar space
@@ -8727,18 +13442,90 @@ class MyFrame(wx.Frame):
         self.notify_with_popup = True
         self.new_task_popup = None
         self._browser_grabber_cache = None
+        self._frame_icon_ref = None
+        self._tray_icon_ref = None
+        self._tray_icon = None
 
         # Delay used before inserting text via GLOBAL hotkeys (in milliseconds).
         # Increase this if characters are occasionally missed by Chrome/EMR on paste.
-        # Where to change: adjust self.global_insert_delay_ms below (e.g., 150–350 ms)
+        # Where to change: adjust self.global_insert_delay_ms below (e.g., 150â€“350 ms)
         self.global_insert_delay_ms = 200
 
         # Setup global F4 hotkey for grab functionality (now with Playwright support)
         self.setup_global_hotkeys()
         self._register_custom_cdp_hotkeys()
+        self._refresh_playwright_click_paths_display()
+        self._setup_taskbar_icon()
 
         # Bind close event to cleanup hotkeys
         self.Bind(wx.EVT_CLOSE, self.on_close)
+
+    def _setup_taskbar_icon(self):
+        """Create the frame icon and persistent Windows tray icon."""
+        self._frame_icon_ref = _build_emr_assist_icon(32)
+        if self._frame_icon_ref and self._frame_icon_ref.IsOk():
+            try:
+                self.SetIcon(self._frame_icon_ref)
+            except Exception as exc:
+                print(f"Frame icon setup failed: {exc}")
+
+        if EMRAssistTaskBarIcon is None:
+            print("System tray icon unavailable: wx.adv.TaskBarIcon not available")
+            return
+
+        try:
+            self._tray_icon = EMRAssistTaskBarIcon(self)
+            self._tray_icon_ref = _build_emr_assist_icon(16)
+            if self._tray_icon_ref and self._tray_icon_ref.IsOk():
+                self._tray_icon.SetIcon(self._tray_icon_ref, panel_title)
+                print("System tray icon initialized")
+            else:
+                print("System tray icon unavailable: generated icon was invalid")
+        except Exception as exc:
+            print(f"System tray icon setup failed: {exc}")
+            self._tray_icon = None
+
+    def _restore_from_tray(self):
+        """Restore the desktop UI, exiting JS overlay mode if needed."""
+        try:
+            if getattr(self, "_js_overlay_active", False):
+                self._remove_js_overlay()
+            else:
+                if self.IsIconized():
+                    self.Iconize(False)
+                if not self.IsShown():
+                    self.Show()
+                self.Raise()
+        except Exception as exc:
+            print(f"Tray restore failed: {exc}")
+
+    def _toggle_window_from_tray(self):
+        """Primary tray action: restore the Python UI or hide it when already visible."""
+        try:
+            if getattr(self, "_js_overlay_active", False):
+                self._remove_js_overlay()
+                return
+            if self.IsShown() and not self.IsIconized():
+                self.Hide()
+            else:
+                self._restore_from_tray()
+        except Exception as exc:
+            print(f"Tray toggle failed: {exc}")
+
+    def _destroy_taskbar_icon(self):
+        """Remove the tray icon explicitly so Windows does not keep a stale entry."""
+        tray_icon = getattr(self, "_tray_icon", None)
+        if tray_icon is None:
+            return
+        try:
+            tray_icon.RemoveIcon()
+        except Exception:
+            pass
+        try:
+            tray_icon.Destroy()
+        except Exception:
+            pass
+        self._tray_icon = None
 
     def _canonicalize_visit_type(self, visit: Optional[str]) -> Optional[str]:
         if not visit:
@@ -8749,10 +13536,6 @@ class MyFrame(wx.Frame):
         low = text.lower()
         if "emr dashboard" in low or low == "dashboard":
             return "EMR Dashboard"
-        if "testosterone" in low and "T Deficiency" in VISIT_TAB_INDICES:
-            return "T Deficiency"
-        if "low t" in low and "T Deficiency" in VISIT_TAB_INDICES:
-            return "T Deficiency"
         if "birth control" in low and "Birth Control" in VISIT_TAB_INDICES:
             return "Birth Control"
         if "contraception" in low and "Birth Control" in VISIT_TAB_INDICES:
@@ -8840,7 +13623,7 @@ class MyFrame(wx.Frame):
                     pass
 
     def _format_patient_location_label(self, summary: Optional[Dict[str, Any]]) -> str:
-        base = "Location: —"
+        base = "Location: â€”"
         if not summary:
             return base
 
@@ -8865,8 +13648,7 @@ class MyFrame(wx.Frame):
         self._last_location_summary = summary
 
     def refresh_patient_location_async(self) -> None:
-        if self._location_worker and self._location_worker.is_alive():
-            return
+        return  # Location feature disabled
 
         def worker():
             try:
@@ -8960,8 +13742,9 @@ class MyFrame(wx.Frame):
                 elif canonical == "Birth Control":
                     self.grab_birth_control()
                 else:
-                    grab_all_labs()
+                    print(f"[CDP MONITOR] No grab handler for {canonical}")
                 print(f"[CDP MONITOR] Auto grab dispatched for {canonical} (url={source_url})")
+                # Vars pushed to overlay automatically via _emr_bridge_hook
             except Exception as exc:
                 print(f"[CDP MONITOR] Auto grab error for {canonical}: {exc}")
 
@@ -9090,118 +13873,6 @@ class MyFrame(wx.Frame):
             pass
 
     def _cdp_get_frame_contexts(self, session_id: str) -> List[int]:
-        ctxs: List[int] = []
-        try:
-            ft = self._cdp_driver.execute_cdp_cmd("Page.getFrameTree", {"sessionId": session_id})
-            def walk(node):
-                frame = (node or {}).get("frame", {})
-                fid = frame.get("id")
-                if fid:
-                    try:
-                        cw = self._cdp_driver.execute_cdp_cmd(
-                            "Page.createIsolatedWorld",
-                            {"frameId": fid, "worldName": "visit_type_probe", "sessionId": session_id},
-                        )
-                        cid = cw.get("executionContextId")
-                        if isinstance(cid, int):
-                            ctxs.append(cid)
-                    except Exception:
-                        pass
-                for ch in (node or {}).get("childFrames", []) or []:
-                    walk(ch)
-            root = (ft or {}).get("frameTree")
-            if root:
-                walk(root)
-        except Exception:
-            pass
-        return ctxs
-
-    def _cdp_detect_visit_text(self, target_id: str) -> Optional[tuple]:
-        """
-        Attach to target and detect visit type.
-        Returns: (title_text, actual_url) tuple if successful, None if failed or wrong page
-        """
-        try:
-            # Attach to target
-            att = self._cdp_driver.execute_cdp_cmd("Target.attachToTarget", {"targetId": target_id, "flatten": True})
-            session_id = att.get("sessionId")
-            if not session_id:
-                return None
-            
-            try:
-                # Verify actual URL
-                expr_url = "window.location.href"
-                actual_url = self._cdp_eval(session_id, expr_url)
-                
-                if not actual_url:
-                    return None
-                    
-                # Check if this is actually an EMR visit page
-                if not self._cdp_is_emr(actual_url):
-                    self._cdp_log(f"Skipping non-EMR page: {actual_url}")
-                    return None
-                
-                # Try to get visit type text
-                contexts = self._cdp_get_frame_contexts(session_id)
-                for ctx in contexts:
-                    txt = self._cdp_try_get_header_text(session_id, ctx)
-                    if txt:
-                        return (txt, actual_url)
-                
-                return None
-                
-            finally:
-                try:
-                    self._cdp_driver.execute_cdp_cmd("Target.detachFromTarget", {"sessionId": session_id})
-                except Exception:
-                    pass
-                    
-        except Exception as e:
-            return None
-
-    def _start_cdp_visit_monitor(self):
-        """Background thread that monitors visit type via CDP"""
-        def worker():
-            last_text = None
-            last_url = None
-            
-            while self._cdp_monitor_active:
-                try:
-                    # Get all page targets
-                    targets = self._cdp_list_targets()
-                    
-                    # Try each target until we find an EMR visit page
-                    found = False
-                    for t in targets:
-                        result = self._cdp_detect_visit_text(t['targetId'])
-                        if result:
-                            text, url = result
-                            found = True
-                            
-                            # Update display if changed
-                            if text != last_text or url != last_url:
-                                last_text = text
-                                last_url = url
-                                wx.CallAfter(self._update_visit_display, text)
-                                self._cdp_log(f"Visit type detected: {text} | URL: {url}")
-                            break
-                    
-                    if not found:
-                        if last_text is not None:
-                            last_text = None
-                            last_url = None
-                            wx.CallAfter(self._update_visit_display, None)
-                    
-                    time.sleep(2)
-                    
-                except Exception as e:
-                    self._cdp_log(f"Monitor error: {e}")
-                    time.sleep(5)
-        
-        self._cdp_monitor_thread = threading.Thread(target=worker, daemon=True)
-        self._cdp_monitor_thread.start()
-
-    def _cdp_get_frame_contexts(self, session_id: str) -> List[int]:
         """Get execution contexts for all frames"""
         ctxs: List[int] = []
         try:
@@ -9294,40 +13965,13 @@ class MyFrame(wx.Frame):
             return val.strip()
         return None
 
-    def _cdp_get_frame_contexts(self, session_id: str) -> List[int]:
-        ctxs: List[int] = []
-        try:
-            ft = self._cdp_driver.execute_cdp_cmd("Page.getFrameTree", {"sessionId": session_id})
-            def walk(node):
-                frame = (node or {}).get("frame", {})
-                fid = frame.get("id")
-                if fid:
-                    try:
-                        cw = self._cdp_driver.execute_cdp_cmd(
-                            "Page.createIsolatedWorld",
-                            {"frameId": fid, "worldName": "visit_type_probe", "sessionId": session_id},
-                        )
-                        cid = cw.get("executionContextId")
-                        if isinstance(cid, int):
-                            ctxs.append(cid)
-                    except Exception:
-                        pass
-                for ch in (node or {}).get("childFrames", []) or []:
-                    walk(ch)
-            root = (ft or {}).get("frameTree")
-            if root:
-                walk(root)
-        except Exception:
-            pass
-        return ctxs
-
     def _cdp_detect_visit_text(self, target_id: str) -> Optional[tuple]:
         """
         Attach to target and detect visit type.
         Returns: (title_text, actual_url) tuple if successful, None if failed or wrong page
         """
         try:
-            self._cdp_log(f"Attaching to target {target_id}…")
+            self._cdp_log(f"Attaching to target {target_id}â€¦")
             attach = self._cdp_driver.execute_cdp_cmd("Target.attachToTarget", {"targetId": target_id, "flatten": True})
             session_id = attach.get("sessionId")
             if not session_id:
@@ -9341,7 +13985,7 @@ class MyFrame(wx.Frame):
                 self._cdp_driver.execute_cdp_cmd("Runtime.enable", {"sessionId": session_id})
             except Exception:
                 pass
-            
+
             # Verify we're attached to the correct page by checking window.location.href
             try:
                 actual_url = self._cdp_eval(session_id, "window.location.href", context_id=None)
@@ -9365,16 +14009,16 @@ class MyFrame(wx.Frame):
                 else:
                     self._cdp_log("Dashboard detected via URL (no welcome header found)")
                 return ("EMR Dashboard", actual_url)
-            
+
             # main world
-            self._cdp_log("Probing main world for header text…")
+            self._cdp_log("Probing main world for header textâ€¦")
             t = self._cdp_try_get_header_text(session_id, context_id=None)
             if t:
                 self._cdp_log("Found header text in main world")
                 return (t, actual_url)
             # frames
             ctxs = self._cdp_get_frame_contexts(session_id)
-            self._cdp_log(f"Probing {len(ctxs)} frame contexts…")
+            self._cdp_log(f"Probing {len(ctxs)} frame contextsâ€¦")
             for ctx in ctxs:
                 t = self._cdp_try_get_header_text(session_id, context_id=ctx)
                 if t:
@@ -9422,7 +14066,7 @@ class MyFrame(wx.Frame):
 
     def _start_cdp_visit_monitor(self):
         def loop():
-            self._cdp_log("Starting CDP visit monitor loop…")
+            self._cdp_log("Starting CDP visit monitor loopâ€¦")
             while self._cdp_monitor_running and not getattr(self, "_is_closing", False):
                 try:
                     self._cdp_connect_driver()
@@ -9451,10 +14095,16 @@ class MyFrame(wx.Frame):
                             self._cdp_log(f"URL change: {self._cdp_active_url} -> {actual_url}")
                             self._cdp_active_url = actual_url
                             self._cdp_last_grab_key = None
+                            # Re-inject JS overlay if it was lost during navigation
+                            if self._js_overlay_active:
+                                self._queue_overlay_cmd("reinject")
 
                         if display != self._cdp_last_display:
                             self._cdp_last_display = display
                             wx.CallAfter(self.visit_type_text.SetLabel, f"Visit type: {display}")
+                            # Update JS overlay visit type
+                            if self._js_overlay_active:
+                                self._queue_overlay_cmd("push_visit", display)
 
                         key = (actual_url, canonical or display)
                         if key != self._cdp_last_visit_key:
@@ -9488,13 +14138,2133 @@ class MyFrame(wx.Frame):
             self._cdp_monitor_thread = threading.Thread(target=loop, daemon=True)
             self._cdp_monitor_thread.start()
 
+    # ================================================================
+    # JS Overlay â€” inject / remove / callbacks  (thread + queue)
+    # ================================================================
+
+    def _queue_overlay_cmd(self, cmd, data=None):
+        """Thread-safe: enqueue a command for the overlay thread."""
+        try:
+            self._js_overlay_cmd_queue.put_nowait((cmd, data))
+        except Exception:
+            pass
+
+    def inject_js_overlay(self, evt=None, show_error_on_fail=True):
+        """Start the JS overlay by launching the dedicated overlay thread."""
+        if self._js_overlay_active:
+            print("[JS OVERLAY] Already active")
+            return
+
+        self._js_overlay_active = True
+        self._js_overlay_show_error_on_fail = bool(show_error_on_fail)
+
+        # Patch Show so clipboard grabs don't re-show the Python window
+        self._orig_wx_Show = self.Show
+        self.Show = lambda show=True: (
+            None if self._js_overlay_active else self._orig_wx_Show(show)
+        )
+
+        # Set up bridge hook â€” thread-safe, queues to overlay thread
+        global _emr_bridge_hook
+        _emr_bridge_hook = lambda payload=None: self._queue_overlay_cmd(
+            "push_vars", payload
+        )
+
+        # Drain stale commands
+        while not self._js_overlay_cmd_queue.empty():
+            try:
+                self._js_overlay_cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # Start overlay thread
+        self._js_overlay_thread = threading.Thread(
+            target=self._overlay_thread_run, daemon=True, name="JSOverlay"
+        )
+        self._js_overlay_thread.start()
+
+    def _overlay_thread_run(self):
+        """Dedicated thread that owns the Playwright instance for the JS overlay.
+
+        All page.evaluate() calls happen here. Other threads communicate
+        via self._js_overlay_cmd_queue.
+        """
+        pw = None
+        browser = None
+        page = None
+        try:
+            pw = sync_playwright().start()
+            browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_DEBUG_PORT}")
+
+            # Find EMR page
+            for ctx in browser.contexts:
+                for p in ctx.pages:
+                    url_lower = p.url.lower()
+                    if "emr" in url_lower or "hims" in url_lower:
+                        page = p
+                        break
+                if page:
+                    break
+            # Fallback: first page
+            if page is None:
+                for ctx in browser.contexts:
+                    for p in ctx.pages:
+                        page = p
+                        break
+                    if page:
+                        break
+            if page is None:
+                wx.CallAfter(self._on_overlay_start_failed, "No browser page found")
+                return
+
+            self._js_overlay_page = page  # Read-only elsewhere
+            print(f"[JS OVERLAY] Thread connected to: {page.url[:60]}")
+
+            # Register exposed functions (callbacks fire on this thread)
+            self._register_overlay_exposed_functions(page)
+
+            # Inject overlay
+            result = page.evaluate(OVERLAY_JS)
+            print(f"[JS OVERLAY] Injection result: {result}")
+
+            # Push initial state
+            visit_type = (
+                self._js_overlay_visit_type or self._cdp_last_display or "Unknown"
+            )
+            self._overlay_eval_push_visit(page, visit_type)
+            self._overlay_eval_push_vars(page)
+            self._overlay_eval_push_autoclicker_state(page)
+            self._overlay_eval_push_invisit_autoclicker_state(page)
+            self._overlay_eval_push_keep_awake_state(page)
+            self._overlay_eval_push_dark_mode(page)
+            self._overlay_eval_push_dashboard_payroll(page)
+            self._overlay_eval_push_selector_workbench(page, visit_type)
+
+            # Hide Python window
+            wx.CallAfter(self.Hide)
+            print("[JS OVERLAY] Python window hidden, overlay active")
+
+            # Command loop â€” pump Playwright events + process queued commands
+            while self._js_overlay_active:
+                try:
+                    page.wait_for_timeout(100)  # Keeps Playwright event loop alive
+                except Exception:
+                    print("[JS OVERLAY] Page disconnected")
+                    break
+
+                # Drain command queue
+                while True:
+                    try:
+                        cmd, data = self._js_overlay_cmd_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    try:
+                        if cmd == "stop":
+                            print("[JS OVERLAY] Stop command received")
+                            return
+                        elif cmd == "push_vars":
+                            self._overlay_eval_push_vars(page, data)
+                        elif cmd == "push_visit":
+                            self._overlay_eval_push_visit(page, data)
+                        elif cmd == "push_status":
+                            self._overlay_eval_push_status(page, data)
+                        elif cmd == "push_autoclicker_state":
+                            self._overlay_eval_push_autoclicker_state(page, data)
+                        elif cmd == "push_invisit_autoclicker_state":
+                            self._overlay_eval_push_invisit_autoclicker_state(
+                                page, data
+                            )
+                        elif cmd == "push_keep_awake_state":
+                            self._overlay_eval_push_keep_awake_state(page, data)
+                        elif cmd == "push_dark_mode":
+                            self._overlay_eval_push_dark_mode(page, data)
+                        elif cmd == "push_dashboard_payroll":
+                            self._overlay_eval_push_dashboard_payroll(page, data)
+                        elif cmd == "push_selector_specs":
+                            self._overlay_eval_push_selector_specs(page, data)
+                        elif cmd == "push_selector_workbench":
+                            self._overlay_eval_push_selector_workbench(page, data)
+                        elif cmd == "run_dashboard_payroll":
+                            self._overlay_eval_run_dashboard_payroll(page)
+                        elif cmd == "toggle_keep_awake":
+                            self._overlay_eval_toggle_keep_awake(page)
+                        elif cmd == "reinject":
+                            self._overlay_eval_reinject(page)
+                        elif cmd == "toggle_ctx_menu":
+                            try:
+                                print("[JS OVERLAY] Executing __emrToggleCtxMenu()")
+                                page.evaluate("window.__emrToggleCtxMenu()")
+                                print("[JS OVERLAY] __emrToggleCtxMenu() completed")
+                            except Exception as exc:
+                                print(f"[JS OVERLAY] toggle_ctx_menu error: {exc}")
+                        elif cmd == "toggle_minimize":
+                            try:
+                                page.evaluate("window.__emrToggleMinimize()")
+                            except Exception as exc:
+                                print(f"[JS OVERLAY] toggle_minimize error: {exc}")
+                        elif cmd == "toggle_notepad":
+                            try:
+                                page.evaluate("window.__emrToggleNotepad()")
+                            except Exception as exc:
+                                print(f"[JS OVERLAY] toggle_notepad error: {exc}")
+                        elif cmd == "toggle_selector_panel":
+                            try:
+                                page.evaluate("window.__emrToggleSelectorPanel()")
+                            except Exception as exc:
+                                print(
+                                    f"[JS OVERLAY] toggle_selector_panel error: {exc}"
+                                )
+                    except Exception as exc:
+                        print(f"[JS OVERLAY] Command '{cmd}' error: {exc}")
+
+                self._overlay_eval_keep_awake_tick(page)
+
+        except Exception as exc:
+            print(f"[JS OVERLAY] Thread error: {exc}")
+            wx.CallAfter(self._on_overlay_start_failed, str(exc))
+        finally:
+            self._js_overlay_page = None
+            self._overlay_keep_awake_enabled = False
+            self._overlay_keep_awake_next_click_ts = 0.0
+            self._overlay_keep_awake_target_index = 0
+            self._overlay_keep_awake_baseline_url = ""
+            try:
+                if page:
+                    page.evaluate(OVERLAY_REMOVE_JS)
+            except Exception:
+                pass
+            try:
+                if browser:
+                    browser.close()
+            except Exception:
+                pass
+            try:
+                if pw:
+                    pw.stop()
+            except Exception:
+                pass
+            print("[JS OVERLAY] Thread exited, Playwright cleaned up")
+
+    def _on_overlay_start_failed(self, msg):
+        """Called on wx thread when overlay thread fails to start."""
+        self._js_overlay_active = False
+        global _emr_bridge_hook
+        _emr_bridge_hook = None
+        if hasattr(self, "_orig_wx_Show"):
+            self.Show = self._orig_wx_Show
+        if self._js_overlay_show_error_on_fail:
+            wx.MessageBox(
+                f"Could not start JS overlay:\n{msg}\n\nMake sure Chrome is running with --remote-debugging-port={CDP_DEBUG_PORT}.",
+                "JS Overlay Error",
+                wx.ICON_ERROR,
+            )
+        else:
+            print(f"[JS OVERLAY] Startup skipped: {msg}")
+
+    def _register_overlay_exposed_functions(self, page):
+        """Register Python callbacks callable from JS via page.expose_function."""
+
+        def on_grab():
+            wx.CallAfter(self._do_overlay_grab)
+
+        def on_detect_visit():
+            wx.CallAfter(self._do_overlay_detect_visit)
+
+        def on_insert_template(template_name, insert_source="overlay"):
+            wx.CallAfter(self.insert_specific_template, template_name, insert_source)
+
+        def on_switch_to_python():
+            wx.CallAfter(self._remove_js_overlay)
+
+        def on_close():
+            wx.CallAfter(self.Close)
+
+        def on_toggle_autoclicker():
+            print("[JS OVERLAY] __emr_toggle_autoclicker invoked")
+            wx.CallAfter(self._handle_overlay_toggle_autoclicker)
+
+        def on_toggle_invisit_autoclicker():
+            print("[JS OVERLAY] __emr_toggle_invisit_autoclicker invoked")
+            wx.CallAfter(self._handle_overlay_toggle_invisit_clicker)
+
+        def on_toggle_keep_awake():
+            print("[JS OVERLAY] __emr_toggle_keep_awake invoked")
+            self._queue_overlay_cmd("toggle_keep_awake")
+
+        def on_toggle_dark_mode():
+            next_state = not bool(getattr(self, "_js_overlay_dark_mode", False))
+            self._js_overlay_dark_mode = next_state
+            self._queue_overlay_cmd("push_dark_mode", next_state)
+
+        def on_run_dashboard_payroll():
+            print("[JS OVERLAY] __emr_run_dashboard_payroll invoked")
+            wx.CallAfter(self._handle_overlay_dashboard_payroll_request)
+
+        def on_save_dashboard_payroll():
+            print("[JS OVERLAY] __emr_save_dashboard_payroll invoked")
+            wx.CallAfter(self._handle_overlay_save_dashboard_payroll_request)
+
+        def on_notepad_insert(text):
+            wx.CallAfter(self._do_notepad_insert, text)
+
+        def on_selector_save(payload):
+            return self._save_selector_override_from_overlay(payload)
+
+        def on_selector_workbench(payload):
+            return self._handle_selector_workbench_action_from_overlay(payload)
+
+        def on_selector_preview(payload):
+            return self._preview_selector_candidate_from_overlay(payload)
+
+        def on_selector_debug(payload):
+            wx.CallAfter(self._handle_selector_debug_from_overlay, payload)
+
+        def on_accept_variable_grab(payload):
+            wx.CallAfter(self._handle_ad_hoc_selector_grab_accept, payload)
+
+        funcs = {
+            "__emr_grab": on_grab,
+            "__emr_detect_visit": on_detect_visit,
+            "__emr_insert_template": on_insert_template,
+            "__emr_toggle_autoclicker": on_toggle_autoclicker,
+            "__emr_toggle_invisit_autoclicker": on_toggle_invisit_autoclicker,
+            "__emr_toggle_keep_awake": on_toggle_keep_awake,
+            "__emr_toggle_dark_mode": on_toggle_dark_mode,
+            "__emr_run_dashboard_payroll": on_run_dashboard_payroll,
+            "__emr_save_dashboard_payroll": on_save_dashboard_payroll,
+            "__emr_notepad_insert": on_notepad_insert,
+            "__emr_selector_debug": on_selector_debug,
+            "__emr_selector_save": on_selector_save,
+            "__emr_selector_workbench": on_selector_workbench,
+            "__emr_selector_preview": on_selector_preview,
+            "__emr_accept_variable_grab": on_accept_variable_grab,
+            "__emr_switch_to_python": on_switch_to_python,
+            "__emr_close": on_close,
+        }
+        for name, fn in funcs.items():
+            try:
+                page.expose_function(name, fn)
+            except Exception as exc:
+                # Already registered (e.g. from prior injection) â€” that's fine
+                if "already registered" not in str(exc).lower():
+                    print(f"[JS OVERLAY] expose_function({name}) error: {exc}")
+
+    def _remove_js_overlay(self):
+        """Remove the JS overlay and show the Python window."""
+        self._js_overlay_active = False
+        self._overlay_keep_awake_enabled = False
+        self._overlay_keep_awake_next_click_ts = 0.0
+        self._overlay_keep_awake_target_index = 0
+        self._overlay_keep_awake_baseline_url = ""
+        global _emr_bridge_hook
+        _emr_bridge_hook = None
+        self._queue_overlay_cmd("stop")
+        # Restore Show before calling it
+        if hasattr(self, "_orig_wx_Show"):
+            self.Show = self._orig_wx_Show
+        # Show Python window
+        self.Show()
+        self.Raise()
+        print("[JS OVERLAY] Python window restored")
+
+    # --- Overlay eval helpers (run on overlay thread ONLY) ---
+
+    def _overlay_get_visible_var_ids(self, visit_type=None) -> Set[str]:
+        visit_label = (
+            visit_type
+            or self._js_overlay_visit_type
+            or self._cdp_last_display
+            or "Unknown"
+        )
+        try:
+            specs = get_variable_selector_specs(visit_label)
+        except Exception:
+            return set()
+        visible_ids: Set[str] = set()
+        for spec in specs:
+            var_id = str((spec or {}).get("var_id") or "").strip()
+            if var_id:
+                visible_ids.add(var_id)
+        return visible_ids
+
+    def _overlay_eval_push_vars(self, page, payload=None):
+        """Push grabbed variables to overlay JS (overlay thread only).
+        If payload is provided (from emit_emr_bridge), use it.
+        Otherwise fall back to grabbed_vars (for initial push)."""
+        try:
+            if payload and isinstance(payload, dict):
+                # Filter out metadata keys, keep user-facing vars
+                skip_keys = {"timestamp", "grabbed_vars", "context"}
+                vars_dict = {}
+                for k, v in payload.items():
+                    if k in skip_keys:
+                        continue
+                    if isinstance(v, list):
+                        vars_dict[k] = ", ".join(str(i) for i in v)
+                    elif isinstance(v, bool):
+                        vars_dict[k] = str(v)
+                    elif isinstance(v, dict):
+                        continue  # skip nested dicts
+                    else:
+                        vars_dict[k] = str(v) if v is not None else ""
+            else:
+                vars_dict = dict(grabbed_vars)
+            visible_var_ids = self._overlay_get_visible_var_ids()
+            if visible_var_ids:
+                vars_dict = {
+                    key: value for key, value in vars_dict.items() if key in visible_var_ids
+                }
+            else:
+                vars_dict = {}
+            non_empty = {k: v for k, v in vars_dict.items() if v}
+            print(
+                f"[JS OVERLAY] Pushing {len(non_empty)} non-empty vars: {list(non_empty.keys())}"
+            )
+            vars_json = json.dumps(vars_dict)
+            page.evaluate(f"window.__emrUpdateVariables({vars_json})")
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push variables error: {exc}")
+
+    def _overlay_eval_push_visit(self, page, visit_type):
+        """Push visit type + templates to overlay JS (overlay thread only)."""
+        self._js_overlay_visit_type = visit_type
+        try:
+            template_names = load_tab_template_list(visit_type)
+            templates_json = json.dumps(template_names)
+            quick_template_names = get_quick_template_names_for_visit(visit_type)
+            quick_templates_json = json.dumps(quick_template_names)
+            page.evaluate(
+                f"window.__emrUpdateVisitType({json.dumps(visit_type)}, {templates_json}, {quick_templates_json})"
+            )
+            self._overlay_eval_push_selector_specs(page, visit_type)
+            self._overlay_eval_push_vars(page)
+            self._overlay_eval_push_selector_workbench(page, visit_type)
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push visit type error: {exc}")
+
+    def _overlay_eval_push_selector_specs(self, page, visit_type=None):
+        """Push variable-selector specs for the active visit type to overlay JS."""
+        try:
+            visit_label = (
+                visit_type
+                or self._js_overlay_visit_type
+                or self._cdp_last_display
+                or "Unknown"
+            )
+            specs = get_variable_selector_specs(visit_label)
+            specs_json = json.dumps(specs)
+            page.evaluate(f"window.__emrUpdateSelectorSpecs({specs_json})")
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push selector specs error: {exc}")
+
+    def _overlay_eval_push_selector_workbench(self, page, visit_type=None):
+        """Push selector workbench state, including window bounds and template records."""
+        try:
+            visit_label = (
+                visit_type
+                or self._js_overlay_visit_type
+                or self._cdp_last_display
+                or "Unknown"
+            )
+            workbench = get_selector_workbench_state(visit_label)
+            workbench["template_records"] = load_tab_template_records(visit_label)
+            workbench["template_config_file"] = os.path.basename(
+                get_template_config_path(visit_label)
+            )
+            workbench["template_file"] = os.path.basename(
+                get_template_file_path(visit_label)
+            )
+            page.evaluate(
+                f"window.__emrUpdateSelectorWorkbench({json.dumps(workbench)})"
+            )
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push selector workbench error: {exc}")
+
+    def _overlay_eval_push_status(self, page, msg):
+        """Push status message to overlay JS (overlay thread only)."""
+        try:
+            safe_msg = msg.replace("'", "\\'")
+            page.evaluate(f"window.__emrSetStatus('{safe_msg}')")
+        except Exception:
+            pass
+
+    def _overlay_eval_push_dashboard_payroll(self, page, payload=None):
+        """Push the latest dashboard payroll snapshot to the overlay JS."""
+        try:
+            snapshot = (
+                payload
+                if isinstance(payload, dict)
+                else getattr(self, "_dashboard_payroll_last_result", None)
+            )
+            if not snapshot:
+                return
+            page.evaluate(f"window.__emrUpdateDashboardPayroll({json.dumps(snapshot)})")
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push dashboard payroll error: {exc}")
+
+    def _overlay_eval_run_dashboard_payroll(self, page):
+        """Read dashboard payroll metrics, calculate the snapshot, persist it, and push it to the overlay."""
+        js = r"""
+() => {
+    const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const isVisible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 0 && rect.height >= 0;
+    };
+    const allNodes = Array.from(document.querySelectorAll('div, span, p, td, strong, h1, h2, h3, h4, h5, h6, label'));
+    const preferredSelectors = 'div.css-1rynq56.r-cqee49, span.css-1rynq56.r-cqee49';
+
+    function findLabel(labelText) {
+        const exact = allNodes.find((el) => isVisible(el) && normalize(el.innerText || el.textContent) === labelText);
+        if (exact) return exact;
+        return allNodes.find((el) => isVisible(el) && normalize(el.innerText || el.textContent).includes(labelText));
+    }
+
+    function candidateText(el) {
+        return String(el?.innerText || el?.textContent || '').trim();
+    }
+
+    function collectCandidates(labelEl) {
+        const results = [];
+        const seen = new Set();
+        const push = (el) => {
+            if (!el || seen.has(el) || el === labelEl || labelEl.contains(el) || !isVisible(el)) return;
+            seen.add(el);
+            results.push(el);
+        };
+
+        let current = labelEl;
+        for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+            if (current.parentElement) {
+                Array.from(current.parentElement.children).forEach(push);
+                Array.from(current.parentElement.querySelectorAll(preferredSelectors)).forEach(push);
+            }
+            Array.from(current.querySelectorAll(preferredSelectors)).forEach(push);
+            Array.from(current.querySelectorAll('div, span, p, td, strong')).forEach(push);
+        }
+        return results;
+    }
+
+    function findValue(labelText, pattern, parser) {
+        const label = findLabel(labelText);
+        if (!label) return null;
+        for (const el of collectCandidates(label)) {
+            const text = candidateText(el);
+            const match = text.match(pattern);
+            if (match) {
+                const nextValue = parser(match[1] || match[0]);
+                if (Number.isFinite(nextValue)) {
+                    return nextValue;
+                }
+            }
+        }
+        return null;
+    }
+
+    const payableTime = findValue('payable time', /(\d+(?:\.\d+)?)\s*hrs\b/i, (value) => Number.parseFloat(String(value).replace(/[^0-9.]/g, '')));
+    const visitsSigned = findValue('visits signed', /^(\d+)$/, (value) => Number.parseInt(String(value).replace(/[^0-9]/g, ''), 10))
+        ?? findValue('visits signed', /(\d+)/, (value) => Number.parseInt(String(value).replace(/[^0-9]/g, ''), 10));
+
+    return {
+        payable_time: payableTime,
+        visits_signed: visitsSigned,
+    };
+}
+"""
+        try:
+            raw = page.evaluate(js)
+            payable_time = float(raw.get("payable_time") or 0.0)
+            visits_signed = int(raw.get("visits_signed") or 0)
+            if payable_time <= 0:
+                raise ValueError("Could not find payable_time on the dashboard")
+            if visits_signed <= 0:
+                raise ValueError("Could not find visits_signed on the dashboard")
+
+            snapshot = calculate_dashboard_payroll(visits_signed, payable_time)
+            self._dashboard_payroll_last_result = snapshot
+            self._overlay_eval_push_dashboard_payroll(page, snapshot)
+            self._overlay_eval_push_status(
+                page,
+                f"Payroll calculated: ${snapshot['estimated_monthly_pay']:.2f}",
+            )
+        except Exception as exc:
+            print(f"[JS OVERLAY] Dashboard payroll error: {exc}")
+            self._overlay_eval_push_status(page, f"Payroll error: {exc}")
+
+    def _overlay_eval_push_autoclicker_state(self, page, enabled=None):
+        """Push dashboard auto-clicker state to the overlay JS."""
+        try:
+            state = bool(auto_clicker_enabled[0] if enabled is None else enabled)
+            page.evaluate(f"window.__emrSetAutoclickerState({json.dumps(state)})")
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push autoclicker state error: {exc}")
+
+    def _overlay_eval_push_invisit_autoclicker_state(self, page, enabled=None):
+        """Push in-visit auto-clicker state to the overlay JS."""
+        try:
+            state = bool(self.invisit_running if enabled is None else enabled)
+            page.evaluate(
+                f"window.__emrSetInvisitAutoclickerState({json.dumps(state)})"
+            )
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push in-visit autoclicker state error: {exc}")
+
+    def _overlay_eval_push_keep_awake_state(self, page, enabled=None):
+        """Push Keep Awake state to the overlay JS."""
+        try:
+            state = bool(
+                self._overlay_keep_awake_enabled if enabled is None else enabled
+            )
+            page.evaluate(f"window.__emrSetKeepAwakeState({json.dumps(state)})")
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push Keep Awake state error: {exc}")
+
+    def _overlay_normalize_monitored_url(self, url):
+        """Normalize a URL for same-page monitoring by ignoring query and fragment."""
+        try:
+            if not url:
+                return ""
+            parts = urlsplit(str(url))
+            return urlunsplit(
+                (parts.scheme, parts.netloc, parts.path.rstrip("/"), "", "")
+            )
+        except Exception:
+            return str(url or "")
+
+    def _overlay_eval_stop_keep_awake(
+        self, page, status=None, notify=False, changed_url=None
+    ):
+        """Stop the overlay Keep Awake loop and push UI state."""
+        was_enabled = bool(self._overlay_keep_awake_enabled)
+        self._overlay_keep_awake_enabled = False
+        self._overlay_keep_awake_next_click_ts = 0.0
+        self._overlay_keep_awake_target_index = 0
+        self._overlay_keep_awake_baseline_url = ""
+        if was_enabled:
+            self._overlay_eval_push_keep_awake_state(page, False)
+        if status is not None:
+            self._overlay_eval_push_status(page, status)
+        if changed_url:
+            wx.CallAfter(self.update_url_display, changed_url)
+            wx.CallAfter(self.refresh_patient_location_async)
+        if notify:
+            wx.CallAfter(self.beep_sound)
+
+    def _overlay_eval_toggle_keep_awake(self, page):
+        """Start or stop the overlay-owned Keep Awake click loop."""
+        if self._overlay_keep_awake_enabled:
+            self._overlay_eval_stop_keep_awake(page, "Keep Awake stopped")
+            return
+
+        current_url = getattr(page, "url", "") or ""
+        current_norm = self._overlay_normalize_monitored_url(current_url)
+        if not current_norm:
+            self._overlay_eval_stop_keep_awake(
+                page,
+                "Keep Awake error: could not determine page URL",
+                notify=True,
+            )
+            return
+
+        self._overlay_keep_awake_enabled = True
+        self._overlay_keep_awake_target_index = 0
+        self._overlay_keep_awake_baseline_url = current_norm
+        self._overlay_keep_awake_next_click_ts = 0.0
+        self._overlay_eval_push_keep_awake_state(page, True)
+        self._overlay_eval_push_status(
+            page,
+            f"Keep Awake running ({int(KEEP_AWAKE_INTERVAL_SECONDS)}s interval)",
+        )
+        wx.CallAfter(self.update_url_display, current_url)
+
+    def _overlay_eval_click_keep_awake_target(self, page, target):
+        """Resolve a Keep Awake target and click it via Playwright mouse input."""
+        probe_script = r"""
+(target) => {
+    const payload = target || {};
+    const selectors = Array.isArray(payload.selectors) ? payload.selectors : [];
+    const expectedText = String(payload.text || '').trim().toLowerCase();
+
+    const isVisible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        return !!style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+
+    const textMatches = (node) => {
+        if (!expectedText) return true;
+        const raw = String(node?.innerText || node?.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        return raw === expectedText || raw.includes(expectedText);
+    };
+
+    let node = null;
+    for (const selector of selectors) {
+        if (!selector) continue;
+        const matches = Array.from(document.querySelectorAll(selector));
+        node = matches.find((candidate) => isVisible(candidate) && textMatches(candidate));
+        if (node) break;
+        node = matches.find((candidate) => isVisible(candidate));
+        if (node && textMatches(node)) break;
+        node = null;
+    }
+
+    if (!node && expectedText) {
+        const textCandidates = Array.from(document.querySelectorAll('[data-testid], [role="button"], [role="tab"], button, div'));
+        node = textCandidates.find((candidate) => isVisible(candidate) && textMatches(candidate));
+    }
+
+    if (!node) {
+        return { ok: false, error: `Target not found: ${payload.label || 'unknown'}` };
+    }
+
+    try {
+        node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    } catch (e) {}
+
+    const rect = node.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) {
+        return { ok: false, error: `Target not clickable: ${payload.label || 'unknown'}` };
+    }
+
+    return {
+        ok: true,
+        label: String(payload.label || '').trim() || 'target',
+        x: rect.left + (rect.width / 2),
+        y: rect.top + (rect.height / 2),
+    };
+}
+"""
+        result = page.evaluate(probe_script, target)
+        if not isinstance(result, dict) or not result.get("ok"):
+            error = "Unknown Keep Awake click error"
+            if isinstance(result, dict) and result.get("error"):
+                error = str(result.get("error"))
+            raise RuntimeError(error)
+
+        click_x = float(result.get("x"))
+        click_y = float(result.get("y"))
+        page.mouse.move(click_x, click_y)
+        page.mouse.click(click_x, click_y, delay=50)
+        return str(result.get("label") or target.get("label") or "target")
+
+    def _overlay_eval_keep_awake_tick(self, page):
+        """Run the next Keep Awake click when due and stop on URL change."""
+        if not self._overlay_keep_awake_enabled:
+            return
+
+        current_url = getattr(page, "url", "") or ""
+        current_norm = self._overlay_normalize_monitored_url(current_url)
+        baseline_norm = self._overlay_keep_awake_baseline_url
+        if baseline_norm and current_norm and current_norm != baseline_norm:
+            print(
+                f"[JS OVERLAY] Keep Awake stopping on URL change: {baseline_norm} -> {current_norm}"
+            )
+            self._overlay_eval_stop_keep_awake(
+                page,
+                "Keep Awake stopped: URL changed",
+                notify=True,
+                changed_url=current_url,
+            )
+            return
+
+        now = time.monotonic()
+        if now < float(self._overlay_keep_awake_next_click_ts or 0.0):
+            return
+
+        target = KEEP_AWAKE_CLICK_TARGETS[
+            self._overlay_keep_awake_target_index % len(KEEP_AWAKE_CLICK_TARGETS)
+        ]
+        try:
+            label = self._overlay_eval_click_keep_awake_target(page, target)
+            self._overlay_keep_awake_target_index = (
+                self._overlay_keep_awake_target_index + 1
+            ) % len(KEEP_AWAKE_CLICK_TARGETS)
+            self._overlay_keep_awake_next_click_ts = (
+                now + KEEP_AWAKE_INTERVAL_SECONDS
+            )
+            print(f"[JS OVERLAY] Keep Awake click sent to: {label}")
+        except Exception as exc:
+            print(f"[JS OVERLAY] Keep Awake click error: {exc}")
+            self._overlay_eval_stop_keep_awake(
+                page,
+                f"Keep Awake error: {exc}",
+                notify=True,
+            )
+
+    def _overlay_eval_push_dark_mode(self, page, enabled=None):
+        """Apply/remove page dark mode while the JS overlay is active."""
+        try:
+            state = bool(
+                self._js_overlay_dark_mode if enabled is None else enabled
+            )
+            self._js_overlay_dark_mode = state
+            page.evaluate(
+                """(enabled) => {
+                    const styleId = 'emr-assist-dark-mode-style';
+                    document.documentElement.classList.toggle('emr-assist-dark-page', !!enabled);
+                    let styleEl = document.getElementById(styleId);
+                    if (!enabled) {
+                        if (styleEl) styleEl.remove();
+                        if (typeof window.__emrSetDarkMode === 'function') {
+                            window.__emrSetDarkMode(false);
+                        }
+                        return;
+                    }
+                    if (!styleEl) {
+                        styleEl = document.createElement('style');
+                        styleEl.id = styleId;
+                        document.head.appendChild(styleEl);
+                    }
+                    styleEl.textContent = `
+html.emr-assist-dark-page {
+    --emr-page-bg: #0b1220;
+    --emr-surface-1: #0f1b2c;
+    --emr-surface-2: #122033;
+    --emr-surface-3: #132437;
+    --emr-surface-4: #173049;
+    --emr-border: #294156;
+    --emr-border-strong: #36516a;
+    --emr-text: #dbe7f3;
+    --emr-text-soft: #edf4fb;
+    --emr-text-muted: #9cb4ca;
+    --emr-scroll-track: #0c1320;
+    --emr-scroll-thumb: #557187;
+    --emr-scroll-thumb-hover: #6b8ba6;
+    --emr-accent: #87c7ff;
+    --emr-success-bg: #1d3b2d;
+    --emr-success-text: #bfe9c8;
+    --emr-info-text: #9fc2e0;
+    --emr-danger-text: #ff8e8e;
+    --emr-badge-bg: #24384a;
+    --emr-badge-text: #dceaf6;
+    --emr-warm-surface: #b59a63;
+    --emr-warm-surface-soft: #a88b58;
+    --emr-warm-border: #8c7547;
+    --emr-warm-text: #20170c;
+}
+html.emr-assist-dark-page,
+html.emr-assist-dark-page body {
+    background: var(--emr-page-bg) !important;
+    color-scheme: dark;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) {
+    background: var(--emr-page-bg) !important;
+    color: var(--emr-text);
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) div,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) span,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) p,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) label,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) li,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) td,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) th,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) input,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) select,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [dir="auto"] {
+    color: var(--emr-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="color: rgba(0, 0, 0"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="color: rgb(0, 0, 0"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="color: rgba(0,0,0"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="color: rgb(0,0,0"] {
+    color: var(--emr-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="bg-white"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class^="bg-white"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="healthOverview"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="managedConditions"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [aria-label="Patient card"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .collapse,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .collapse-content,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid^="rx-"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid^="erx-"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="rounded-lg"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="rounded-xs"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="rounded"] {
+    background: var(--emr-surface-2) !important;
+    border-color: var(--emr-border) !important;
+    color: var(--emr-text);
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] {
+    background: var(--emr-surface-1) !important;
+    border-left: 1px solid var(--emr-border) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .collapse,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [data-testid="managedConditions"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] > .my-2,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [data-testid^="health-overview-section-"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [data-testid^="rx-"] > div,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [data-testid^="erx-"] > div {
+    background: var(--emr-surface-3) !important;
+    border: 1px solid var(--emr-border) !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .collapse-content,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [class*="r-105ug2t"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [class*="r-qhyqy2"] {
+    background: transparent !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [dir="auto"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] p,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] span,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .text-black,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .text-dark-grey,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .font-medium,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .font-semibold,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="text-black"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="text-dark-grey"] {
+    color: var(--emr-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .font-semibold,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .font-bold,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [style*="font-size: 16px"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] .flex-4 {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="text-black/[.44]"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="text-black/[.25]"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="text-black/[.12]"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="text-xs"] {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="color: rgba(0, 0, 0, 0.45)"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="color: rgba(0,0,0,0.45)"] {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="border-black"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="border-dashed"] {
+    border-color: var(--emr-border-strong) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) button,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .btn {
+    background: var(--emr-surface-4) !important;
+    color: var(--emr-text-soft) !important;
+    border-color: var(--emr-border-strong) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) button:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .btn:hover {
+    background: #1e3b58 !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] {
+    background: linear-gradient(180deg, #102033 0%, #0c1827 100%) !important;
+    background-color: #0c1827 !important;
+    border-bottom: 1px solid var(--emr-border) !important;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] div,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] span,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] svg,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] svg path {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [class*="text-gray-600"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [class*="text-primary"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [class*="text-secondary"] {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] button[data-testid="button"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] button[data-testid="clinicalGuidelines"] {
+    min-height: 38px !important;
+    padding: 0 12px !important;
+    border-radius: 10px !important;
+    border: 1px solid transparent !important;
+    background: transparent !important;
+    color: var(--emr-text-muted) !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] button[data-testid="button"]:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] button[data-testid="clinicalGuidelines"]:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] button[data-testid="button"]:focus-visible,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] button[data-testid="clinicalGuidelines"]:focus-visible {
+    background: rgba(135, 199, 255, 0.1) !important;
+    color: var(--emr-text-soft) !important;
+    border-color: rgba(135, 199, 255, 0.22) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="searchInputField"] {
+    background: transparent !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="searchInputField"] > div {
+    background: rgba(18, 32, 51, 0.96) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 999px !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-ahm1il"][class*="r-b5h31w"] [dir="auto"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-ahm1il"][class*="r-b5h31w"] .css-1rynq56 {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-ahm1il"][class*="r-b5h31w"][class*="r-1ah4tor"] {
+    background: var(--emr-surface-1) !important;
+    border-radius: 10px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-ahm1il"][class*="r-b5h31w"] [style*="font-weight: 500"] {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-ahm1il"][class*="r-b5h31w"] [style*="font-weight: bold"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-ahm1il"][class*="r-b5h31w"] .r-cqee49 {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="tab-messages"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="tab-notes"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-ry2h4h"][class*="r-gxnn57"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-1niwhzg"][class*="r-5chvjn"] > div > div {
+    background: var(--emr-surface-1) !important;
+    border-color: var(--emr-border) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="tab-messages"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="tab-notes"] {
+    border-radius: 10px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-mqqhkj"][class*="r-1f0042m"][class*="r-1pn2ns4"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-mqqhkj"][class*="r-sxvpho"][class*="r-5kkj8d"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-14lw9ot"][class*="r-sxvpho"][class*="r-5kkj8d"] {
+    background: var(--emr-surface-3) !important;
+    border: 1px solid var(--emr-border) !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] [class*="r-1l7z4oj"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] [class*="r-i023vh"] {
+    background: var(--emr-surface-2) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 12px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] [class*="r-ubezar"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] [class*="r-majxgm"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] [class*="r-v258g"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] [class*="r-1enofrn"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] [class*="r-1h8ys4a"] {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] svg,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-qklmqi"] svg path {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchInputField"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchInputField"] input,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="dateTimePicker"] input,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) select[data-testid="web_picker"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[data-testid="Type a message..."],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[aria-label="Type a message..."] {
+    background: var(--emr-surface-2) !important;
+    color: var(--emr-text) !important;
+    border: 1px solid var(--emr-border-strong) !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchInputField"] input::placeholder,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="dateTimePicker"] input::placeholder,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[data-testid="Type a message..."]::placeholder,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[aria-label="Type a message..."]::placeholder {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="searchInputField"] input {
+    background: transparent !important;
+    border: none !important;
+    color: var(--emr-text-soft) !important;
+    caret-color: var(--emr-accent) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="searchInputField"] input::placeholder {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="settingsMenu"] {
+    background: transparent !important;
+    border: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="settingsMenu"] > button,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="getNextTaskButton"] {
+    background: rgba(18, 32, 51, 0.98) !important;
+    color: var(--emr-text-soft) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 999px !important;
+    padding: 8px 12px !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="settingsMenu"] > button:hover {
+    background: var(--emr-surface-4) !important;
+    border-color: var(--emr-border-strong) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="badge"] {
+    background: #8fd2ff !important;
+    color: #082235 !important;
+    border: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] .justify-center > button {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] .justify-center > button svg,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] .justify-center > button svg path {
+    color: #9fd1ff !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .composer-button-container,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="composer-button-container"] {
+    background: var(--emr-surface-1) !important;
+    border-top-color: var(--emr-border) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .composer-button-container button,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .composer-button-container [class*="text-\\[#0000004d\\]"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .composer-button-container [class*="text-body-small"] {
+    color: var(--emr-text-muted) !important;
+    background: transparent !important;
+    border: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .composer-button-container .rounded-full,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .composer-button-container [class*="bg-\\[#b2b2b2\\]"] {
+    background: var(--emr-surface-4) !important;
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="search-icon"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="icon_container"] {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="search-icon"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class~="relative"][class~="z-[1]"][class~="flex"][class~="h-[74px]"][class~="flex-row"][class~="items-center"][class~="bg-surface-primary"][class~="px-lg"] [data-testid="search-icon"] path {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) input[data-testid="searchPickerInput"] {
+    background: var(--emr-surface-2) !important;
+    color: var(--emr-text) !important;
+    border: 1px solid var(--emr-border-strong) !important;
+    border-radius: 12px !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) input[data-testid="searchPickerInput"]::placeholder {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchPickerInput-dropdown"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #searchPickerInput-dropdown {
+    background: var(--emr-surface-2) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.32) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchPickerInput-dropdown"] [class*="r-150rngu"][class*="r-eqz5dr"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #searchPickerInput-dropdown [class*="r-150rngu"][class*="r-eqz5dr"] {
+    background: transparent !important;
+    border: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchPickerInput-dropdown"] button[data-testid^="menu-item-"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #searchPickerInput-dropdown button[data-testid^="menu-item-"] {
+    background: transparent !important;
+    color: var(--emr-text) !important;
+    border-radius: 10px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchPickerInput-dropdown"] button[data-testid^="menu-item-"]:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchPickerInput-dropdown"] button[data-testid^="menu-item-"]:focus-visible,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #searchPickerInput-dropdown button[data-testid^="menu-item-"]:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #searchPickerInput-dropdown button[data-testid^="menu-item-"]:focus-visible {
+    background: rgba(135, 199, 255, 0.12) !important;
+    outline: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchPickerInput-dropdown"] .text-sm,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="searchPickerInput-dropdown"] [class*="text-gray-900"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #searchPickerInput-dropdown .text-sm,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #searchPickerInput-dropdown [class*="text-gray-900"] {
+    color: var(--emr-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-97e31f"][class*="r-bv2aro"][class*="r-hxflta"][class*="r-1pi2tsx"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] {
+    background: var(--emr-surface-1) !important;
+    color: var(--emr-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-97e31f"][class*="r-bv2aro"][class*="r-hxflta"][class*="r-1pi2tsx"] > div,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] {
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 18px !important;
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.38) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] .mb-6.flex,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid="closeModalButton"] {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid="closeModalButton"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid="closeModalButton"] path {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid$="-picker"] > div,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [class*="r-14lw9ot"][class*="r-jdbj7n"][class*="r-z2wwpe"][class*="r-rs99b7"] {
+    background: var(--emr-surface-2) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 14px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid$="-picker"] [class*="r-v258g"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid$="-picker"] [class*="r-tceitz"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [style*="font-size: 12px"] {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid$="-picker"] [class*="r-kzbkwu"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid$="-picker"] [class*="r-13qz1uu"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [class*="r-tskmnb"] {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid$="-picker"] svg,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [data-testid$="-picker"] svg path {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[data-testid="medicationDirections"] {
+    background: var(--emr-surface-2) !important;
+    color: var(--emr-text) !important;
+    border: 1px solid var(--emr-border-strong) !important;
+    border-radius: 12px !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[data-testid="medicationDirections"]::placeholder {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-14lw9ot"][class*="r-jdbj7n"][class*="r-z2wwpe"][class*="r-rs99b7"][class*="r-6koalj"][class*="r-eqz5dr"][class*="r-kzbkwu"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="diagnosisSelector"] {
+    background: var(--emr-surface-2) !important;
+    color: var(--emr-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-14lw9ot"][class*="r-jdbj7n"][class*="r-z2wwpe"][class*="r-rs99b7"][class*="r-6koalj"][class*="r-eqz5dr"][class*="r-kzbkwu"] {
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 14px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-14lw9ot"][class*="r-jdbj7n"][class*="r-z2wwpe"][class*="r-rs99b7"][class*="r-6koalj"][class*="r-eqz5dr"][class*="r-kzbkwu"] [dir="auto"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-14lw9ot"][class*="r-jdbj7n"][class*="r-z2wwpe"][class*="r-rs99b7"][class*="r-6koalj"][class*="r-eqz5dr"][class*="r-kzbkwu"] [class*="r-cqee49"] {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="diagnosisSelector"] {
+    border-color: var(--emr-border-strong) !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="diagnosisSelector"][aria-checked="true"] {
+    background: rgba(135, 199, 255, 0.18) !important;
+    border-color: var(--emr-accent) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[data-testid="soapNote"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[data-testid="messageToPatient"] {
+    background: var(--emr-surface-2) !important;
+    color: var(--emr-text) !important;
+    border: 1px solid var(--emr-border-strong) !important;
+    border-radius: 12px !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[data-testid="soapNote"]::placeholder,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) textarea[data-testid="messageToPatient"]::placeholder {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [role="checkbox"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [aria-label="Checkbox"] button {
+    background: transparent !important;
+    border-color: var(--emr-border-strong) !important;
+    color: var(--emr-accent) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [aria-label="Checkbox"] span,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Edit Prescription Panel"] [aria-label="Checkbox"] [dir="auto"] {
+    color: var(--emr-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Change-duration-button"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="cancelPrescriptionButton"] {
+    background: transparent !important;
+    color: var(--emr-text-muted) !important;
+    border: 1px solid var(--emr-border) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="savePrescriptionButton"] {
+    background: var(--emr-surface-4) !important;
+    color: var(--emr-text-soft) !important;
+    border: 1px solid var(--emr-border-strong) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="Change-duration-button"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="cancelPrescriptionButton"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="savePrescriptionButton"] {
+    border-radius: 12px !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="background-color: rgb(255, 255, 255)"][style*="position: absolute"][style*="box-shadow: rgba(0, 0, 0, 0.1) 0px 0px 30px"] {
+    background: var(--emr-surface-2) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 18px 36px rgba(0, 0, 0, 0.34) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="background-color: rgb(255, 255, 255)"][style*="position: absolute"][style*="box-shadow: rgba(0, 0, 0, 0.1) 0px 0px 30px"] > div,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="background-color: rgb(255, 255, 255)"][style*="position: absolute"][style*="box-shadow: rgba(0, 0, 0, 0.1) 0px 0px 30px"] [class*="r-150rngu"][class*="r-eqz5dr"] {
+    background: transparent !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-eqz5dr"][class*="r-1guathk"] [class*="r-42olwf"][class*="r-1phboty"][class*="r-rs99b7"] > div {
+    background: var(--emr-surface-2) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 12px !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid^="menu-item-"] {
+    background: transparent !important;
+    color: var(--emr-text) !important;
+    border-radius: 10px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid^="menu-item-"] [dir="auto"] {
+    color: var(--emr-text-soft) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid^="menu-item-"]:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid^="menu-item-"]:focus-visible {
+    background: rgba(135, 199, 255, 0.12) !important;
+    outline: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-eqz5dr"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-18u37iz"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-y-auto,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .flex-1.overflow-y-auto.px-4.py-3 {
+    background: var(--emr-surface-1) !important;
+    scrollbar-width: thin;
+    scrollbar-color: var(--emr-scroll-thumb) var(--emr-scroll-track);
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-eqz5dr"]::-webkit-scrollbar,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-18u37iz"]::-webkit-scrollbar,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-y-auto::-webkit-scrollbar,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .flex-1.overflow-y-auto.px-4.py-3::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-eqz5dr"]::-webkit-scrollbar-track,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-18u37iz"]::-webkit-scrollbar-track,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-y-auto::-webkit-scrollbar-track,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .flex-1.overflow-y-auto.px-4.py-3::-webkit-scrollbar-track {
+    background: var(--emr-scroll-track) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-eqz5dr"]::-webkit-scrollbar-thumb,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-18u37iz"]::-webkit-scrollbar-thumb,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-y-auto::-webkit-scrollbar-thumb,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .flex-1.overflow-y-auto.px-4.py-3::-webkit-scrollbar-thumb {
+    background: var(--emr-scroll-thumb) !important;
+    border-radius: 999px !important;
+    border: 2px solid var(--emr-scroll-track) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-darqyq"][class*="r-z2wwpe"][class*="r-1l7z4oj"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-17s6mgv"][class*="r-t357jf"][class*="r-bt1l66"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="background-color: rgb(236, 227, 217)"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="padding-right: 8px"][style*="padding-left: 8px"][style*="margin-bottom: 8px"] {
+    background: var(--emr-warm-surface-soft) !important;
+    border: 1px solid var(--emr-warm-border) !important;
+    box-shadow: none !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-darqyq"][class*="r-z2wwpe"][class*="r-1l7z4oj"] [dir="auto"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-17s6mgv"][class*="r-t357jf"][class*="r-bt1l66"] [dir="auto"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-17s6mgv"][class*="r-t357jf"][class*="r-bt1l66"] span,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="background-color: rgb(236, 227, 217)"] [dir="auto"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="background-color: rgb(236, 227, 217)"] span {
+    color: var(--emr-warm-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-darqyq"][class*="r-z2wwpe"][class*="r-1l7z4oj"] [class*="r-b88u0q"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-17s6mgv"][class*="r-t357jf"][class*="r-bt1l66"] [class*="r-10x49cs"] {
+    color: #2f2412 !important;
+    font-weight: 700 !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) div.overflow-auto.px-8,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="overflow-auto"][class*="px-8"] {
+    background: var(--emr-surface-1) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [class*="r-150rngu"][class*="r-eqz5dr"] {
+    background: var(--emr-surface-2) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 12px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #signedVisits button[class*="mx-0.5"][class*="h-9"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #prescriptionHistory button[class*="mx-0.5"][class*="h-9"] {
+    background: var(--emr-surface-2) !important;
+    color: var(--emr-text) !important;
+    border: 1px solid var(--emr-border) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #signedVisits button[class*="mx-0.5"][class*="h-9"]:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) #prescriptionHistory button[class*="mx-0.5"][class*="h-9"]:hover {
+    background: var(--emr-surface-4) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) iframe[data-testid="lookerEmbedIframe"] {
+    background: var(--emr-surface-1) !important;
+    border: 1px solid var(--emr-border) !important;
+    border-radius: 12px !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] svg,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] svg path {
+    color: var(--emr-text-muted) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [style*="background-color: rgb(226, 243, 210)"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [style*="margin-right: 8px"][style*="margin-left: 8px"] {
+    background: var(--emr-success-bg) !important;
+    color: var(--emr-success-text) !important;
+    border: 1px solid #325944 !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] [style*="margin-right: 8px"] [dir="auto"] {
+    color: inherit !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] span[style*="color: rgb(155, 185, 126)"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] span[style*="color: rgb(89, 112, 127)"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] span[style*="color: rgb(210, 13, 13)"] {
+    font-weight: 600 !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] span[style*="color: rgb(155, 185, 126)"] {
+    color: var(--emr-success-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] span[style*="color: rgb(89, 112, 127)"] {
+    color: var(--emr-info-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"] span[style*="color: rgb(210, 13, 13)"] {
+    color: var(--emr-danger-text) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-scroll,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-auto,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: scroll"],
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: auto"] {
+    background: var(--emr-page-bg) !important;
+    scrollbar-width: thin;
+    scrollbar-color: var(--emr-scroll-thumb) var(--emr-scroll-track);
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-scroll::-webkit-scrollbar,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-auto::-webkit-scrollbar,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"]::-webkit-scrollbar,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: scroll"]::-webkit-scrollbar,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: auto"]::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-scroll::-webkit-scrollbar-track,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-auto::-webkit-scrollbar-track,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"]::-webkit-scrollbar-track,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: scroll"]::-webkit-scrollbar-track,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: auto"]::-webkit-scrollbar-track {
+    background: var(--emr-scroll-track) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-scroll::-webkit-scrollbar-thumb,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-auto::-webkit-scrollbar-thumb,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"]::-webkit-scrollbar-thumb,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: scroll"]::-webkit-scrollbar-thumb,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: auto"]::-webkit-scrollbar-thumb {
+    background: var(--emr-scroll-thumb) !important;
+    border-radius: 999px !important;
+    border: 2px solid var(--emr-scroll-track) !important;
+}
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-scroll::-webkit-scrollbar-thumb:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) .overflow-auto::-webkit-scrollbar-thumb:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [data-testid="patientSummarySidebar"]::-webkit-scrollbar-thumb:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: scroll"]::-webkit-scrollbar-thumb:hover,
+html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: auto"]::-webkit-scrollbar-thumb:hover {
+    background: var(--emr-scroll-thumb-hover) !important;
+}
+`;
+                    if (typeof window.__emrSetDarkMode === 'function') {
+                        window.__emrSetDarkMode(true);
+                    }
+                }""",
+                state,
+            )
+        except Exception as exc:
+            print(f"[JS OVERLAY] Push dark mode error: {exc}")
+
+    def _overlay_eval_reinject(self, page):
+        """Re-inject overlay if lost after navigation (overlay thread only)."""
+        try:
+            still_there = page.evaluate(
+                "!!document.getElementById('emr-assist-overlay')"
+            )
+            if not still_there:
+                print("[JS OVERLAY] Overlay lost after navigation, re-injectingâ€¦")
+                self._register_overlay_exposed_functions(page)
+                page.evaluate(OVERLAY_JS)
+                self._overlay_eval_push_dark_mode(page)
+                visit_type = (
+                    self._js_overlay_visit_type or self._cdp_last_display or "Unknown"
+                )
+                self._overlay_eval_push_visit(page, visit_type)
+                self._overlay_eval_push_vars(page)
+                self._overlay_eval_push_autoclicker_state(page)
+                self._overlay_eval_push_invisit_autoclicker_state(page)
+                self._overlay_eval_push_keep_awake_state(page)
+                self._overlay_eval_push_dashboard_payroll(page)
+                self._overlay_eval_push_selector_workbench(page, visit_type)
+        except Exception as exc:
+            print(f"[JS OVERLAY] Re-injection error: {exc}")
+
+    # --- Overlay wx-thread callbacks (called via expose_function â†’ wx.CallAfter) ---
+
+    def _do_overlay_grab(self):
+        """Execute grab for current overlay visit type (called on wx thread).
+
+        Forces Playwright text grab while the overlay is active, because the clipboard-
+        based path clicks centre-screen to focus the page â€” but when the overlay
+        is minimised that click passes through (pointer-events: none) and steals
+        focus from the element the user was working in.
+        """
+        now = time.monotonic()
+        last_ts = float(getattr(self, "_overlay_grab_last_ts", 0.0) or 0.0)
+        if now - last_ts < 0.35:
+            print("[JS OVERLAY] Grab suppressed: duplicate trigger")
+            return
+        self._overlay_grab_last_ts = now
+
+        global USE_PLAYWRIGHT_TEXT_GRAB
+        visit_type = self._js_overlay_visit_type or self._cdp_last_display
+        print(f"[JS OVERLAY] Grab triggered for visit type: {visit_type}")
+        # Temporarily force Playwright text mode so clipboard grab (with its centre-click)
+        # is never used while the overlay is active.
+        saved_playwright = USE_PLAYWRIGHT_TEXT_GRAB
+        USE_PLAYWRIGHT_TEXT_GRAB = True
+        try:
+            canonical = self._canonicalize_visit_type(visit_type)
+            if canonical == "Sexual Health":
+                self.grab_sexual_health()
+            elif canonical == "Hair Loss":
+                self.grab_hair()
+            elif canonical == "Photoaging":
+                self.grab_photoaging()
+            elif canonical == "Performance Anxiety":
+                self.grab_performance_anxiety()
+            elif canonical == "Birth Control":
+                self.grab_birth_control()
+            else:
+                print(f"[JS OVERLAY] No grab handler for: {visit_type}")
+        except Exception as exc:
+            print(f"[JS OVERLAY] Grab error: {exc}")
+        finally:
+            USE_PLAYWRIGHT_TEXT_GRAB = saved_playwright
+
+    def _push_overlay_autoclicker_state(self):
+        """Queue the current dashboard auto-clicker state to the overlay."""
+        if getattr(self, "_js_overlay_active", False):
+            self._queue_overlay_cmd(
+                "push_autoclicker_state", bool(auto_clicker_enabled[0])
+            )
+
+    def _push_overlay_invisit_autoclicker_state(self):
+        """Queue the current in-visit auto-clicker state to the overlay."""
+        if getattr(self, "_js_overlay_active", False):
+            self._queue_overlay_cmd(
+                "push_invisit_autoclicker_state", bool(self.invisit_running)
+            )
+
+    def _push_overlay_keep_awake_state(self):
+        """Queue the current Keep Awake state to the overlay."""
+        if getattr(self, "_js_overlay_active", False):
+            self._queue_overlay_cmd(
+                "push_keep_awake_state", bool(self._overlay_keep_awake_enabled)
+            )
+
+    def _push_overlay_status(self, message):
+        """Queue a status message to the overlay when it is active."""
+        if getattr(self, "_js_overlay_active", False):
+            self._queue_overlay_cmd("push_status", str(message or ""))
+
+    def _read_dashboard_autoclicker_settings(self):
+        """Read dashboard auto-clicker settings, falling back to current values."""
+        next_x = auto_clicker_x[0]
+        next_y = auto_clicker_y[0]
+        next_interval = auto_clicker_interval[0]
+
+        if hasattr(self, "clicker_x_text") and self.clicker_x_text is not None:
+            raw_x = str(self.clicker_x_text.GetValue()).strip()
+            if raw_x:
+                next_x = int(raw_x)
+
+        if hasattr(self, "clicker_y_text") and self.clicker_y_text is not None:
+            raw_y = str(self.clicker_y_text.GetValue()).strip()
+            if raw_y:
+                next_y = int(raw_y)
+
+        if (
+            hasattr(self, "clicker_interval_text")
+            and self.clicker_interval_text is not None
+        ):
+            raw_interval = str(self.clicker_interval_text.GetValue()).strip()
+            if raw_interval:
+                next_interval = float(raw_interval)
+
+        if next_interval <= 0:
+            raise ValueError("interval must be greater than 0 seconds")
+
+        return next_x, next_y, next_interval
+
+    def _handle_overlay_toggle_autoclicker(self):
+        """Run the dashboard auto-clicker toggle from the JS overlay."""
+        print(
+            f"[JS OVERLAY] Overlay autoclicker button pressed; currently enabled={auto_clicker_enabled[0]}"
+        )
+        try:
+            self.toggle_auto_clicker()
+        except Exception as exc:
+            print(f"[JS OVERLAY] Overlay autoclicker toggle failed: {exc}")
+            self._push_overlay_status(f"Autoclicker error: {exc}")
+
+    def _handle_overlay_toggle_invisit_clicker(self):
+        """Run the in-visit auto-clicker toggle from the JS overlay."""
+        print(
+            f"[JS OVERLAY] Overlay in-visit button pressed; currently enabled={self.invisit_running}"
+        )
+        try:
+            self.toggle_invisit_clicker()
+        except Exception as exc:
+            print(f"[JS OVERLAY] Overlay in-visit toggle failed: {exc}")
+            self._push_overlay_status(f"In-visit error: {exc}")
+
+    def _handle_overlay_dashboard_payroll_request(self):
+        """Queue a dashboard payroll calculation request from the overlay."""
+        if getattr(self, "_js_overlay_active", False):
+            self._queue_overlay_cmd("run_dashboard_payroll")
+
+    def _handle_overlay_save_dashboard_payroll_request(self):
+        """Persist the most recently calculated dashboard payroll snapshot."""
+        snapshot = getattr(self, "_dashboard_payroll_last_result", None)
+        if not isinstance(snapshot, dict):
+            self._push_overlay_status("Nothing to save yet")
+            return
+        if snapshot.get("saved"):
+            self._push_overlay_status("Pay info already saved")
+            return
+        try:
+            append_payroll_calculation_markdown(snapshot)
+            snapshot["saved"] = True
+            self._dashboard_payroll_last_result = snapshot
+            if getattr(self, "_js_overlay_active", False):
+                self._queue_overlay_cmd("push_status", "Pay info saved")
+                self._queue_overlay_cmd("push_dashboard_payroll", snapshot)
+        except Exception as exc:
+            print(f"[JS OVERLAY] Dashboard payroll save error: {exc}")
+            self._push_overlay_status(f"Save error: {exc}")
+
+    def _save_selector_override_from_overlay(self, payload):
+        """Persist selector changes requested from the JS selector finder."""
+        try:
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                raise ValueError("selector payload must be a dict")
+            group = str(payload.get("group") or "").strip()
+            key = str(payload.get("key") or "").strip()
+            selector = str(payload.get("selector") or "").strip()
+            label = str(payload.get("label") or key).strip()
+            action = str(payload.get("action") or "save_legacy").strip().lower()
+            direction = str(payload.get("direction") or "").strip().lower()
+            if not group or not key:
+                raise ValueError("group and key are required")
+
+            if action in {"add_ranked", "promote_ranked", "save_legacy"}:
+                if not selector:
+                    raise ValueError("selector is required")
+                if action == "save_legacy":
+                    save_selector_override(group, key, selector)
+                    print(
+                        f"[SELECTOR OVERLAY] Saved legacy selector for {group}.{key}: {selector}"
+                    )
+                    status_msg = f"Saved selector for {label}"
+                else:
+                    add_ranked_playwright_selector(
+                        group,
+                        key,
+                        selector,
+                        promote_to_top=(action == "promote_ranked"),
+                    )
+                    verb = "Promoted" if action == "promote_ranked" else "Added"
+                    print(
+                        f"[SELECTOR OVERLAY] {verb} ranked selector for {group}.{key}: {selector}"
+                    )
+                    status_msg = f"{verb} ranked selector for {label}"
+            elif action == "move_ranked":
+                if not selector or direction not in {"up", "down"}:
+                    raise ValueError("selector and direction are required for move")
+                move_ranked_playwright_selector(group, key, selector, direction)
+                print(
+                    f"[SELECTOR OVERLAY] Moved ranked selector {direction} for {group}.{key}: {selector}"
+                )
+                status_msg = f"Moved {label} selector {direction}"
+            elif action == "remove_ranked":
+                if not selector:
+                    raise ValueError("selector is required for remove")
+                remove_ranked_playwright_selector(group, key, selector)
+                print(
+                    f"[SELECTOR OVERLAY] Removed ranked selector for {group}.{key}: {selector}"
+                )
+                status_msg = f"Removed ranked selector for {label}"
+            else:
+                raise ValueError(f"unknown selector action: {action}")
+
+            self._queue_overlay_cmd("push_status", status_msg)
+            current_visit = (
+                self._js_overlay_visit_type or self._cdp_last_display or "Unknown"
+            )
+            self._queue_overlay_cmd("push_selector_specs", current_visit)
+            return {
+                "ok": True,
+                "status": status_msg,
+                "visit_type": current_visit,
+                "group": group,
+                "key": key,
+                "spec": get_variable_selector_spec(
+                    current_visit, group=group, key=key
+                ),
+                "ranked_selectors": get_ranked_playwright_selectors(group, key),
+            }
+        except Exception as exc:
+            print(f"[SELECTOR OVERLAY] Save error: {exc}")
+            self._queue_overlay_cmd("push_status", f"Selector save error: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def _preview_selector_candidate_from_overlay(self, payload):
+        """Return parser preview data for a selector candidate shown in the overlay."""
+        try:
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                raise ValueError("preview payload must be a dict")
+
+            visit_type = str(
+                payload.get("visit_type")
+                or self._js_overlay_visit_type
+                or self._cdp_last_display
+                or "Unknown"
+            ).strip()
+            var_id = str(payload.get("var_id") or "").strip()
+            group = str(payload.get("group") or "").strip()
+            key = str(payload.get("key") or "").strip()
+            raw_text = str(payload.get("raw_text") or "")
+
+            spec = get_variable_selector_spec(
+                visit_type,
+                var_id=var_id,
+                group=group,
+                key=key,
+            )
+            if not spec:
+                raise ValueError("selector variable not found for preview")
+
+            preview_var_id = str(spec.get("var_id") or "").strip()
+            runtime_value = self._normalize_ranked_selector_value(
+                preview_var_id, raw_text
+            )
+            ad_hoc_value = self._normalize_ad_hoc_selector_grab_value(
+                visit_type, preview_var_id, raw_text
+            )
+            note = ""
+            if runtime_value != ad_hoc_value:
+                note = (
+                    "Ranked runtime preview and ad hoc accept preview differ for this variable. "
+                    "Ranked selector runs use the runtime preview shown first."
+                )
+
+            return {
+                "ok": True,
+                "visit_type": visit_type,
+                "var_id": preview_var_id,
+                "label": spec.get("label") or preview_var_id,
+                "raw_text": raw_text,
+                "runtime_value": runtime_value,
+                "ad_hoc_value": ad_hoc_value,
+                "parser_rules": spec.get("parser_rules") or [],
+                "note": note,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _normalize_ad_hoc_yes_no(self, value: str) -> str:
+        stripped = str(value or "").strip()
+        if not stripped:
+            return ""
+        match = re.match(r"^\W*(yes|no)\b", stripped, re.IGNORECASE)
+        if match:
+            return match.group(1).capitalize()
+        condensed = re.sub(r"[^a-z]", "", stripped.lower())
+        if condensed.startswith("yes"):
+            return "Yes"
+        if condensed.startswith("no"):
+            return "No"
+        return stripped
+
+    def _normalize_ad_hoc_pa_options(self, raw_value: str, options: List[str]) -> str:
+        lines = [line.strip() for line in str(raw_value or "").splitlines() if line.strip()]
+        mapped = self._map_lines_to_known_options(lines, options)
+        if mapped:
+            return ", ".join(mapped)
+        return str(raw_value or "").strip()
+
+    def _normalize_ad_hoc_pa_symptoms(self, raw_value: str) -> str:
+        lines = [line.strip() for line in str(raw_value or "").splitlines() if line.strip()]
+        mapped = self._map_lines_to_known_options(lines, PA_SYMPTOM_OPTIONS)
+        if mapped:
+            return ", ".join(mapped)
+        keyword_lines = [
+            line for line in lines if any(keyword in line.lower() for keyword in PA_SYMPTOM_KEYWORDS)
+        ]
+        mapped = self._map_lines_to_known_options(keyword_lines, PA_SYMPTOM_OPTIONS)
+        if mapped:
+            return ", ".join(mapped)
+        return str(raw_value or "").strip()
+
+    def _normalize_ad_hoc_target_medication(self, var_id: str, raw_value: str) -> str:
+        normalized = str(raw_value or "").strip()
+        if not normalized:
+            return ""
+        if var_id == "hair_medication":
+            return extract_hair_medication_from_text(normalized) or normalized
+
+        med_group = {
+            "sexual_health_med": "sexual_health",
+            "pa_medication": "performance_anxiety",
+        }.get(var_id, "")
+        if not med_group:
+            return normalized
+
+        if re.search(r"\b(daily|as[-\s]?needed|prn|every other day|weekly|nightly|bid|tid|qid|qd)\b", normalized, re.IGNORECASE):
+            return normalized
+        if not re.search(r"\b\d{1,3}\s*doses?\s*(?:(?:per|/|a)\s*month|monthly)\b", normalized, re.IGNORECASE):
+            return normalized
+
+        suffix = infer_medication_frequency_suffix_from_text(normalized, group=med_group)
+        if suffix:
+            return normalized.rstrip(" .,:;") + suffix
+        return normalized
+
+    def _normalize_ad_hoc_selector_grab_value(
+        self, visit_type: str, var_id: str, value: str
+    ) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return ""
+
+        if var_id in {"hair_medication", "sexual_health_med", "pa_medication"}:
+            normalized = self._normalize_ad_hoc_target_medication(var_id, normalized)
+        elif var_id == "hair_response":
+            normalized = extract_hair_response_from_text(normalized) or normalized
+        elif var_id == "hair_symptoms":
+            normalized = extract_hair_symptoms_from_text(normalized) or normalized
+        elif var_id == "hair_loss_location":
+            normalized = extract_hair_loss_location_from_text(normalized) or normalized
+        elif var_id == "hair_loss_additional_sxx":
+            normalized = extract_hair_loss_additional_sxx_from_text(normalized) or normalized
+        elif var_id == "sexual_health_effectiveness":
+            normalized = self._extract_effectiveness(full_text=normalized) or self._normalize_ad_hoc_yes_no(normalized)
+        elif var_id == "pa_situations":
+            normalized = self._normalize_ad_hoc_pa_options(normalized, PA_SITUATION_OPTIONS)
+        elif var_id == "pa_symptoms":
+            normalized = self._normalize_ad_hoc_pa_symptoms(normalized)
+
+        try:
+            if var_id == "sexual_health_bp":
+                return self._normalize_sexual_health_bp(normalized)
+            if var_id in {"bc_bp", "pa_bp"}:
+                return normalize_blood_pressure_value(normalized) or normalized
+        except Exception:
+            return normalized
+        if var_id == "bc_side_effects":
+            low = normalized.lower()
+            if low in {"none", "no", "none reported", "denies", "without"}:
+                return "none"
+            if not low.startswith("includes"):
+                return f"includes {normalized}".strip()
+        if var_id == "bc_med_history_changes":
+            return normalized or "none"
+        return normalized
+
+    def _apply_ad_hoc_selector_grab_value(
+        self, visit_type: str, spec: Dict[str, Any], value: str
+    ) -> str:
+        var_id = str(spec.get("var_id") or "").strip()
+        normalized = self._normalize_ad_hoc_selector_grab_value(visit_type, var_id, value)
+        grabbed_vars[var_id] = normalized
+
+        field_map: Dict[str, str] = {
+            "hair_medication": "hair_med_text",
+            "hair_response": "hair_hvar_text",
+            "hair_symptoms": "hair_hsx_text",
+            "sexual_health_med": "sexual_health_med_text",
+            "sexual_health_effectiveness": "sexual_health_effectiveness_text",
+            "sexual_health_bp": "sexual_health_bp_text",
+            "hair_loss_location": "sexual_health_hair_location_text",
+            "hair_loss_additional_sxx": "sexual_health_hair_sxx_text",
+            "pa_medication": "pa_med_text",
+            "pa_bp": "pa_bp_text",
+            "pa_pulse": "pa_pulse_text",
+            "pa_situations": "pa_situations_text",
+            "pa_symptoms": "pa_symptoms_text",
+            "photoaging_medication": "photoaging_med_text",
+            "photoaging_goals": "photoaging_goals_text",
+            "photoaging_retinoid": "photoaging_retinoid_text",
+            "bc_medication": "bc_med_text",
+            "bc_bp": "bc_bp_text",
+            "bc_lmp": "bc_lmp_text",
+            "bc_side_effects": "bc_side_effects_text",
+            "bc_med_history_changes": "bc_history_changes_text",
+        }
+        field_name = field_map.get(var_id, "")
+        if field_name and hasattr(self, field_name):
+            try:
+                getattr(self, field_name).SetValue(normalized)
+            except Exception:
+                pass
+
+        if var_id in {
+            "hair_medication",
+            "sexual_health_med",
+            "pa_medication",
+            "photoaging_medication",
+            "bc_medication",
+        }:
+            medication_value[0] = normalized
+
+        if var_id == "bc_side_effects":
+            try:
+                normalized, _ = self._normalize_birth_control_side_effects()
+                grabbed_vars[var_id] = normalized
+            except Exception:
+                pass
+
+        return grabbed_vars.get(var_id, normalized)
+
+    def _handle_ad_hoc_selector_grab_accept(self, payload):
+        try:
+            data = payload if isinstance(payload, dict) else {}
+            visit_type = (
+                str(data.get("visit_type") or "").strip()
+                or str(getattr(self, "_js_overlay_visit_type", "") or "").strip()
+                or str(getattr(self, "_cdp_last_display", "") or "").strip()
+                or "Unknown"
+            )
+            var_id = str(data.get("var_id") or "").strip()
+            selector = str(data.get("selector") or "").strip()
+            raw_text = str(data.get("raw_text") or "").strip()
+            page_url = str(data.get("page_url") or "").strip()
+            persist_selector = bool(data.get("persist_selector"))
+            if not var_id:
+                raise ValueError("var_id is required")
+
+            spec = get_variable_selector_spec(visit_type, var_id=var_id)
+            if not spec:
+                raise ValueError(f"Unknown selector variable '{var_id}' for {visit_type}")
+
+            saved_value = self._apply_ad_hoc_selector_grab_value(visit_type, spec, raw_text)
+            selector_saved = False
+            if persist_selector and selector:
+                add_ranked_playwright_selector(
+                    str(spec.get("group") or "").strip(),
+                    str(spec.get("key") or "").strip(),
+                    selector,
+                    promote_to_top=False,
+                )
+                selector_saved = True
+            emit_emr_bridge({var_id: saved_value})
+            append_ad_hoc_selector_log(
+                {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "visit_type": visit_type,
+                    "var_id": var_id,
+                    "label": spec.get("label") or var_id,
+                    "group": spec.get("group") or "",
+                    "key": spec.get("key") or "",
+                    "selector": selector,
+                    "raw_text": raw_text,
+                    "saved_value": saved_value,
+                    "page_url": page_url,
+                    "persist_selector": persist_selector,
+                    "selector_saved": selector_saved,
+                }
+            )
+            if selector_saved:
+                self._queue_overlay_cmd("push_selector_specs", visit_type)
+            self._queue_overlay_cmd(
+                "push_status",
+                (
+                    f"Ad hoc selector grab saved for {spec.get('label') or var_id}"
+                    if not selector_saved
+                    else f"Ad hoc selector saved to ranked list for {spec.get('label') or var_id}"
+                ),
+            )
+        except Exception as exc:
+            print(f"[AD HOC SELECTOR GRAB] accept error: {exc}")
+            self._queue_overlay_cmd("push_status", "Ad hoc selector grab failed")
+
+    def _handle_selector_workbench_action_from_overlay(self, payload):
+        """Handle selector workbench CRUD and window-state actions from the overlay."""
+        global templates
+
+        try:
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                raise ValueError("workbench payload must be a dict")
+
+            action = str(payload.get("action") or "").strip().lower()
+            visit_type = str(
+                payload.get("visit_type")
+                or self._js_overlay_visit_type
+                or self._cdp_last_display
+                or "Unknown"
+            ).strip()
+            if not action:
+                raise ValueError("workbench action is required")
+
+            status_msg = "Workbench updated"
+            refresh_visit = False
+            refresh_specs = False
+            refresh_workbench = False
+
+            if action == "save_window_state":
+                state = (
+                    payload.get("state")
+                    if isinstance(payload.get("state"), dict)
+                    else payload
+                )
+                save_selector_workbench_window_state(visit_type, state)
+                status_msg = "Workbench layout saved"
+            elif action == "save_custom_variable":
+                variable_payload = (
+                    payload.get("variable")
+                    if isinstance(payload.get("variable"), dict)
+                    else payload
+                )
+                record = save_custom_variable(visit_type, variable_payload)
+                status_msg = f"Saved custom variable: {record.get('label') or record.get('var_id')}"
+                refresh_specs = True
+                refresh_workbench = True
+            elif action == "save_builtin_variable":
+                variable_payload = (
+                    payload.get("variable")
+                    if isinstance(payload.get("variable"), dict)
+                    else payload
+                )
+                record = save_builtin_variable_settings(visit_type, variable_payload)
+                status_msg = f"Saved built-in settings: {record.get('label') or record.get('var_id')}"
+                refresh_specs = True
+                refresh_workbench = True
+            elif action == "delete_custom_variable":
+                var_id = str(payload.get("var_id") or "").strip()
+                deleted_var_id = delete_custom_variable(visit_type, var_id)
+                status_msg = f"Deleted custom variable: {deleted_var_id}"
+                refresh_specs = True
+                refresh_workbench = True
+            elif action == "save_template":
+                template_name = str(payload.get("template_name") or "").strip()
+                previous_name = str(payload.get("previous_name") or "").strip()
+                body = str(payload.get("body") or "")
+                result = save_tab_template_record(
+                    visit_type, template_name, body, previous_name=previous_name
+                )
+                templates = load_templates_from_file()
+                status_msg = (
+                    f"Saved template: {result.get('template_name') or template_name}"
+                )
+                refresh_visit = True
+                refresh_workbench = True
+            elif action == "delete_template":
+                template_name = str(payload.get("template_name") or "").strip()
+                result = delete_tab_template_record(visit_type, template_name)
+                templates = load_templates_from_file()
+                status_msg = (
+                    f"Deleted template: {result.get('template_name') or template_name}"
+                )
+                refresh_visit = True
+                refresh_workbench = True
+            else:
+                raise ValueError(f"unknown workbench action: {action}")
+
+            self._queue_overlay_cmd("push_status", status_msg)
+            if refresh_visit:
+                self._queue_overlay_cmd("push_visit", visit_type)
+            if refresh_specs:
+                self._queue_overlay_cmd("push_selector_specs", visit_type)
+            if refresh_workbench:
+                self._queue_overlay_cmd("push_selector_workbench", visit_type)
+            result = {
+                "ok": True,
+                "status": status_msg,
+                "visit_type": visit_type,
+                "refresh_visit": refresh_visit,
+                "refresh_specs": refresh_specs,
+                "refresh_workbench": refresh_workbench,
+            }
+            if action in {"save_custom_variable", "save_builtin_variable"}:
+                result["spec"] = get_variable_selector_spec(
+                    visit_type,
+                    var_id=str(variable_payload.get("var_id") or "").strip(),
+                )
+            return result
+        except Exception as exc:
+            print(f"[SELECTOR OVERLAY] Workbench action error: {exc}")
+            self._queue_overlay_cmd("push_status", f"Workbench error: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def _handle_selector_debug_from_overlay(self, payload):
+        """Log selector-finder debug messages from the JS overlay."""
+        try:
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                print(f"[SELECTOR OVERLAY] {payload}")
+                return
+
+            event = str(payload.get("event") or "debug").strip()
+            var_id = str(payload.get("var_id") or "").strip()
+            label = str(payload.get("label") or "").strip()
+            method = str(payload.get("method") or "").strip()
+            count = payload.get("count")
+            details = str(payload.get("details") or "").strip()
+            selector = str(payload.get("selector") or "").strip()
+            raw_text = str(payload.get("raw_text") or "").strip()
+
+            parts = [f"[SELECTOR OVERLAY] {event}"]
+            if var_id:
+                parts.append(f"var={var_id}")
+            if label:
+                parts.append(f"label={label}")
+            if method:
+                parts.append(f"method={method}")
+            if count is not None:
+                parts.append(f"count={count}")
+            if selector:
+                parts.append(f"selector={selector}")
+            if raw_text:
+                trimmed = raw_text.replace("\n", " ").strip()
+                if len(trimmed) > 120:
+                    trimmed = trimmed[:117] + "..."
+                parts.append(f"raw={trimmed}")
+            if details:
+                parts.append(details)
+            print(" | ".join(parts))
+        except Exception as exc:
+            print(f"[SELECTOR OVERLAY] Debug log error: {exc}")
+
+    def _do_overlay_detect_visit(self):
+        """Detect visit type from EMR page, update overlay (called on wx thread)."""
+        try:
+            targets = self._cdp_list_targets()
+            detected = None
+            for ti in targets:
+                tid = ti.get("targetId")
+                if not tid:
+                    continue
+                detected = self._cdp_detect_visit_text(tid)
+                if detected:
+                    break
+
+            if detected:
+                txt, actual_url = detected
+                vt_raw = self._classify_visit_type(txt)
+                canonical = self._canonicalize_visit_type(vt_raw)
+                display = canonical or vt_raw or "Unknown"
+                self._queue_overlay_cmd("push_visit", display)
+                print(f"[JS OVERLAY] Detected visit type: {display}")
+            else:
+                print("[JS OVERLAY] Could not detect visit type")
+                self._queue_overlay_cmd("push_status", "Could not detect visit type")
+        except Exception as exc:
+            print(f"[JS OVERLAY] Detect error: {exc}")
+
     def _on_grab_mode_change(self, evt):
         """Shared handler for the grab mode dropdown on all tabs.
-        Updates the global USE_CDP_FOR_GRAB and syncs all dropdowns."""
-        global USE_CDP_FOR_GRAB
+        Updates the global USE_PLAYWRIGHT_TEXT_GRAB and syncs all dropdowns."""
+        global USE_PLAYWRIGHT_TEXT_GRAB
         sel = evt.GetEventObject().GetSelection()
-        USE_CDP_FOR_GRAB = (sel == 0)
-        mode_label = "CDP / Playwright (fast)" if USE_CDP_FOR_GRAB else "Clipboard (select all + copy)"
+        USE_PLAYWRIGHT_TEXT_GRAB = sel == 0
+        mode_label = (
+            f"Playwright text ({PLAYWRIGHT_TEXT_GRAB_METHOD})"
+            if USE_PLAYWRIGHT_TEXT_GRAB
+            else "Clipboard (select all + copy)"
+        )
         print(f"[Grab mode] Set to: {mode_label}")
         # Sync all tab dropdowns to the same selection
         for widget_name in ('grab_mode_choice_tab1', 'grab_mode_choice_tab2', 'grab_mode_choice_tab3',
@@ -9507,53 +16277,39 @@ class MyFrame(wx.Frame):
         """Grab the active EMR text and parse for medication and response lines for hair-loss."""
         def do_grab():
             try:
-                original = ""
-                new_content = None
-                used_clipboard = False
+                browser_data = {}
+                grab_source = "wide text grab"
+                try:
+                    grabber = BrowserEMRGrabber()
+                    if grabber.connect_to_chrome():
+                        browser_data = grabber.grab_hair_loss_data() or {}
+                        if browser_data:
+                            grab_source = "ranked playwright selectors"
+                except Exception as browser_exc:
+                    print(f"âš ï¸ Hair Loss browser grab fallback triggered: {browser_exc}")
 
-                # --- CDP path (fast, no clipboard/focus interaction) ---
-                if USE_CDP_FOR_GRAB:
-                    new_content = _get_emr_text_cdp()
-                    if new_content:
-                        print(f"✅ Hair CDP grab: {len(new_content)} chars")
-
-                # --- Clipboard path (when CDP disabled or failed) ---
-                if not new_content:
-                    used_clipboard = True
-                    try:
-                        original = pyperclip.paste()
-                    except:
-                        pass
-
-                    # Hide, focus EMR, select all and copy
-                    frame.Hide()
-                    time.sleep(0.1)
-                    screen_width, screen_height = pyautogui.size()
-                    center_x, center_y = screen_width // 2, screen_height // 2
-                    pyautogui.click(center_x, center_y)
-                    time.sleep(0.3)
-                    pyautogui.hotkey('ctrl', 'a')
-                    time.sleep(0.2)
-                    pyautogui.hotkey('ctrl', 'c')
-                    time.sleep(0.5)
-
-                    new_content = pyperclip.paste()
+                new_content = str(browser_data.get("full_text") or "")
+                if not new_content or len(new_content) < 20:
+                    new_content, grab_source = self._grab_emr_text_for_parsing(
+                        min_length=20
+                    )
 
                 if not new_content or len(new_content) < 20:
-                    wx.CallAfter(lambda: wx.MessageBox('Failed to grab text for hair-loss parsing. Make sure EMR window is active and contains text.', 'Error', wx.ICON_ERROR))
-                    if used_clipboard:
-                        pyperclip.copy(original)
-                    wx.CallAfter(lambda: frame.Show())
+                    wx.CallAfter(
+                        lambda: wx.MessageBox(
+                            "Failed to grab text for hair-loss parsing. Make sure EMR window is active and contains text.",
+                            "Error",
+                            wx.ICON_ERROR,
+                        )
+                    )
                     return
 
-                # Clear any selection if we used clipboard
-                if used_clipboard:
-                    _clear_text_selection()
+                print(f"âœ… Hair text grab via {grab_source}: {len(new_content)} chars")
 
                 # Parse medication heuristics and other fields
-                med = ''
-                hvar = ''
-                hsx = ''
+                med = str(browser_data.get("medication") or "")
+                hvar = str(browser_data.get("response") or "")
+                hsx = str(browser_data.get("symptoms") or "")
                 lines = [ln.strip() for ln in new_content.splitlines() if ln.strip()]
 
                 header_pattern = re.compile(
@@ -9604,140 +16360,14 @@ class MyFrame(wx.Frame):
                                     treatment_frequency_hint = freq_candidate
                         break
 
-                # Capture HSX: collect specific hair loss option phrases
-                hsx_symptoms = []
-                specific_symptoms = [
-                    r'general thinning or shedding',
-                    r'thinning at temples',
-                    r'thinning at the hairline',
-                    r'thinning on the top of the head',
-                    r'bald patches, smooth and hairless not at the top of the head',
-                    r'redness and irritation found at sites of hair loss',
-                    r"i'll take a photo of my head instead"
-                ]
-                
-                # Look through all lines for matching symptoms - extract exact phrases
-                for line in lines:
-                    line_clean = line.strip()
-                    if line_clean and not line_clean.startswith('Patient selected'):
-                        for pattern in specific_symptoms:
-                            if re.search(pattern, line_clean, re.IGNORECASE):
-                                # Extract just the exact phrase, no parenthetical text
-                                match = re.search(pattern, line_clean, re.IGNORECASE)
-                                if match:
-                                    symptom_text = match.group(0)
-                                    if symptom_text not in hsx_symptoms:
-                                        hsx_symptoms.append(symptom_text)
-                
-                # Join all found symptoms with commas
-                hsx = ', '.join(hsx_symptoms)
+                if not hsx:
+                    hsx = extract_hair_symptoms_from_text(new_content)
 
-                def find_next_med_like(start_idx, lookahead=8):
-                    """Return the first med-like line after start_idx or None."""
-                    for k in range(start_idx, min(start_idx + lookahead, len(lines))):
-                        candidate = lines[k].strip()
-                        if not candidate:
-                            continue
-                        # skip explicit section labels / headers
-                        if header_pattern.match(candidate):
-                            continue
-                        # If candidate clearly contains med keywords, percent signs, or topical/spray wording, take it
-                        if med_keywords_re.search(candidate) or re.search(r'\b(topical|spray|cmpd|compound|solution)\b', candidate, re.IGNORECASE) or '%' in candidate:
-                            return candidate
-                        # otherwise, if it contains multiple words and punctuation (likely a med description), accept as fallback
-                        if len(candidate.split()) >= 3 and re.search(r'[A-Za-z0-9]', candidate):
-                            return candidate
-                    return None
-
-                treatment_found = False
-                for i, ln in enumerate(lines):
-                    if treatment_header_re.search(ln):
-                        candidate = find_next_med_like(i+1, lookahead=8)
-                        if candidate:
-                            med = candidate.strip().strip('*').strip()
-                            treatment_found = True
-                            break
-
-                # If we found the treatment med above, ensure frequency appended later; otherwise fall back to header-based search
                 if not med:
-                    for i, ln in enumerate(lines):
-                        if re.search(r'^(treatment|medication|current treatment|meds)[:\-\s]', ln, re.IGNORECASE) or header_pattern.search(ln):
-                            # find next med-like line after this header
-                            candidate = find_next_med_like(i+1, lookahead=6)
-                            if candidate:
-                                med = candidate.strip().strip('*').strip()
-                            else:
-                                med = ''
-                            break
+                    med = extract_hair_medication_from_text(new_content)
 
-                # Fallback: search for known hair meds
-                if not med:
-                    for ln in lines:
-                        if re.search(r'finasteride|minoxidil|dutasteride|spironolactone|topical', ln, re.IGNORECASE):
-                            med = ln
-                            break
-
-                if treatment_line:
-                    med = treatment_line.strip().strip('*').strip()
-
-                # Normalise medication string: if it looks like a header (e.g., 'Current Dose') skip ahead
-                if med and header_pattern.search(med):
-                    # find the next non-header line
-                    for k in range(lines.index(med)+1, len(lines)):
-                        if not header_pattern.search(lines[k]) and not re.match(r'^(photos|notes|comments)\b', lines[k], re.IGNORECASE):
-                            med = lines[k]
-                            break
-
-                # Append frequency 'daily' if not present in med or nearby treatment hint
-                append_daily = True
-                if med and frequency_hint_re.search(med):
-                    append_daily = False
-                if append_daily and treatment_frequency_hint and frequency_hint_re.search(treatment_frequency_hint):
-                    append_daily = False
-                if append_daily and med:
-                    med = med.rstrip(' .') + ' daily'
-
-                # Look for response to treatment question
-                treatment_response_found = False
-                for i, ln in enumerate(lines):
-                    if re.search(r'how has your treatment affected your hair loss', ln, re.IGNORECASE):
-                        # Take the next non-empty line as response
-                        for j in range(i+1, min(i+4, len(lines))):
-                            candidate = lines[j].strip()
-                            if candidate and len(candidate) > 3:
-                                hvar = candidate
-                                treatment_response_found = True
-                                break
-                        break
-
-                # Fallback: look for treatment response patterns
                 if not hvar:
-                    response_patterns = [
-                        r'good response|excellent response|positive response',
-                        r'no change|no improvement|same|stable',
-                        r'worse|getting worse|declining',
-                        r'improved|better|improvement|some improvement',
-                        r'minimal.*response|slight.*improvement',
-                        r'significant.*improvement|much better',
-                        r'side effects|stopped.*due',
-                        r'continued.*improvement|ongoing.*improvement'
-                    ]
-                    
-                    for ln in lines:
-                        for pattern in response_patterns:
-                            if re.search(pattern, ln, re.IGNORECASE):
-                                hvar = ln.strip()
-                                break
-                        if hvar:
-                            break
-
-                # Additional fallback: look for any line that mentions hair in a progress context
-                if not hvar:
-                    for ln in lines:
-                        if (re.search(r'hair.*(?:better|worse|same|improved|stable|thicker|thinner)', ln, re.IGNORECASE) or
-                            re.search(r'(?:better|worse|same|improved|stable|thicker|thinner).*hair', ln, re.IGNORECASE)):
-                            hvar = ln.strip()
-                            break
+                    hvar = extract_hair_response_from_text(new_content)
 
                 # Update fields on main thread
                 wx.CallAfter(self.hair_med_text.SetValue, med)
@@ -9751,17 +16381,12 @@ class MyFrame(wx.Frame):
                     "hair_symptoms": hsx,
                 })
 
-                # Restore original clipboard if we used it
-                if used_clipboard:
-                    pyperclip.copy(original)
-                    wx.CallAfter(lambda: frame.Show())
-
             except Exception as e:
-                if used_clipboard:
-                    pyperclip.copy(original)
-                wx.CallAfter(lambda: wx.MessageBox(f'Error during hair grab: {e}', 'Error', wx.ICON_ERROR))
-                if used_clipboard:
-                    wx.CallAfter(lambda: frame.Show())
+                wx.CallAfter(
+                    lambda: wx.MessageBox(
+                        f"Error during hair grab: {e}", "Error", wx.ICON_ERROR
+                    )
+                )
 
         threading.Thread(target=do_grab, daemon=True).start()
 
@@ -9785,7 +16410,7 @@ class MyFrame(wx.Frame):
             hair_exam_findings.append("confluent from the front hairline to the crown")
         if self.hair_exam_near_front.GetValue():
             hair_exam_findings.append("near the front with sparing of the hairline")
-        
+
         # Only include O: section if exam findings are selected
         objective_section = ""
         if hair_exam_findings:
@@ -9829,11 +16454,11 @@ class MyFrame(wx.Frame):
     def insert_hair_limited_checkin_note(self):
         """Insert a limited check-in note for hair loss follow-up visits."""
         med = self.hair_med_text.GetValue().strip()
-        
+
         if not med:
             wx.MessageBox('No medication captured. Use Grab or enter values manually.', 'Nothing to Insert', wx.ICON_WARNING)
             return
-        
+
         note = (
             "S: Reports good response to treatment without side effects.\n"
             "A: Androgenic alopecia\n"
@@ -9855,120 +16480,88 @@ class MyFrame(wx.Frame):
         """Grab the active EMR text and parse for photoaging-related information."""
         def do_grab():
             try:
-                original = ""
-                new_content = None
-                used_clipboard = False
-
-                # --- CDP path (fast, no clipboard/focus interaction) ---
-                if USE_CDP_FOR_GRAB:
-                    new_content = _get_emr_text_cdp()
-                    if new_content:
-                        print(f"✅ Photoaging CDP grab: {len(new_content)} chars")
-
-                # --- Clipboard path (when CDP disabled or failed) ---
-                if not new_content:
-                    used_clipboard = True
-                    try:
-                        original = pyperclip.paste()
-                    except:
-                        pass
-
-                    # Hide, focus EMR, select all and copy
-                    frame.Hide()
-                    time.sleep(0.1)
-                    screen_width, screen_height = pyautogui.size()
-                    center_x, center_y = screen_width // 2, screen_height // 2
-                    pyautogui.click(center_x, center_y)
-                    time.sleep(0.3)
-                    pyautogui.hotkey('ctrl', 'a')
-                    time.sleep(0.2)
-                    pyautogui.hotkey('ctrl', 'c')
-                    time.sleep(0.5)
-                    new_content = pyperclip.paste()
+                new_content, grab_source = self._grab_emr_text_for_parsing(
+                    min_length=20
+                )
 
                 if not new_content or len(new_content) < 20:
-                    wx.CallAfter(lambda: wx.MessageBox('Failed to grab text for photoaging parsing. Make sure EMR window is active and contains text.', 'Error', wx.ICON_ERROR))
-                    if used_clipboard:
-                        pyperclip.copy(original)
-                        wx.CallAfter(lambda: frame.Show())
+                    wx.CallAfter(
+                        lambda: wx.MessageBox(
+                            "Failed to grab text for photoaging parsing. Make sure EMR window is active and contains text.",
+                            "Error",
+                            wx.ICON_ERROR,
+                        )
+                    )
                     return
 
-                if used_clipboard:
-                    _clear_text_selection()
+                print(
+                    f"âœ… Photoaging text grab via {grab_source}: {len(new_content)} chars"
+                )
 
-                # Parse photoaging-related fields
-                lines = [ln.strip() for ln in new_content.splitlines() if ln.strip()]
-                
-                med = ''
-                skin_goals = ''
-                retinoid_history = ''
-                
-                # Parse medication - look for Tretinoin compounds
                 med_keywords_re = re.compile(r'tretinoin|niacinamide|azelaic.*acid|retinoid|aging.*rx|custom.*formula', re.IGNORECASE)
-                
-                # Look for treatment/medication section - prioritize actual medication composition
-                for i, ln in enumerate(lines):
-                    if re.search(r'^(treatment|aging rx|patient preference)\b', ln, re.IGNORECASE):
-                        # Look ahead for medication line, prefer lines with percentages and specific compounds
-                        best_candidate = ''
-                        for j in range(i+1, min(i+8, len(lines))):
-                            candidate = lines[j].strip()
-                            if len(candidate.split()) >= 3:
-                                # Prioritize lines with percentages and compound names (actual medication)
-                                if re.search(r'\d+\.?\d*%.*tretinoin|tretinoin.*\d+\.?\d*%', candidate, re.IGNORECASE):
-                                    med = candidate
-                                    break
-                                # Secondary: lines with multiple drug names and percentages
-                                elif re.search(r'%.*%', candidate) and med_keywords_re.search(candidate):
-                                    best_candidate = candidate
-                                # Fallback: general medication-like lines
-                                elif med_keywords_re.search(candidate) and not best_candidate:
-                                    best_candidate = candidate
-                        
-                        # Use best candidate if no perfect match found
-                        if not med and best_candidate:
-                            med = best_candidate
-                        if med:
-                            break
-                
-                # Parse skin goals - look for "Patient's skin care goals" section
-                for i, ln in enumerate(lines):
-                    if re.search(r'patient.*skin.*care.*goals?', ln, re.IGNORECASE):
-                        # Take the next non-empty line
-                        for j in range(i+1, min(i+4, len(lines))):
-                            candidate = lines[j].strip()
-                            if candidate and not re.match(r'^(patient|treatment|aging)', candidate, re.IGNORECASE):
-                                skin_goals = candidate
-                                break
-                        break
-                
-                # Parse retinoid history - look for previous retinoid use
-                retinoid_found = False
-                for ln in lines:
-                    if re.search(r'retin-a|tretinoin|retinoid', ln, re.IGNORECASE) and not re.search(r'^treatment|^aging', ln, re.IGNORECASE):
-                        # Check if this looks like a historical reference
-                        if re.search(r'used|previously|past|been|few years|remember', ln, re.IGNORECASE):
-                            retinoid_history = "Previously used Retin-A"
-                            retinoid_found = True
-                            break
-                        elif re.search(r'prescription retinoid', ln, re.IGNORECASE):
-                            retinoid_history = "Has used prescription retinoids"
-                            retinoid_found = True
-                            break
-                
-                # If no specific retinoid history found, check for general skincare use
-                if not retinoid_found:
-                    for ln in lines:
-                        if re.search(r'over-the-counter.*product|men.*skin.*cream|skincare', ln, re.IGNORECASE):
-                            retinoid_history = "Has used OTC skincare products"
-                            break
-                
-                # Append daily frequency to medication if not present
-                if med and not re.search(r'\b(daily|bi-monthly|monthly|weekly)\b', med, re.IGNORECASE):
-                    med = med.rstrip(' .') + ' daily'
-                
+                grabber = BrowserEMRGrabber()
+                grabber._cache_latest_segment = new_content
+                grabber._cache_body_text = new_content
+                grabber._cache_all_text = new_content
+
+                def parse_photoaging_medication(raw_text: str) -> str:
+                    lines = [ln.strip() for ln in str(raw_text or '').splitlines() if ln.strip()]
+                    best_candidate = ''
+                    for line in lines:
+                        if re.search(r'\d+\.?\d*%.*tretinoin|tretinoin.*\d+\.?\d*%', line, re.IGNORECASE):
+                            return line
+                        if re.search(r'%.*%', line) and med_keywords_re.search(line):
+                            best_candidate = line
+                        elif med_keywords_re.search(line) and not best_candidate:
+                            best_candidate = line
+                    return best_candidate
+
+                def parse_photoaging_goals(raw_text: str) -> str:
+                    lines = [ln.strip() for ln in str(raw_text or '').splitlines() if ln.strip()]
+                    for idx, line in enumerate(lines):
+                        if re.search(r'patient.*skin.*care.*goals?', line, re.IGNORECASE):
+                            for candidate in lines[idx + 1: idx + 4]:
+                                if candidate and not re.match(r'^(patient|treatment|aging)', candidate, re.IGNORECASE):
+                                    return candidate
+                    for line in lines:
+                        if not re.match(r'^(patient|treatment|aging)', line, re.IGNORECASE):
+                            return line
+                    return ''
+
+                def parse_photoaging_retinoid_history(raw_text: str) -> str:
+                    lines = [ln.strip() for ln in str(raw_text or '').splitlines() if ln.strip()]
+                    for line in lines:
+                        if re.search(r'retin-a|tretinoin|retinoid', line, re.IGNORECASE) and not re.search(r'^treatment|^aging', line, re.IGNORECASE):
+                            if re.search(r'used|previously|past|been|few years|remember', line, re.IGNORECASE):
+                                return 'Previously used Retin-A'
+                            if re.search(r'prescription retinoid', line, re.IGNORECASE):
+                                return 'Has used prescription retinoids'
+                    for line in lines:
+                        if re.search(r'over-the-counter.*product|men.*skin.*cream|skincare', line, re.IGNORECASE):
+                            return 'Has used OTC skincare products'
+                    return ''
+
+                med, _, _ = grabber._resolve_ranked_playwright_value(
+                    'photoaging',
+                    'medication',
+                    'photoaging_medication',
+                    parse_photoaging_medication,
+                )
+                skin_goals, _, _ = grabber._resolve_ranked_playwright_value(
+                    'photoaging',
+                    'skin_goals',
+                    'photoaging_goals',
+                    parse_photoaging_goals,
+                )
+                retinoid_history, _, _ = grabber._resolve_ranked_playwright_value(
+                    'photoaging',
+                    'retinoid_history',
+                    'photoaging_retinoid',
+                    parse_photoaging_retinoid_history,
+                )
+
                 print(f"Parsed photoaging data: Med='{med}', Goals='{skin_goals}', History='{retinoid_history}'")
-                
+
                 # Update fields on main thread
                 wx.CallAfter(self.photoaging_med_text.SetValue, med)
                 wx.CallAfter(self.photoaging_goals_text.SetValue, skin_goals)
@@ -9981,129 +16574,121 @@ class MyFrame(wx.Frame):
                     "photoaging_retinoid_history": retinoid_history,
                 })
 
-                # Restore original clipboard if we used it
-                if used_clipboard:
-                    pyperclip.copy(original)
-                    wx.CallAfter(lambda: frame.Show())
-
             except Exception as e:
-                if used_clipboard:
-                    pyperclip.copy(original)
-                wx.CallAfter(lambda: wx.MessageBox(f'Error during photoaging grab: {e}', 'Error', wx.ICON_ERROR))
-                if used_clipboard:
-                    wx.CallAfter(lambda: frame.Show())
+                wx.CallAfter(
+                    lambda: wx.MessageBox(
+                        f"Error during photoaging grab: {e}", "Error", wx.ICON_ERROR
+                    )
+                )
 
         threading.Thread(target=do_grab, daemon=True).start()
 
     def grab_performance_anxiety(self):
-        """Collect Performance Anxiety fields and populate the tab. Respects USE_CDP_FOR_GRAB toggle."""
+        """Collect Performance Anxiety fields and populate the tab from grabbed page text."""
         def do_grab():
             try:
-                original = ""
-                used_clipboard = False
-                clip_text = None
-
-                # --- CDP path ---
-                if USE_CDP_FOR_GRAB:
-                    grabber = None
-                    try:
-                        if self._browser_grabber_cache is None:
-                            self._browser_grabber_cache = BrowserEMRGrabber()
-                            self._browser_grabber_cache.connect_to_chrome()
-                        grabber = self._browser_grabber_cache
-                    except Exception:
-                        grabber = BrowserEMRGrabber()
-                        grabber.connect_to_chrome()
-
-                    if grabber and grabber.driver:
-                        data = grabber.grab_performance_anxiety_data() or {}
-                        med = data.get('medication', '')
-                        situations = data.get('situations_text', '')
-                        symptoms = data.get('symptoms_text', '')
-                        bp = data.get('blood_pressure', 'nr')
-                        pulse = data.get('pulse', 'nr')
-
-                        wx.CallAfter(self.pa_med_text.SetValue, med)
-                        wx.CallAfter(self.pa_situations_text.SetValue, situations)
-                        wx.CallAfter(self.pa_symptoms_text.SetValue, symptoms)
-                        wx.CallAfter(self.pa_bp_text.SetValue, bp)
-                        wx.CallAfter(self.pa_pulse_text.SetValue, pulse)
-
-                        emit_emr_bridge({
-                            "context": "performance_anxiety",
-                            "pa_med": med,
-                            "pa_situations": situations,
-                            "pa_symptoms": symptoms,
-                            "pa_bp": bp,
-                            "pa_pulse": pulse,
-                        })
-
-                        self.refresh_patient_location_async()
-                        return
-                    else:
-                        print("CDP grab failed for PA, falling through to clipboard...")
-
-                # --- Clipboard fallback path ---
-                used_clipboard = True
-                try:
-                    original = pyperclip.paste()
-                except Exception:
-                    original = ""
-
-                frame.Hide()
-                time.sleep(0.1)
-                screen_width, screen_height = pyautogui.size()
-                center_x, center_y = screen_width // 2, screen_height // 2
-                pyautogui.click(center_x, center_y)
-                time.sleep(0.3)
-                pyautogui.hotkey('ctrl', 'a')
-                time.sleep(0.2)
-                pyautogui.hotkey('ctrl', 'c')
-                time.sleep(0.5)
-
-                clip_text = pyperclip.paste() or ''
-                _clear_text_selection()
+                clip_text, grab_source = self._grab_emr_text_for_parsing(min_length=30)
 
                 if not clip_text or len(clip_text) < 30:
-                    wx.CallAfter(lambda: wx.MessageBox(
-                        'Clipboard grab failed for Performance Anxiety. Ensure EMR window is focused.',
-                        'Clipboard Error', wx.ICON_WARNING))
-                    pyperclip.copy(original)
-                    wx.CallAfter(lambda: frame.Show())
+                    wx.CallAfter(
+                        lambda: wx.MessageBox(
+                            "Text grab failed for Performance Anxiety. Ensure the EMR page is open and visible.",
+                            "Grab Error",
+                            wx.ICON_WARNING,
+                        )
+                    )
                     return
 
-                # Parse from clipboard text using a disconnected grabber
+                print(
+                    f"âœ… Performance Anxiety text grab via {grab_source}: {len(clip_text)} chars"
+                )
+
+                # Parse from clipboard text using a disconnected grabber that
+                # prefers saved ranked Playwright selectors and falls back to the
+                # widest available text snapshot.
                 grabber = BrowserEMRGrabber()
+                grabber._cache_latest_segment = clip_text
                 grabber._cache_body_text = clip_text
                 grabber._cache_all_text = clip_text
 
-                med = grabber._extract_medication_from_text(clip_text)
-                bp = 'nr'
-                pulse = 'nr'
+                def parse_pa_option_block(raw_text: str, question: str, options: List[str]) -> str:
+                    lines = [line.strip() for line in str(raw_text or '').splitlines() if line.strip()]
+                    mapped = grabber._map_lines_to_known_options(lines, options)
+                    if mapped:
+                        return ', '.join(mapped)
+                    parsed = grabber._parse_pa_options_from_text(str(raw_text or ''), question, options)
+                    return ', '.join(parsed) if parsed else ''
 
-                # BP from text
-                bp_match = re.search(r'(?:blood\s*pressure|bp)[:\s]*(\d{2,3}\s*/\s*\d{2,3})', clip_text, re.IGNORECASE)
-                if bp_match:
-                    bp = bp_match.group(1).replace(' ', '')
+                def parse_pa_symptom_block(raw_text: str) -> str:
+                    lines = [line.strip() for line in str(raw_text or '').splitlines() if line.strip()]
+                    mapped = grabber._map_lines_to_known_options(lines, PA_SYMPTOM_OPTIONS)
+                    if mapped:
+                        return ', '.join(mapped)
+                    keyword_lines = [
+                        line for line in lines if any(keyword in line.lower() for keyword in PA_SYMPTOM_KEYWORDS)
+                    ]
+                    mapped = grabber._map_lines_to_known_options(keyword_lines, PA_SYMPTOM_OPTIONS)
+                    if mapped:
+                        return ', '.join(mapped)
+                    parsed = grabber._parse_pa_options_from_text(
+                        str(raw_text or ''),
+                        'do you experience any of the following symptoms when you are anxious',
+                        PA_SYMPTOM_OPTIONS,
+                    )
+                    return ', '.join(parsed) if parsed else ''
 
-                # Pulse from text
-                pulse_match = re.search(r'(?:pulse|heart\s*rate)[:\s]*(\d{2,3})', clip_text, re.IGNORECASE)
-                if pulse_match:
-                    pulse = pulse_match.group(1)
+                def parse_pa_pulse_value(raw_text: str) -> str:
+                    text = str(raw_text or '').strip()
+                    if not text:
+                        return ''
+                    for phrase in ('60-100 bpm', 'Less than 60 bpm', 'More than 100 bpm'):
+                        if phrase.lower() in text.lower():
+                            return phrase
+                    match = re.search(r'\b(\d{2,3})\b', text)
+                    if not match:
+                        return ''
+                    value = int(match.group(1))
+                    return str(value) if 30 <= value <= 220 else ''
 
-                # PA situations and symptoms from text
-                situations_list = grabber._parse_pa_options_from_text(
-                    clip_text,
-                    'what situational fears make you nervous or anxious',
-                    PA_SITUATION_OPTIONS,
+                med, _, _ = grabber._resolve_ranked_playwright_value(
+                    'performance_anxiety',
+                    'medication',
+                    'pa_medication',
+                    lambda raw: grabber._extract_medication_from_text(raw) or '',
                 )
-                symptoms_list = grabber._parse_pa_options_from_text(
-                    clip_text,
-                    'do you experience any of the following symptoms when you are anxious',
-                    PA_SYMPTOM_OPTIONS,
+                bp, _, _ = grabber._resolve_ranked_playwright_value(
+                    'performance_anxiety',
+                    'blood_pressure',
+                    'pa_bp',
+                    lambda raw: normalize_blood_pressure_value(raw) or '',
                 )
-                situations = ', '.join(situations_list) if situations_list else ''
-                symptoms = ', '.join(symptoms_list) if symptoms_list else ''
+                pulse, _, _ = grabber._resolve_ranked_playwright_value(
+                    'performance_anxiety',
+                    'pulse',
+                    'pa_pulse',
+                    parse_pa_pulse_value,
+                )
+                situations, _, _ = grabber._resolve_ranked_playwright_value(
+                    'performance_anxiety',
+                    'situations',
+                    'pa_situations',
+                    lambda raw: parse_pa_option_block(
+                        raw,
+                        'what situational fears make you nervous or anxious',
+                        PA_SITUATION_OPTIONS,
+                    ),
+                )
+                symptoms, _, _ = grabber._resolve_ranked_playwright_value(
+                    'performance_anxiety',
+                    'symptoms',
+                    'pa_symptoms',
+                    parse_pa_symptom_block,
+                )
+
+                if not bp:
+                    bp = 'nr'
+                if not pulse:
+                    pulse = 'nr'
 
                 wx.CallAfter(self.pa_med_text.SetValue, med)
                 wx.CallAfter(self.pa_situations_text.SetValue, situations)
@@ -10111,128 +16696,73 @@ class MyFrame(wx.Frame):
                 wx.CallAfter(self.pa_bp_text.SetValue, bp)
                 wx.CallAfter(self.pa_pulse_text.SetValue, pulse)
 
-                emit_emr_bridge({
-                    "context": "performance_anxiety",
-                    "pa_med": med,
-                    "pa_situations": situations,
-                    "pa_symptoms": symptoms,
-                    "pa_bp": bp,
-                    "pa_pulse": pulse,
-                })
-
-                pyperclip.copy(original)
-                wx.CallAfter(lambda: frame.Show())
+                emit_emr_bridge(
+                    {
+                        "context": "performance_anxiety",
+                        "pa_med": med,
+                        "pa_situations": situations,
+                        "pa_symptoms": symptoms,
+                        "pa_bp": bp,
+                        "pa_pulse": pulse,
+                    }
+                )
                 self.refresh_patient_location_async()
 
             except Exception as e:
-                if used_clipboard:
-                    try:
-                        pyperclip.copy(original)
-                    except Exception:
-                        pass
-                    wx.CallAfter(lambda: frame.Show())
                 wx.CallAfter(lambda: wx.MessageBox(f'Error during Performance Anxiety grab: {e}', 'Error', wx.ICON_ERROR))
 
         threading.Thread(target=do_grab, daemon=True).start()
 
     def grab_birth_control(self):
         """Collect Birth Control tab data via the browser grabber and populate fields.
-        Respects USE_CDP_FOR_GRAB toggle."""
+        Uses the configured text-grab path with clipboard fallback."""
 
         def do_grab():
-            original = ""
-            used_clipboard = False
             try:
-                # --- CDP path ---
-                if USE_CDP_FOR_GRAB:
-                    grabber = None
-                    try:
-                        if self._browser_grabber_cache is None:
-                            self._browser_grabber_cache = BrowserEMRGrabber()
-                            self._browser_grabber_cache.connect_to_chrome()
-                        grabber = self._browser_grabber_cache
-                    except Exception:
-                        grabber = BrowserEMRGrabber()
-                        grabber.connect_to_chrome()
-
-                    if grabber and grabber.driver:
-                        data = grabber.grab_birth_control_data() or {}
-
-                        med = data.get('medication', '')
-                        lmp = data.get('lmp', '')
-                        bp = data.get('blood_pressure', 'nr')
-                        side_effects = data.get('side_effects_text', '')
-                        pmh = data.get('pmh_list', [])
-                        pmh_other = data.get('pmh_other', '')
-                        initial_visit = data.get('initial_visit', True)
-                        med_history_changes = data.get('med_history_changes', '')
-
-                        wx.CallAfter(self.bc_med_text.SetValue, med)
-                        wx.CallAfter(self.bc_lmp_text.SetValue, lmp)
-                        wx.CallAfter(self.bc_bp_text.SetValue, bp)
-                        wx.CallAfter(self.bc_side_effects_text.SetValue, side_effects or 'none')
-                        wx.CallAfter(self.bc_history_changes_text.SetValue, med_history_changes)
-                        wx.CallAfter(self.bc_initial_rb.SetValue, bool(initial_visit))
-                        wx.CallAfter(self.bc_followup_rb.SetValue, not bool(initial_visit))
-                        wx.CallAfter(self._apply_birth_control_pmh, pmh, pmh_other)
-
-                        emit_emr_bridge({
-                            "context": "birth_control",
-                            "bc_med": med,
-                            "bc_lmp": lmp,
-                            "bc_bp": bp,
-                            "bc_side_effects": side_effects,
-                            "bc_pmh_list": pmh,
-                            "bc_pmh_other": pmh_other,
-                            "bc_initial_visit": bool(initial_visit),
-                            "bc_med_history_changes": med_history_changes,
-                        })
-
-                        if hasattr(self, "grab_status_text"):
-                            wx.CallAfter(self.grab_status_text.SetLabel, "Updated: Birth Control")
-
-                        self.refresh_patient_location_async()
-                        return
-                    else:
-                        print("CDP grab failed for BC, falling through to clipboard...")
-
-                # --- Clipboard fallback path ---
-                used_clipboard = True
-                try:
-                    original = pyperclip.paste()
-                except Exception:
-                    original = ""
-
-                frame.Hide()
-                time.sleep(0.1)
-                screen_width, screen_height = pyautogui.size()
-                center_x, center_y = screen_width // 2, screen_height // 2
-                pyautogui.click(center_x, center_y)
-                time.sleep(0.3)
-                pyautogui.hotkey('ctrl', 'a')
-                time.sleep(0.2)
-                pyautogui.hotkey('ctrl', 'c')
-                time.sleep(0.5)
-
-                clip_text = pyperclip.paste() or ''
-                _clear_text_selection()
+                clip_text, grab_source = self._grab_emr_text_for_parsing(min_length=30)
 
                 if not clip_text or len(clip_text) < 30:
-                    wx.CallAfter(lambda: wx.MessageBox(
-                        'Clipboard grab failed for Birth Control. Ensure EMR window is focused.',
-                        'Clipboard Error', wx.ICON_WARNING))
-                    pyperclip.copy(original)
-                    wx.CallAfter(lambda: frame.Show())
+                    wx.CallAfter(
+                        lambda: wx.MessageBox(
+                            "Text grab failed for Birth Control. Ensure the EMR page is open and visible.",
+                            "Grab Error",
+                            wx.ICON_WARNING,
+                        )
+                    )
                     return
 
-                # Parse from clipboard text using the same logic as grab_birth_control_data
+                print(
+                    f"âœ… Birth Control text grab via {grab_source}: {len(clip_text)} chars"
+                )
+
+                # Parse from clipboard text using the same logic as grab_birth_control_data,
+                # but prefer saved ranked Playwright selectors first.
                 grabber = BrowserEMRGrabber()
+                grabber._cache_latest_segment = clip_text
                 grabber._cache_body_text = clip_text
                 grabber._cache_all_text = clip_text
 
-                med = grabber._extract_medication_from_text(clip_text)
-                bp = 'nr'
-                lmp = ''
+                med, _, _ = grabber._resolve_ranked_playwright_value(
+                    'birth_control',
+                    'medication',
+                    'bc_medication',
+                    lambda raw: grabber._extract_medication_from_text(raw) or '',
+                )
+                bp, _, _ = grabber._resolve_ranked_playwright_value(
+                    'birth_control',
+                    'blood_pressure',
+                    'bc_bp',
+                    lambda raw: normalize_blood_pressure_value(raw) or '',
+                )
+                lmp, _, _ = grabber._resolve_ranked_playwright_value(
+                    'birth_control',
+                    'lmp',
+                    'bc_lmp',
+                    lambda raw: str(raw or '').strip(),
+                )
+
+                if not bp:
+                    bp = 'nr'
                 side_effects = 'none'
                 pmh_candidates = set()
                 pmh_other = ''
@@ -10261,14 +16791,9 @@ class MyFrame(wx.Frame):
                             return answers
                     return []
 
-                # BP from text
-                bp_match = re.search(r'(?:blood\s*pressure|bp)[:\s]*(\d{2,3}\s*/\s*\d{2,3})', clip_text, re.IGNORECASE)
-                if bp_match:
-                    bp = bp_match.group(1).replace(' ', '')
-
                 # LMP
                 lmp_answer = find_answer(['last menstrual period'])
-                if lmp_answer:
+                if lmp_answer and not lmp:
                     lmp = lmp_answer[0]
 
                 # Side effects
@@ -10333,20 +16858,13 @@ class MyFrame(wx.Frame):
                 })
 
                 if hasattr(self, "grab_status_text"):
-                    wx.CallAfter(self.grab_status_text.SetLabel, "Updated: Birth Control")
-
-                pyperclip.copy(original)
-                wx.CallAfter(lambda: frame.Show())
+                    wx.CallAfter(
+                        self.grab_status_text.SetLabel, "Updated: Birth Control"
+                    )
                 self.refresh_patient_location_async()
 
             except Exception as exc:
                 print(f"Birth Control grab thread error: {exc}")
-                if used_clipboard:
-                    try:
-                        pyperclip.copy(original)
-                    except Exception:
-                        pass
-                    wx.CallAfter(lambda: frame.Show())
                 wx.CallAfter(lambda err=exc: wx.MessageBox(f'Error during Birth Control grab: {err}', 'Error', wx.ICON_ERROR))
 
         threading.Thread(target=do_grab, daemon=True).start()
@@ -10540,7 +17058,7 @@ class MyFrame(wx.Frame):
                 center_x, center_y = screen_width // 2, screen_height // 2
                 pyautogui.click(center_x, center_y)
                 time.sleep(0.3)
-                
+
                 # Try multiple approaches to get all content
                 attempts = [
                     # Attempt 1: Standard ctrl+a
@@ -10552,35 +17070,35 @@ class MyFrame(wx.Frame):
                     # Attempt 4: Try ctrl+home then ctrl+shift+end to select all
                     lambda: (pyautogui.hotkey('ctrl', 'home'), time.sleep(0.2), pyautogui.hotkey('ctrl', 'shift', 'end'), time.sleep(0.2), pyautogui.hotkey('ctrl', 'c'), time.sleep(0.3))
                 ]
-                
+
                 best_content = ""
                 best_length = 0
-                
+
                 for i, attempt in enumerate(attempts):
                     try:
                         # Execute the attempt
                         attempt()
-                        
+
                         # Check what we got
                         test_content = pyperclip.paste()
                         print(f"Sexual Health Grab Attempt {i+1}: Got {len(test_content)} characters")
                         print(f"First 100 chars: {repr(test_content[:100])}")
-                        
+
                         # Keep the longest/best content
                         if len(test_content) > best_length and len(test_content) > 20:
                             best_content = test_content
                             best_length = len(test_content)
                             print(f"New best content from attempt {i+1}: {len(test_content)} chars")
-                            
+
                             # If we got a substantial amount of text, we can break early
                             if len(test_content) > 500:
                                 print(f"Got substantial content ({len(test_content)} chars), using this")
                                 break
-                                
+
                     except Exception as e:
                         print(f"Attempt {i+1} failed: {e}")
                         continue
-                
+
                 new_content = best_content
 
                 if not new_content or len(new_content) < 20:
@@ -10595,7 +17113,7 @@ class MyFrame(wx.Frame):
                             (center_x, center_y - 300),       # Top center
                             (center_x + 100, center_y - 300), # Top center-right
                         ]
-                        
+
                         for tab_x, tab_y in notes_tab_attempts:
                             try:
                                 pyautogui.click(tab_x, tab_y)
@@ -10604,22 +17122,22 @@ class MyFrame(wx.Frame):
                                 time.sleep(0.2)
                                 pyautogui.hotkey('ctrl', 'c')
                                 time.sleep(0.3)
-                                
+
                                 test_content = pyperclip.paste()
                                 print(f"Notes tab attempt at ({tab_x}, {tab_y}): Got {len(test_content)} characters")
-                                
+
                                 if len(test_content) > len(new_content):
                                     new_content = test_content
                                     print(f"Better content found from Notes tab click: {len(test_content)} chars")
                                     break
-                                    
+
                             except Exception as e:
                                 print(f"Notes tab attempt at ({tab_x}, {tab_y}) failed: {e}")
                                 continue
-                                
+
                     except Exception as e:
                         print(f"Notes tab approach failed: {e}")
-                
+
                 if not new_content or len(new_content) < 20:
                     wx.CallAfter(lambda: wx.MessageBox(f'Failed to grab text for sexual health parsing. Got {len(new_content)} characters. Make sure EMR window is active and contains text. Try clicking into the Notes section first.', 'Error', wx.ICON_ERROR))
                     pyperclip.copy(original)
@@ -10631,29 +17149,29 @@ class MyFrame(wx.Frame):
 
                 # Parse sexual health-related fields
                 lines = [ln.strip() for ln in new_content.splitlines() if ln.strip()]
-                
+
                 print(f"Sexual Health Parse Debug:")
                 print(f"Total content length: {len(new_content)} characters")
                 print(f"Total lines after filtering: {len(lines)}")
                 print(f"First 10 lines: {lines[:10]}")
                 print(f"Last 10 lines: {lines[-10:]}")
-                
+
                 med = ''
                 effectiveness = ''
                 bp_var = 'nr'  # Default to "nr" if no blood pressure found
-                
+
                 # Auto-detect diagnoses from most recent Sexual Health note
                 detected_diagnoses = []
-                
+
                 # Look for Sexual Health notes (they contain "presents for Sexual Health")
                 sexual_health_notes = []
                 current_note = []
                 collecting_note = False
-                
+
                 for i, line in enumerate(lines):
                     # More comprehensive note boundary detection
                     is_note_start = False
-                    
+
                     # Date patterns at start of line
                     if re.search(r'^\d{1,2}/\d{1,2}/\d{4}', line):
                         is_note_start = True
@@ -10676,7 +17194,7 @@ class MyFrame(wx.Frame):
                                     re.search(r'presents for.*sexual health', next_line, re.IGNORECASE)):
                                     is_note_start = True
                                 break
-                    
+
                     if is_note_start:
                         # Save previous note if it was a sexual health note
                         if collecting_note and current_note:
@@ -10684,52 +17202,52 @@ class MyFrame(wx.Frame):
                             if re.search(r'presents for sexual health|sexual health.*visit|sexual.*dysfunction', note_text, re.IGNORECASE):
                                 sexual_health_notes.append(note_text)
                                 print(f"Found Sexual Health note: {note_text[:100]}...")
-                        
+
                         # Start new note
                         current_note = [line]
                         collecting_note = True
                     elif collecting_note and line.strip():  # Only add non-empty lines
                         current_note.append(line)
-                
+
                 # Don't forget the last note
                 if collecting_note and current_note:
                     note_text = ' '.join(current_note)
                     if re.search(r'presents for sexual health|sexual health.*visit|sexual.*dysfunction', note_text, re.IGNORECASE):
                         sexual_health_notes.append(note_text)
                         print(f"Found Sexual Health note (last): {note_text[:100]}...")
-                
+
                 print(f"Total Sexual Health notes found: {len(sexual_health_notes)}")
-                
+
                 # Check sexual health notes for diagnoses (most recent first)
                 for i, note in enumerate(sexual_health_notes):
                     print(f"Checking note {i+1} for diagnoses...")
-                    
+
                     # Look for ED diagnoses - be more flexible with patterns
                     if re.search(r'\bED\b|erectile dysfunction|E\.D\.|erection.*dysfunction', note, re.IGNORECASE):
                         if "ED" not in detected_diagnoses:
                             detected_diagnoses.append("ED")
                             print(f"Found ED diagnosis in note {i+1}")
-                    
+
                     # Look for PE diagnoses - be more flexible with patterns
                     if re.search(r'\bPE\b|premature ejaculation|P\.E\.|early ejaculation|rapid ejaculation', note, re.IGNORECASE):
                         if "PE" not in detected_diagnoses:
                             detected_diagnoses.append("PE")
                             print(f"Found PE diagnosis in note {i+1}")
-                    
+
                     # Look for PE-like ejaculatory dysfunction
                     if re.search(r'PE-like ejaculatory dysfunction|ejaculatory dysfunction|climax.*dysfunction', note, re.IGNORECASE):
                         if "PE-like ejaculatory dysfunction" not in detected_diagnoses:
                             detected_diagnoses.append("PE-like ejaculatory dysfunction")
                             print(f"Found PE-like dysfunction in note {i+1}")
-                    
+
                     # If we found diagnoses in this note, stop looking
                     if detected_diagnoses:
                         print(f"Found diagnoses: {detected_diagnoses}, stopping search")
                         break
-                
+
                 # Parse medication - look for Current Dose or Treatment section
                 med_keywords_re = re.compile(r'sildenafil|viagra|tadalafil|cialis|generic viagra|generic cialis', re.IGNORECASE)
-                
+
                 # Look for Current Dose or Treatment section
                 for i, ln in enumerate(lines):
                     if re.search(r'^(current dose|treatment)\b', ln, re.IGNORECASE):
@@ -10743,11 +17261,11 @@ class MyFrame(wx.Frame):
                                     break
                         if med:
                             break
-                
+
                 # Append "daily" if not present and doesn't already have frequency
                 if med and not re.search(r'\b(daily|as needed|prn|weekly|monthly|every|per|doses)\b', med, re.IGNORECASE):
                     med = med.rstrip(' .') + ' daily'
-                
+
                 # Parse effectiveness - look for treatment satisfaction question
                 for i, ln in enumerate(lines):
                     if re.search(r'are you happy with the way your treatment is working', ln, re.IGNORECASE):
@@ -10759,7 +17277,7 @@ class MyFrame(wx.Frame):
                                     effectiveness = candidate.capitalize()
                                     break
                         break
-                
+
                 # Parse blood pressure - look specifically for "What was your last blood pressure reading?" section
                 for i, ln in enumerate(lines):
                     if re.search(r'what was your last blood pressure reading\?', ln, re.IGNORECASE):
@@ -10776,10 +17294,10 @@ class MyFrame(wx.Frame):
                             break
 
                 bp_var = self._normalize_sexual_health_bp(bp_var)
-                
+
                 print(f"Parsed sexual health data: Med='{med}', Effectiveness='{effectiveness}', BP='{bp_var}'")
                 print(f"Auto-detected diagnoses: {detected_diagnoses}")
-                
+
                 # Update fields on main thread
                 wx.CallAfter(self.sexual_health_med_text.SetValue, med)
                 wx.CallAfter(self.sexual_health_effectiveness_text.SetValue, effectiveness)
@@ -10803,156 +17321,84 @@ class MyFrame(wx.Frame):
         threading.Thread(target=do_grab, daemon=True).start()
 
     def grab_sexual_health(self):
-        """Sexual Health data extraction. Respects USE_CDP_FOR_GRAB toggle."""
+        """Sexual Health data extraction using the configured text-grab path."""
         def do_grab():
             try:
-                original = ""
-                used_clipboard = False
-                clip_text = None
-
-                # --- CDP path ---
-                if USE_CDP_FOR_GRAB:
-                    grabber = None
-                    t0 = time.perf_counter()
-                    try:
-                        if self._browser_grabber_cache is None:
-                            self._browser_grabber_cache = BrowserEMRGrabber()
-                            self._browser_grabber_cache.connect_to_chrome()
-                        grabber = self._browser_grabber_cache
-                    except Exception:
-                        try:
-                            grabber = BrowserEMRGrabber()
-                            grabber.connect_to_chrome()
-                        except Exception:
-                            grabber = None
-
-                    if grabber and grabber.driver:
-                        data = grabber.grab_sexual_health_data()
-                        if data:
-                            med = data.get('medication', '')
-                            effectiveness = data.get('effectiveness', '')
-                            bp_var = self._normalize_sexual_health_bp(data.get('blood_pressure'))
-                            detected_diagnoses = data.get('diagnoses', [])
-                            hair_loss_location = data.get('hair_loss_location', '')
-                            hair_loss_additional_sxx = data.get('hair_loss_additional_sxx', '')
-
-                            print(f"Sexual Health Data (CDP):")
-                            print(f"   Medication: '{med}'")
-                            print(f"   Effectiveness: '{effectiveness}'")
-                            print(f"   Blood Pressure: '{bp_var}'")
-                            print(f"   Auto-detected diagnoses: {detected_diagnoses}")
-                            print(f"   Hair loss location: '{hair_loss_location}'")
-                            print(f"   Hair loss additional sxx: '{hair_loss_additional_sxx}'")
-
-                            patient_age = data.get('patient_age', '')
-                            visit_type = data.get('visit_type', '')
-                            ed_onset = data.get('rapidity_of_onset', '')
-                            ed_frequency = data.get('frequency', '')
-                            ed_description = data.get('ed_description', '')
-                            ed_characterization = data.get('ed_characterization', '')
-                            ehs = data.get('ehs', '')
-                            pep = data.get('pep_score', '')
-                            past_treatments = data.get('past_ed_treatments', '')
-                            ros_pos = data.get('ros_positives', '')
-                            ros_neg = data.get('ros_negatives', '')
-
-                            wx.CallAfter(self.sexual_health_med_text.SetValue, med)
-                            wx.CallAfter(self.sexual_health_effectiveness_text.SetValue, effectiveness)
-                            wx.CallAfter(self.sexual_health_bp_text.SetValue, bp_var)
-                            wx.CallAfter(self.sexual_health_hair_location_text.SetValue, hair_loss_location)
-                            wx.CallAfter(self.sexual_health_hair_sxx_text.SetValue, hair_loss_additional_sxx)
-
-                            wx.CallAfter(self.sexual_health_age_text.SetValue, patient_age)
-                            wx.CallAfter(self.sexual_health_visit_type_text.SetValue, visit_type)
-                            wx.CallAfter(self.sexual_health_onset_text.SetValue, ed_onset)
-                            wx.CallAfter(self.sexual_health_frequency_text.SetValue, ed_frequency)
-                            wx.CallAfter(self.sexual_health_ed_description_text.SetValue, ed_description)
-                            wx.CallAfter(self.sexual_health_ed_characterization_text.SetValue, ed_characterization)
-                            wx.CallAfter(self.sexual_health_ehs_text.SetValue, ehs)
-                            wx.CallAfter(self.sexual_health_pep_text.SetValue, pep)
-                            wx.CallAfter(self.sexual_health_past_treatments_text.SetValue, past_treatments)
-                            wx.CallAfter(self.sexual_health_ros_pos_text.SetValue, ros_pos)
-                            wx.CallAfter(self.sexual_health_ros_neg_text.SetValue, ros_neg)
-
-                            self._auto_set_response_and_plan_from_effectiveness(effectiveness)
-
-                            grabbed_vars['hair_loss_location'] = hair_loss_location
-                            grabbed_vars['hair_loss_additional_sxx'] = hair_loss_additional_sxx
-
-                            if med and ('finasteride' in med.lower() or 'minoxidil' in med.lower()):
-                                if 'Hair Loss' not in detected_diagnoses:
-                                    detected_diagnoses.append('Hair Loss')
-
-                            self._apply_sexual_health_diagnoses(detected_diagnoses)
-
-                            emit_emr_bridge({
-                                "context": "sexual_health",
-                                "sexual_health_med": med,
-                                "sexual_health_effectiveness": effectiveness,
-                                "sexual_health_bp": bp_var,
-                                "sexual_health_diagnoses": detected_diagnoses,
-                                "hair_loss_location": hair_loss_location,
-                                "hair_loss_additional_sxx": hair_loss_additional_sxx,
-                            })
-
-                            self.refresh_patient_location_async()
-                            t1 = time.perf_counter()
-                            dprint(f"Sexual Health grab (CDP) total time: {(t1 - t0)*1000:.0f} ms")
-                            return
-                        else:
-                            print("CDP grab returned no data for SH, falling through to clipboard...")
-                    else:
-                        print("CDP grab failed for SH, falling through to clipboard...")
-
-                # --- Clipboard fallback path ---
-                used_clipboard = True
-                try:
-                    original = pyperclip.paste()
-                except Exception:
-                    original = ""
-
-                frame.Hide()
-                time.sleep(0.1)
-                try:
-                    screen_width, screen_height = pyautogui.size()
-                    center_x, center_y = screen_width // 2, screen_height // 2
-                    pyautogui.click(center_x, center_y)
-                    time.sleep(0.25)
-                    pyautogui.hotkey('ctrl', 'a'); time.sleep(0.15)
-                    pyautogui.hotkey('ctrl', 'c'); time.sleep(0.35)
-                    clip_text = pyperclip.paste() or ''
-                    _clear_text_selection()
-                finally:
-                    pyperclip.copy(original)
-                    wx.CallAfter(lambda: frame.Show())
+                t0 = time.perf_counter()
+                clip_text, grab_source = self._grab_emr_text_for_parsing(min_length=30)
 
                 if not clip_text or len(clip_text) < 30:
-                    wx.CallAfter(lambda: wx.MessageBox(
-                        'Clipboard grab failed. Ensure EMR window is focused and has visible text.',
-                        'Clipboard Error', wx.ICON_WARNING))
+                    wx.CallAfter(
+                        lambda: wx.MessageBox(
+                            "Text grab failed. Ensure the EMR page is open and has visible text.",
+                            "Grab Error",
+                            wx.ICON_WARNING,
+                        )
+                    )
                     return
 
-                # Parse from clipboard text using disconnected grabber extractors
-                grabber = BrowserEMRGrabber()
-                grabber._cache_body_text = clip_text
-                grabber._cache_all_text = clip_text
-                grabber._cache_latest_segment = clip_text
+                print(
+                    f"âœ… Sexual Health text grab via {grab_source}: {len(clip_text)} chars"
+                )
 
-                med = grabber._extract_medication_from_text(clip_text)
-                effectiveness = grabber._extract_effectiveness(full_text=clip_text) or ''
-                bp_var = self._normalize_sexual_health_bp(grabber._extract_blood_pressure())
+                # Parse from a disconnected grabber that prefers ranked Playwright selectors
+                # and falls back to the widest available Playwright text snapshot.
+                grabber = BrowserEMRGrabber()
+                grabber._cache_latest_segment = clip_text
+                wide_text = grabber._get_sh_wide_fallback_text() or clip_text
+                grabber._cache_body_text = wide_text
+                grabber._cache_all_text = wide_text
+
+                med, _, _ = grabber._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "medication",
+                    "sexual_health_med",
+                    lambda raw: grabber._extract_medication_from_text(raw) or "",
+                )
+                effectiveness, _, _ = grabber._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "effectiveness",
+                    "sexual_health_effectiveness",
+                    lambda raw: grabber._extract_effectiveness(full_text=raw) or "",
+                )
+                bp_var_raw, _, _ = grabber._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "blood_pressure",
+                    "sexual_health_bp",
+                    lambda raw: normalize_blood_pressure_value(raw) or "",
+                )
+                bp_var = self._normalize_sexual_health_bp(bp_var_raw or "nr")
+                hair_loss_location, _, _ = grabber._resolve_ranked_playwright_value(
+                    "sexual_health",
+                    "hair_loss_location",
+                    "hair_loss_location",
+                    lambda raw: extract_hair_loss_location_from_text(raw) or "",
+                )
+                hair_loss_additional_sxx, _, _ = (
+                    grabber._resolve_ranked_playwright_value(
+                        "sexual_health",
+                        "hair_loss_additional_sxx",
+                        "hair_loss_additional_sxx",
+                        lambda raw: extract_hair_loss_additional_sxx_from_text(raw)
+                        or "",
+                    )
+                )
                 detected_diagnoses = grabber._extract_diagnoses() or []
 
-                patient_age = grabber._extract_patient_age(full_text=clip_text)
+                patient_age = grabber._extract_patient_age(full_text=wide_text)
                 visit_type = 'sexual health'
-                ed_onset = grabber._extract_ed_onset(full_text=clip_text)
-                ed_frequency = grabber._extract_ed_frequency(full_text=clip_text)
-                ed_description = grabber._extract_ed_description(full_text=clip_text)
-                ed_characterization = grabber._extract_ed_characterization(full_text=clip_text)
-                ehs = grabber._extract_ehs_scores(full_text=clip_text)
-                pep = grabber._extract_pep_score(full_text=clip_text)
-                past_treatments = grabber._extract_past_ed_treatments(full_text=clip_text)
-                ros_pos = grabber._extract_ros_positives(full_text=clip_text)
+                ed_onset = grabber._extract_ed_onset(full_text=wide_text)
+                ed_frequency = grabber._extract_ed_frequency(full_text=wide_text)
+                ed_description = grabber._extract_ed_description(full_text=wide_text)
+                ed_characterization = grabber._extract_ed_characterization(
+                    full_text=wide_text
+                )
+                ehs = grabber._extract_ehs_scores(full_text=wide_text)
+                pep = grabber._extract_pep_score(full_text=wide_text)
+                past_treatments = grabber._extract_past_ed_treatments(
+                    full_text=wide_text
+                )
+                ros_pos = grabber._extract_ros_positives(full_text=wide_text)
                 ros_neg = grabber._extract_ros_negatives(ros_pos)
 
                 wx.CallAfter(self.sexual_health_med_text.SetValue, med)
@@ -10973,28 +17419,46 @@ class MyFrame(wx.Frame):
                 wx.CallAfter(self.sexual_health_ros_pos_text.SetValue, ros_pos)
                 wx.CallAfter(self.sexual_health_ros_neg_text.SetValue, ros_neg)
 
-                emit_emr_bridge({
-                    "context": "sexual_health",
-                    "sexual_health_med": med,
-                    "sexual_health_effectiveness": effectiveness,
-                    "sexual_health_bp": bp_var,
-                    "sexual_health_diagnoses": detected_diagnoses,
-                })
+                emit_emr_bridge(
+                    {
+                        "context": "sexual_health",
+                        "sexual_health_med": med,
+                        "sexual_health_effectiveness": effectiveness,
+                        "sexual_health_bp": bp_var,
+                        "hair_loss_location": hair_loss_location,
+                        "hair_loss_additional_sxx": hair_loss_additional_sxx,
+                        "sexual_health_diagnoses": detected_diagnoses,
+                        "patient_age": patient_age,
+                        "visit_type": visit_type,
+                        "ed_onset": ed_onset,
+                        "ed_frequency": ed_frequency,
+                        "ed_description": ed_description,
+                        "ed_characterization": ed_characterization,
+                        "ehs": ehs,
+                        "pep": pep,
+                        "past_treatments": past_treatments,
+                        "ros_positives": ros_pos,
+                        "ros_negatives": ros_neg,
+                    }
+                )
 
                 self.refresh_patient_location_async()
+                t1 = time.perf_counter()
+                dprint(
+                    f"Sexual Health grab ({grab_source}) total time: {(t1 - t0)*1000:.0f} ms"
+                )
 
             except Exception as e:
-                try:
-                    pyperclip.copy(original)
-                except Exception:
-                    pass
-                wx.CallAfter(lambda: wx.MessageBox(f'Error during sexual health grab: {e}', 'Error', wx.ICON_ERROR))
-                wx.CallAfter(lambda: frame.Show())
+                wx.CallAfter(
+                    lambda: wx.MessageBox(
+                        f"Error during sexual health grab: {e}", "Error", wx.ICON_ERROR
+                    )
+                )
 
         threading.Thread(target=do_grab, daemon=True).start()
 
     def _normalize_sexual_health_bp(self, bp_value: Optional[str]) -> str:
-        text = (bp_value or '').strip()
+        text = normalize_blood_pressure_value(bp_value)
         if not text:
             return 'not required'
         lowered = text.lower()
@@ -11031,6 +17495,11 @@ class MyFrame(wx.Frame):
                 if lowered == canonical.lower() and canonical not in normalized:
                     normalized.append(canonical)
                     break
+        normalized = [
+            dx
+            for dx in normalized
+            if dx != "Hair Loss" or self._should_autoselect_hair_loss_from_medication()
+        ]
 
         def _apply():
             try:
@@ -11049,7 +17518,6 @@ class MyFrame(wx.Frame):
         wx.CallAfter(_apply)
 
     def _should_autoselect_hair_loss_from_medication(self) -> bool:
-        keywords = ("finasteride", "minoxidil")
         candidates = []
         try:
             candidates.append(self.sexual_health_med_text.GetValue())
@@ -11057,10 +17525,7 @@ class MyFrame(wx.Frame):
             pass
         candidates.append(medication_value[0])
         for text in candidates:
-            if not text:
-                continue
-            lower = text.lower()
-            if any(keyword in lower for keyword in keywords):
+            if allow_hair_loss_diagnosis("Sexual Health", text):
                 return True
         return False
 
@@ -11077,7 +17542,7 @@ class MyFrame(wx.Frame):
                     created = True
 
                 if not grabber.connect_to_chrome():
-                    print("❌ Visit type detection error: could not attach to Chrome")
+                    print("âŒ Visit type detection error: could not attach to Chrome")
                     wx.CallAfter(self.grab_status_text.SetLabel, "Detection failed")
                     if created:
                         self._browser_grabber_cache = None
@@ -11087,7 +17552,7 @@ class MyFrame(wx.Frame):
                 canonical = self._canonicalize_visit_type(visit_raw)
                 visit_display = canonical or (visit_raw if visit_raw else "Unknown")
 
-                print(f"🎯 Detected visit type (header): {visit_display}")
+                print(f"ðŸŽ¯ Detected visit type (header): {visit_display}")
 
                 wx.CallAfter(self.visit_type_text.SetLabel, f"Visit type: {visit_display}")
                 switched = self._schedule_tab_switch(canonical or visit_display, f"Detected: {visit_display}")
@@ -11098,12 +17563,12 @@ class MyFrame(wx.Frame):
 
                 return canonical
             except Exception as e:
-                print(f"❌ Visit type detection error: {e}")
+                print(f"âŒ Visit type detection error: {e}")
                 wx.CallAfter(self.grab_status_text.SetLabel, f"Detection failed")
                 if grabber and grabber is getattr(self, "_browser_grabber_cache", None):
                     self._browser_grabber_cache = None
                 return None
-        
+
         return threading.Thread(target=do_detection, daemon=True).start()
 
     def universal_grab(self):
@@ -11111,7 +17576,7 @@ class MyFrame(wx.Frame):
         def do_universal_grab():
             try:
                 wx.CallAfter(self.grab_status_text.SetLabel, "Detecting visit type...")
-                
+
                 # First detect and switch to appropriate tab
                 grabber = getattr(self, "_browser_grabber_cache", None)
                 created = False
@@ -11144,83 +17609,94 @@ class MyFrame(wx.Frame):
                         self.grab_photoaging()
                     elif canonical == 'Performance Anxiety':
                         self.grab_performance_anxiety()
-                    else:  # TD/ED Labs / Testosterone
-                        grab_all_labs()
-                    print(f"🎯 Universal grab completed for: {visit_label}")
+                    elif canonical == "Birth Control":
+                        self.grab_birth_control()
+                    else:
+                        print(f"No grab handler for: {visit_label}")
+                    print(f"ðŸŽ¯ Universal grab completed for: {visit_label}")
                 else:
                     # Fallback to current tab's grab function
                     current_tab = self.notebook.GetSelection()
                     if current_tab == 0:
-                        wx.CallAfter(self.grab_status_text.SetLabel, "Grabbing TD/ED Labs data...")
-                        grab_all_labs()
-                    elif current_tab == 1:
                         wx.CallAfter(self.grab_status_text.SetLabel, "Grabbing Hair Loss data...")
                         self.grab_hair()
-                    elif current_tab == 2:
+                    elif current_tab == 1:
                         wx.CallAfter(self.grab_status_text.SetLabel, "Grabbing Photoaging data...")
                         self.grab_photoaging()
-                    elif current_tab == 3:
+                    elif current_tab == 2:
                         wx.CallAfter(self.grab_status_text.SetLabel, "Grabbing Sexual Health data...")
                         self.grab_sexual_health()
+                    elif current_tab == 4:
+                        wx.CallAfter(
+                            self.grab_status_text.SetLabel,
+                            "Grabbing Performance Anxiety data...",
+                        )
+                        self.grab_performance_anxiety()
+                    elif current_tab == 5:
+                        wx.CallAfter(
+                            self.grab_status_text.SetLabel,
+                            "Grabbing Birth Control data...",
+                        )
+                        self.grab_birth_control()
                     else:
                         wx.CallAfter(self.grab_status_text.SetLabel, "No grab function for this tab")
-                    print("🎯 Universal grab completed for: Current tab (fallback)")
+                    print("ðŸŽ¯ Universal grab completed for: Current tab (fallback)")
 
             except Exception as e:
-                print(f"❌ Universal grab error: {e}")
+                print(f"âŒ Universal grab error: {e}")
                 wx.CallAfter(self.grab_status_text.SetLabel, f"Grab failed: {str(e)[:30]}")
-        
+
         threading.Thread(target=do_universal_grab, daemon=True).start()
 
     def toggle_auto_refresh(self):
         """Toggle auto-refresh functionality - now calls the same auto-clicker as the tab"""
         # Switch to Auto Clicker tab
-        self.notebook.SetSelection(4)  # Auto Clicker tab index
-        
+        self.notebook.SetSelection(3)  # Auto Clicker tab index
+
         # Call the same toggle method as the Auto Clicker tab button
         self.toggle_auto_clicker()
-        
+
         # Update the universal button appearance to match the tab button
         if auto_clicker_enabled[0]:
-            self.auto_refresh_btn.SetLabel("🛑 Stop Auto-Refresh")
+            self.auto_refresh_btn.SetLabel("ðŸ›‘ Stop Auto-Refresh")
             self.auto_refresh_btn.SetBackgroundColour(wx.Colour(200, 50, 50))  # Red
             self.grab_status_text.SetLabel("Auto-clicker ON")
         else:
-            self.auto_refresh_btn.SetLabel("🔄 Auto-Refresh")
+            self.auto_refresh_btn.SetLabel("ðŸ”„ Auto-Refresh")
             self.auto_refresh_btn.SetBackgroundColour(wx.Colour(0, 100, 200))  # Blue
             self.grab_status_text.SetLabel("Auto-clicker OFF")
 
     def auto_refresh_loop(self):
         """Auto-refresh loop that grabs data every 10 seconds without hiding GUI"""
         refresh_interval = 10  # seconds
-        
+
         while self.auto_refresh_enabled:
             try:
-                print(f"🔄 Auto-refresh monitoring EMR...")
+                print(f"ðŸ”„ Auto-refresh monitoring EMR...")
                 wx.CallAfter(self.grab_status_text.SetLabel, "Monitoring EMR...")
-                
+
                 # Background grab without hiding GUI
                 self.background_emr_grab()
-                
+
                 # Wait for the specified interval
                 for i in range(refresh_interval):
                     if not self.auto_refresh_enabled:
                         break
                     time.sleep(1)
-                
+
             except Exception as e:
-                print(f"❌ Auto-refresh error: {e}")
+                print(f"âŒ Auto-refresh error: {e}")
                 wx.CallAfter(self.grab_status_text.SetLabel, f"Auto-refresh error")
                 time.sleep(5)  # Wait 5 seconds on error
-        
-        print("🔄 Auto-refresh loop ended")
+
+        print("ðŸ”„ Auto-refresh loop ended")
 
     def start_url_monitoring(self):
         """Start URL monitoring for automatic tab switching"""
         if self.url_monitor_thread is None or not self.url_monitor_thread.is_alive():
             self.url_monitor_thread = threading.Thread(target=self.url_monitor_loop, daemon=True)
             self.url_monitor_thread.start()
-            print("🌐 URL monitoring started for automatic tab switching")
+            print("ðŸŒ URL monitoring started for automatic tab switching")
 
     def url_monitor_loop(self):
         """Monitor URL changes and automatically switch tabs"""
@@ -11245,7 +17721,7 @@ class MyFrame(wx.Frame):
                 # Check if URL has changed
                 if current_url != self.current_url:
                     self.current_url = current_url
-                    print(f"🌐 URL changed to: {current_url}")
+                    print(f"ðŸŒ URL changed to: {current_url}")
                     wx.CallAfter(self.refresh_patient_location_async)
 
                     # Get page content to determine visit type
@@ -11259,39 +17735,39 @@ class MyFrame(wx.Frame):
                             target_tab = 3
                             wx.CallAfter(self.notebook.SetSelection, target_tab)
                             wx.CallAfter(self.grab_status_text.SetLabel, f"Auto-switched to: {visit_type}")
-                            print(f"🎯 Auto-switched to {visit_type} tab")
+                            print(f"ðŸŽ¯ Auto-switched to {visit_type} tab")
 
                         elif any(keyword in page_lower for keyword in ['hair loss', 'alopecia', 'finasteride', 'minoxidil', 'hair thinning']):
                             visit_type = "Hair Loss"
                             target_tab = 1
                             wx.CallAfter(self.notebook.SetSelection, target_tab)
                             wx.CallAfter(self.grab_status_text.SetLabel, f"Auto-switched to: {visit_type}")
-                            print(f"🎯 Auto-switched to {visit_type} tab")
+                            print(f"ðŸŽ¯ Auto-switched to {visit_type} tab")
 
                         elif any(keyword in page_lower for keyword in ['photoaging', 'tretinoin', 'retinoid', 'aging', 'wrinkles', 'skin care']):
                             visit_type = "Photoaging"
                             target_tab = 2
                             wx.CallAfter(self.notebook.SetSelection, target_tab)
                             wx.CallAfter(self.grab_status_text.SetLabel, f"Auto-switched to: {visit_type}")
-                            print(f"🎯 Auto-switched to {visit_type} tab")
+                            print(f"ðŸŽ¯ Auto-switched to {visit_type} tab")
 
                         elif any(keyword in page_lower for keyword in ['testosterone', 'td', 'enclomiphene', 'hormone']):
                             visit_type = "TD/ED Labs"
                             target_tab = 0
                             wx.CallAfter(self.notebook.SetSelection, target_tab)
                             wx.CallAfter(self.grab_status_text.SetLabel, f"Auto-switched to: {visit_type}")
-                            print(f"🎯 Auto-switched to {visit_type} tab")
+                            print(f"ðŸŽ¯ Auto-switched to {visit_type} tab")
 
                 # Wait 3 seconds before checking again
                 time.sleep(3)
 
             except Exception as e:
-                print(f"❌ URL monitoring error: {e}")
+                print(f"âŒ URL monitoring error: {e}")
                 if grabber and grabber is getattr(self, "_browser_grabber_cache", None):
                     self._browser_grabber_cache = None
                 time.sleep(5)
-        
-        print("🌐 URL monitoring ended")
+
+        print("ðŸŒ URL monitoring ended")
 
     def background_emr_grab(self):
         """Background EMR grab that doesn't hide the GUI window"""
@@ -11322,16 +17798,16 @@ class MyFrame(wx.Frame):
                     wx.CallAfter(self.grab_status_text.SetLabel, f"Detected: {visit} (no auto-grab yet)")
                 else:
                     wx.CallAfter(self.grab_status_text.SetLabel, "Monitoring - visit type unclear")
-                print(f"🔄 Background grab completed for: {visit if visit else 'Unknown'}")
+                print(f"ðŸ”„ Background grab completed for: {visit if visit else 'Unknown'}")
 
                 self.refresh_patient_location_async()
-                
+
             except Exception as e:
-                print(f"❌ Background grab error: {e}")
+                print(f"âŒ Background grab error: {e}")
                 wx.CallAfter(self.grab_status_text.SetLabel, f"Background grab failed")
                 if 'grabber' in locals() and grabber is getattr(self, "_browser_grabber_cache", None):
                     self._browser_grabber_cache = None
-        
+
         threading.Thread(target=do_background_grab, daemon=True).start()
 
     def update_sexual_health_fields(self, data):
@@ -11379,9 +17855,9 @@ class MyFrame(wx.Frame):
             if 'ros_negatives' in data:
                 self.sexual_health_ros_neg_text.SetValue(data.get('ros_negatives', ''))
 
-            print(f"✅ Sexual Health fields updated via background grab")
+            print(f"âœ… Sexual Health fields updated via background grab")
         except Exception as e:
-            print(f"❌ Error updating Sexual Health fields: {e}")
+            print(f"âŒ Error updating Sexual Health fields: {e}")
 
         try:
             self._auto_populate_sexual_health_change_fields(
@@ -11391,7 +17867,7 @@ class MyFrame(wx.Frame):
                 data.get('current_med_detail', '')
             )
         except Exception as e:
-            print(f"❌ Auto change comparison error: {e}")
+            print(f"âŒ Auto change comparison error: {e}")
 
     def insert_sexual_health_note(self):
         """Insert a sexual health follow-up note based on captured variables."""
@@ -11413,7 +17889,7 @@ class MyFrame(wx.Frame):
             sexual_health_diagnoses.append("PE-like ejaculatory dysfunction")
         if self.sexual_health_dx_hair_loss.GetValue():
             sexual_health_diagnoses.append("Hair Loss")
-        
+
         # Use selected diagnoses or empty if none selected
         if sexual_health_diagnoses:
             diagnosis_text = ", ".join(sexual_health_diagnoses)
@@ -11464,7 +17940,7 @@ class MyFrame(wx.Frame):
             med = (self.sexual_health_med_text.GetValue() or "").strip()
 
             # Prefer external template
-            tpl = templates.get("Sexual Health - Plan")
+            tpl = templates.get("SH Plan")
             if tpl:
                 brief = tpl.format(diagnoses=diagnosis_text, medication=med)
             else:
@@ -11478,7 +17954,7 @@ class MyFrame(wx.Frame):
             # Type at cursor (plan note intentionally skips leading newline)
             frame.Hide()
             time.sleep(0.2)
-            _type_template_text(brief, prepend_enter=False)
+            _type_template_text(brief, leading_text="")
         except Exception as e:
             wx.MessageBox(f"Error inserting Sexual Health brief template: {e}", "Insert Error", wx.ICON_ERROR)
         finally:
@@ -11493,7 +17969,7 @@ class MyFrame(wx.Frame):
         bp_var = (self.sexual_health_bp_text.GetValue() or "").strip()
         if not bp_var or bp_var == 'nr':
             bp_var = "not required"
-            
+
         if not med:
             wx.MessageBox('No medication captured. Use Grab or enter values manually.', 'Nothing to Insert', wx.ICON_WARNING)
             return
@@ -11567,32 +18043,32 @@ class MyFrame(wx.Frame):
         """Insert hair loss information template in Sexual Health tab."""
         hair_location = grabbed_vars.get('hair_loss_location', '').strip()
         hair_sxx = grabbed_vars.get('hair_loss_additional_sxx', '').strip()
-        
+
         # Also check the text fields directly in case they were manually edited
         if not hair_location:
             try:
                 hair_location = self.sexual_health_hair_location_text.GetValue().strip()
             except Exception:
                 pass
-        
+
         if not hair_sxx:
             try:
                 hair_sxx = self.sexual_health_hair_sxx_text.GetValue().strip()
             except Exception:
                 pass
-        
+
         if not hair_location and not hair_sxx:
             wx.MessageBox('No hair loss information captured. Use Grab or enter values manually.', 'Nothing to Insert', wx.ICON_WARNING)
             return
-        
+
         # Build the template text
         note = f"Reports hair loss described as '{hair_location}'. With regard to additional symptoms he affirms: '{hair_sxx}'."
-        
+
         # Hide and paste/type note
         frame.Hide()
         time.sleep(0.2)
         try:
-            _type_template_text(note, prepend_enter=False)
+            _type_template_text(note, leading_text="")
         except Exception as e:
             wx.MessageBox(f'Error inserting hair info: {e}', 'Insert Error', wx.ICON_ERROR)
         frame.Show()
@@ -11600,82 +18076,15 @@ class MyFrame(wx.Frame):
 
     def insert_sh_change_cadence(self):
         """Insert the 'change cadence' Sexual Health template."""
-        try:
-            bp_val = (self.sexual_health_bp_text.GetValue() or "").strip()
-            if not bp_val or bp_val == 'nr':
-                bp_val = "not required"
-            dx_text = self._get_sh_dx_text()
-            med = (self.sexual_health_med_text.GetValue() or "").strip()
-            tpl = templates.get("Sexual Health - Change Cadence")
-            if tpl:
-                note = tpl.format(bp=bp_val, diagnoses=dx_text, medication=(med or medication_value[0]))
-            else:
-                note = (
-                    f"S: The patient wishes to change the cadence of their prescription. No health changes or side effects are reported.\n"
-                    f"O: BP {bp_val}\n"
-                    f"A: {dx_text}\n"
-                    f"P: Continue present treatment with {medication_value[0] if not med else med} and amended cadence\n"
-                    f"Prescription written, follow-up per routine."
-                )
-            frame.Hide(); time.sleep(0.2)
-            _type_template_text(note)
-        except Exception as e:
-            wx.MessageBox(f"Error inserting change cadence template: {e}", "Insert Error", wx.ICON_ERROR)
-        finally:
-            frame.Show(); frame.Raise()
+        self.insert_specific_template("Change Cadence")
 
     def insert_sh_change_number(self):
         """Insert the 'change number' Sexual Health template."""
-        try:
-            bp_val = (self.sexual_health_bp_text.GetValue() or "").strip()
-            if not bp_val or bp_val.lower() == "nr":
-                bp_val = "not required"
-            dx_text = self._get_sh_dx_text()
-            med = (self.sexual_health_med_text.GetValue() or "").strip()
-            tpl = templates.get("Sexual Health - Change Number")
-            if tpl:
-                note = tpl.format(bp=bp_val, diagnoses=dx_text, medication=(med or medication_value[0]))
-            else:
-                note = (
-                    f"S: The patient wishes to change the dose number of their prescription. No health changes or side effects are reported.\n"
-                    f"O: BP {bp_val}\n"
-                    f"A: {dx_text}\n"
-                    f"P: Continue present treatment with {medication_value[0] if not med else med}. and amended amount\n"
-                    f"Prescription written, follow-up per routine."
-                )
-            frame.Hide(); time.sleep(0.2)
-            _type_template_text(note)
-        except Exception as e:
-            wx.MessageBox(f"Error inserting change number template: {e}", "Insert Error", wx.ICON_ERROR)
-        finally:
-            frame.Show(); frame.Raise()
+        self.insert_specific_template("Change Number")
 
     def insert_sh_change_medication(self):
         """Insert the 'change medication' Sexual Health template."""
-        try:
-            bp_val = (self.sexual_health_bp_text.GetValue() or "").strip()
-            if not bp_val or bp_val == 'nr':
-                bp_val = "not required"
-
-            dx_text = self._get_sh_dx_text()
-            med = (self.sexual_health_med_text.GetValue() or "").strip()
-            tpl = templates.get("Sexual Health - Change Medication")
-            if tpl:
-                note = tpl.format(bp=bp_val, diagnoses=dx_text, medication=(med or medication_value[0]))
-            else:
-                note = (
-                    f"S: The patient requests to change the medication they are taking to try to get a stronger effect. No health changes or side effects are reported.\n"
-                    f"O: BP {bp_val}\n"
-                    f"A: {dx_text}\n"
-                    f"P: Change treatment to {medication_value[0] if not med else med} as-needed.\n"
-                    f"Prescription written, follow-up per routine."
-                )
-            frame.Hide(); time.sleep(0.2)
-            _type_template_text(note)
-        except Exception as e:
-            wx.MessageBox(f"Error inserting change medication template: {e}", "Insert Error", wx.ICON_ERROR)
-        finally:
-            frame.Show(); frame.Raise()
+        self.insert_specific_template("Change Medication")
 
     def insert_photoaging_note(self):
         """Insert a photoaging note based on captured variables using external template if available."""
@@ -11815,13 +18224,19 @@ class MyFrame(wx.Frame):
             self.sexual_health_plan_choice.SetStringSelection("Continue present treatment")
             return False
         except Exception as e:
-            print(f"❌ Auto-populate change fields error: {e}")
+            print(f"âŒ Auto-populate change fields error: {e}")
             return False
 
-    def insert_specific_template(self, template_name):
+    def insert_specific_template(self, template_name, insert_source="default"):
         """Insert a specific template by name"""
+        try:
+            effective_visit = _resolve_effective_template_visit_type()
+            if effective_visit:
+                self._current_template_tab = effective_visit
+        except Exception:
+            pass
         selected_template[0] = template_name
-        insert_template_at_cursor()
+        insert_template_at_cursor(insert_source=insert_source)
 
     def create_template_dropdown_row_inline(self, parent, tab_sizer, tab_name: str) -> wx.Choice:
         """Create a template dropdown row for inside tabs (no separator, compact layout).
@@ -11840,38 +18255,38 @@ class MyFrame(wx.Frame):
         """
         # Load dropdown choices from config
         template_list = load_tab_template_list(tab_name)
-        
+
         # Create horizontal sizer for the dropdown row
         dropdown_row = wx.BoxSizer(wx.HORIZONTAL)
-        
+
         # Label
         label = wx.StaticText(parent, label="Template:")
         dropdown_row.Add(label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        
+
         # Dropdown
         dropdown = wx.Choice(parent, choices=template_list)
         if template_list:
             dropdown.SetSelection(0)
         dropdown_row.Add(dropdown, 1, wx.ALL | wx.EXPAND, 5)
-        
+
         # "..." button to edit dropdown config (JSON)
         config_btn = wx.Button(parent, label="...", size=(30, -1))
         config_btn.SetToolTip("Edit dropdown list (opens JSON config in Notepad)")
-        
+
         def on_edit_config(event):
             config_path = get_template_config_path(tab_name)
             if os.path.exists(config_path):
                 open_in_notepad(config_path)
             else:
                 wx.MessageBox(f"Config file not found:\n{config_path}", "File Not Found", wx.OK | wx.ICON_WARNING)
-        
+
         config_btn.Bind(wx.EVT_BUTTON, on_edit_config)
         dropdown_row.Add(config_btn, 0, wx.ALL, 5)
-        
+
         # Refresh button to reload dropdown after editing
-        refresh_btn = wx.Button(parent, label="↻", size=(30, -1))
+        refresh_btn = wx.Button(parent, label="â†»", size=(30, -1))
         refresh_btn.SetToolTip("Refresh dropdown list after editing config")
-        
+
         def on_refresh(event):
             new_list = load_tab_template_list(tab_name)
             dropdown.Clear()
@@ -11879,31 +18294,31 @@ class MyFrame(wx.Frame):
             if new_list:
                 dropdown.SetSelection(0)
             print(f"Refreshed {tab_name} template dropdown: {len(new_list)} templates")
-        
+
         refresh_btn.Bind(wx.EVT_BUTTON, on_refresh)
         dropdown_row.Add(refresh_btn, 0, wx.ALL, 5)
-        
+
         tab_sizer.Add(dropdown_row, 0, wx.EXPAND | wx.ALL, 2)
-        
+
         # Second row: Insert Template button (wider, centered)
         insert_row = wx.BoxSizer(wx.HORIZONTAL)
-        
+
         insert_btn = wx.Button(parent, label="Insert Template", size=(200, -1))
         insert_btn.SetBackgroundColour(wx.Colour(200, 230, 200))  # Light green tint
         insert_btn.SetToolTip("Insert selected template at cursor (Ctrl+V paste)")
-        
+
         def on_insert(event):
             selection = dropdown.GetStringSelection()
             if selection:
                 self.insert_specific_template(selection)
             else:
                 print("No template selected")
-        
+
         insert_btn.Bind(wx.EVT_BUTTON, on_insert)
         insert_row.Add(insert_btn, 0, wx.ALL | wx.CENTER, 5)
-        
+
         tab_sizer.Add(insert_row, 0, wx.ALIGN_CENTER | wx.ALL, 2)
-        
+
         return dropdown
 
     def create_template_dropdown_row(self, parent, tab_sizer, tab_name: str) -> wx.Choice:
@@ -11920,70 +18335,70 @@ class MyFrame(wx.Frame):
         # Create separator line above dropdown
         separator = wx.StaticLine(parent, style=wx.LI_HORIZONTAL)
         tab_sizer.Add(separator, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 8)
-        
+
         # Load dropdown choices from config
         template_list = load_tab_template_list(tab_name)
-        
+
         # Create horizontal sizer for the dropdown row
         dropdown_row = wx.BoxSizer(wx.HORIZONTAL)
-        
+
         # Label
         label = wx.StaticText(parent, label="Template:")
         dropdown_row.Add(label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        
+
         # Dropdown
         dropdown = wx.Choice(parent, choices=template_list)
         if template_list:
             dropdown.SetSelection(0)
         dropdown_row.Add(dropdown, 1, wx.ALL | wx.EXPAND, 5)
-        
+
         # Insert button
         insert_btn = wx.Button(parent, label="Insert", size=(60, -1))
         insert_btn.SetBackgroundColour(wx.Colour(200, 230, 200))  # Light green tint
         insert_btn.SetToolTip("Insert selected template at cursor (Ctrl+V paste)")
-        
+
         def on_insert(event):
             selection = dropdown.GetStringSelection()
             if selection:
                 self.insert_specific_template(selection)
             else:
                 print("No template selected")
-        
+
         insert_btn.Bind(wx.EVT_BUTTON, on_insert)
         dropdown_row.Add(insert_btn, 0, wx.ALL, 5)
-        
+
         # "..." button to edit dropdown config (JSON)
         config_btn = wx.Button(parent, label="...", size=(30, -1))
         config_btn.SetToolTip("Edit dropdown list (opens JSON config in Notepad)")
-        
+
         def on_edit_config(event):
             config_path = get_template_config_path(tab_name)
             if os.path.exists(config_path):
                 open_in_notepad(config_path)
             else:
                 wx.MessageBox(f"Config file not found:\n{config_path}", "File Not Found", wx.OK | wx.ICON_WARNING)
-        
+
         config_btn.Bind(wx.EVT_BUTTON, on_edit_config)
         dropdown_row.Add(config_btn, 0, wx.ALL, 5)
-        
+
         # "Edit Templates" button to edit template file
         edit_templates_btn = wx.Button(parent, label="Edit Templates", size=(100, -1))
         edit_templates_btn.SetToolTip("Edit template text file (opens in Notepad)")
-        
+
         def on_edit_templates(event):
             template_path = get_template_file_path(tab_name)
             if os.path.exists(template_path):
                 open_in_notepad(template_path)
             else:
                 wx.MessageBox(f"Template file not found:\n{template_path}", "File Not Found", wx.OK | wx.ICON_WARNING)
-        
+
         edit_templates_btn.Bind(wx.EVT_BUTTON, on_edit_templates)
         dropdown_row.Add(edit_templates_btn, 0, wx.ALL, 5)
-        
+
         # Refresh button to reload dropdown after editing
-        refresh_btn = wx.Button(parent, label="↻", size=(30, -1))
+        refresh_btn = wx.Button(parent, label="â†»", size=(30, -1))
         refresh_btn.SetToolTip("Refresh dropdown list after editing config")
-        
+
         def on_refresh(event):
             new_list = load_tab_template_list(tab_name)
             dropdown.Clear()
@@ -11991,43 +18406,42 @@ class MyFrame(wx.Frame):
             if new_list:
                 dropdown.SetSelection(0)
             print(f"Refreshed {tab_name} template dropdown: {len(new_list)} templates")
-        
+
         refresh_btn.Bind(wx.EVT_BUTTON, on_refresh)
         dropdown_row.Add(refresh_btn, 0, wx.ALL, 5)
-        
+
         tab_sizer.Add(dropdown_row, 0, wx.EXPAND | wx.ALL, 2)
-        
+
         return dropdown
 
     # ================================================================
     # Template Tab Tracking (for Edit Templates button in header)
     # ================================================================
-    
+
     # Map notebook tab indices to TEMPLATE_CONFIG keys
     TAB_INDEX_TO_TEMPLATE_KEY = {
-        0: "T Deficiency",
-        1: "Hair Loss",
-        2: "Photoaging",
-        3: "Sexual Health",
-        # 4: "Auto Clicker" - no templates
-        5: "Performance Anxiety",
-        6: "Birth Control",
+        0: "Hair Loss",
+        1: "Photoaging",
+        2: "Sexual Health",
+        # 3: "Auto Clicker" - no templates
+        4: "Performance Anxiety",
+        5: "Birth Control",
     }
-    
+
     def on_notebook_page_changed(self, event):
         """Track current tab for Edit Templates button."""
         tab_index = event.GetSelection()
         tab_name = self.TAB_INDEX_TO_TEMPLATE_KEY.get(tab_index)
-        
+
         if tab_name:
             self._current_template_tab = tab_name
             self.edit_templates_btn.Enable(True)
         else:
             # Auto Clicker tab or unknown - disable Edit Templates button
             self.edit_templates_btn.Enable(False)
-        
+
         event.Skip()  # Allow default processing
-    
+
     def on_edit_templates_global(self, event):
         """Open the template file for current tab in Notepad."""
         template_path = get_template_file_path(self._current_template_tab)
@@ -12035,15 +18449,6 @@ class MyFrame(wx.Frame):
             open_in_notepad(template_path)
         else:
             wx.MessageBox(f"Template file not found:\n{template_path}", "File Not Found", wx.OK | wx.ICON_WARNING)
-
-    def on_dx_checkbox(self, event):
-        selected = []
-        if self.dx_td_cb.GetValue():
-            selected.append("Testosterone Deficiency")
-        if self.dx_ed_cb.GetValue():
-            selected.append("ED")
-        diagnoses[0] = ", ".join(selected)
-        print(f"Diagnoses set to: {diagnoses[0]}")
 
     def on_sexual_health_dx_checkbox(self, event):
         if getattr(self, "_suppress_sexual_health_dx_event", False):
@@ -12056,50 +18461,18 @@ class MyFrame(wx.Frame):
             selected.append("PE")
         if self.sexual_health_dx_pe_like.GetValue():
             selected.append("PE-like ejaculatory dysfunction")
-        if self.sexual_health_dx_hair_loss.GetValue():
+        med_text = ""
+        try:
+            med_text = self.sexual_health_med_text.GetValue()
+        except Exception:
+            pass
+        if self.sexual_health_dx_hair_loss.GetValue() and allow_hair_loss_diagnosis(
+            "Sexual Health", med_text
+        ):
             selected.append("Hair Loss")
         diagnoses[0] = ", ".join(selected)
         print(f"Sexual Health diagnoses set to: {diagnoses[0] or 'none'}")
         event.Skip()
-
-    def open_pmh_dialog(self, event=None):
-        """Open a modal dialog with a checklist for PMH multi-select."""
-        try:
-            dlg = wx.Dialog(self, title="Select PMH Diagnoses", style=wx.DEFAULT_DIALOG_STYLE | wx.STAY_ON_TOP)
-            vbox = wx.BoxSizer(wx.VERTICAL)
-            info = wx.StaticText(dlg, label="Select all that apply; leave all unchecked for noncontributory:")
-            vbox.Add(info, 0, wx.ALL, 8)
-            clb = wx.CheckListBox(dlg, choices=PMH_OPTIONS)
-            # Pre-check any already selected
-            prechecked = [i for i, opt in enumerate(PMH_OPTIONS) if opt in pmh_selected]
-            for idx in prechecked:
-                clb.Check(idx, True)
-            vbox.Add(clb, 1, wx.ALL | wx.EXPAND, 8)
-            btn_sizer = dlg.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
-            vbox.Add(btn_sizer, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
-            dlg.SetSizerAndFit(vbox)
-            if dlg.ShowModal() == wx.ID_OK:
-                # Update selection
-                pmh_selected.clear()
-                for i in range(clb.GetCount()):
-                    if clb.IsChecked(i):
-                        pmh_selected.add(PMH_OPTIONS[i])
-                self.update_pmh_summary()
-            dlg.Destroy()
-        except Exception as e:
-            wx.MessageBox(f"PMH dialog error: {e}", "Error", wx.ICON_ERROR)
-
-    def update_pmh_summary(self):
-        """Update the PMH summary label from current selection."""
-        try:
-            phrase = build_pmh_text()
-            if self.pmh_summary:
-                if phrase == "is noncontributory":
-                    self.pmh_summary.SetLabel("Current: none (noncontributory)")
-                else:
-                    self.pmh_summary.SetLabel(f"Current: {phrase.replace('significant for ', '')}")
-        except Exception:
-            pass
 
     def toggle_invisit_clicker(self):
         """Toggle auto-clicker that runs quick_next_task repeatedly at interval until URL changes"""
@@ -12107,41 +18480,249 @@ class MyFrame(wx.Frame):
             self.stop_invisit_clicker()
         else:
             self.start_invisit_clicker()
-        self._push_overlay_invisit_autoclicker_state()
-    
+
     def stop_invisit_clicker(self):
         """Stop the in-visit auto-clicker"""
         self.invisit_running = False
         self.clicker_invisit_btn.SetLabel("Start Autoclick: In-Visit")
         self.clicker_status_text.SetLabel("Status: STOPPED")
         self.clicker_status_text.SetForegroundColour(wx.Colour(255, 0, 0))  # Red
-        print("[In-Visit Autoclick] Stopped by user")
         self._push_overlay_invisit_autoclicker_state()
-    
+        print("[In-Visit Autoclick] Stopped by user")
+
+    def _click_floating_menu_action_playwright(
+        self, grabber, action_labels: Optional[List[str]] = None
+    ) -> bool:
+        """Click the floating action button, then click the first matching visit action."""
+        page = None
+        try:
+            if grabber and getattr(grabber, "driver", None):
+                page = getattr(grabber.driver, "page", None)
+        except Exception:
+            page = None
+
+        if not page:
+            print("âš ï¸ Playwright action click: No Playwright page available")
+            return False
+
+        labels = [
+            (label or "").strip()
+            for label in (action_labels or ["Get Next Task", "Get New Visit"])
+            if (label or "").strip()
+        ]
+        if not labels:
+            print("âš ï¸ Playwright action click: No action labels configured")
+            return False
+
+        fab_locators = [
+            ('[data-testid="floatingActionButton"]', "data-testid"),
+            ('button[aria-label="Floating Action Button"]', "aria-label"),
+            ("button.rounded-full.bg-black.drop-shadow-md", "css fallback"),
+        ]
+
+        fab_clicked = False
+        last_fab_error: Optional[Exception] = None
+        for selector, strategy in fab_locators:
+            try:
+                locator = page.locator(selector).first
+                locator.wait_for(state="visible", timeout=3000)
+                locator.click(timeout=3000)
+                fab_clicked = True
+                print(
+                    f"âœ… Playwright: Clicked floating action button via {strategy}: {selector}"
+                )
+                break
+            except Exception as exc:
+                last_fab_error = exc
+
+        if not fab_clicked:
+            try:
+                locator = page.get_by_role(
+                    "button", name="Floating Action Button", exact=True
+                ).first
+                locator.wait_for(state="visible", timeout=3000)
+                locator.click(timeout=3000)
+                fab_clicked = True
+                print("âœ… Playwright: Clicked floating action button via role locator")
+            except Exception as exc:
+                last_fab_error = exc
+
+        if not fab_clicked:
+            print(
+                f"âš ï¸ Playwright: Could not click floating action button: {last_fab_error}"
+            )
+            return False
+
+        candidate_probe_script = """
+            (actionLabels) => {
+                const isVisible = (node) => {
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+
+                const selectorsForLabel = (label) => [
+                    `[data-testid="menu-item-${label}"]`,
+                    `div.css-1hj5o6h[data-testid="menu-item-${label}"]`,
+                    `div[role="button"][data-testid="menu-item-${label}"]`,
+                ];
+
+                for (const label of actionLabels) {
+                    for (const sel of selectorsForLabel(label)) {
+                        const node = document.querySelector(sel);
+                        if (isVisible(node)) {
+                            return { label, selector: sel };
+                        }
+                    }
+                }
+
+                const candidates = Array.from(document.querySelectorAll('div[role="button"][data-testid^="menu-item-"]'));
+                for (const label of actionLabels) {
+                    const node = candidates.find((entry) => isVisible(entry) && (entry.textContent || '').trim() === label);
+                    if (node) {
+                        return { label, selector: `text:${label}` };
+                    }
+                }
+
+                return null;
+            }
+        """
+
+        click_candidate_script = """
+            (payload) => {
+                const label = String((payload || {}).label || '').trim();
+                const selector = String((payload || {}).selector || '').trim();
+
+                const isVisible = (node) => {
+                    if (!node) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+
+                const selectorsForLabel = (value) => [
+                    `[data-testid="menu-item-${value}"]`,
+                    `div.css-1hj5o6h[data-testid="menu-item-${value}"]`,
+                    `div[role="button"][data-testid="menu-item-${value}"]`,
+                ];
+
+                const findNode = () => {
+                    if (selector && !selector.startsWith('text:')) {
+                        const direct = document.querySelector(selector);
+                        if (isVisible(direct)) return direct;
+                    }
+                    if (label) {
+                        for (const sel of selectorsForLabel(label)) {
+                            const node = document.querySelector(sel);
+                            if (isVisible(node)) return node;
+                        }
+                        const buttons = Array.from(document.querySelectorAll('div[role="button"][data-testid^="menu-item-"]'));
+                        const textMatch = buttons.find((entry) => isVisible(entry) && (entry.textContent || '').trim() === label);
+                        if (textMatch) return textMatch;
+                    }
+                    return null;
+                };
+
+                const triggerClick = (node) => {
+                    if (!node) return false;
+                    try {
+                        node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                    } catch (e) {}
+                    const eventInit = { bubbles: true, cancelable: true, composed: true, view: window };
+                    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                        try {
+                            node.dispatchEvent(new MouseEvent(type, eventInit));
+                        } catch (e) {}
+                    }
+                    try {
+                        node.click();
+                    } catch (e) {}
+                    return true;
+                };
+
+                const node = findNode();
+                if (!node) {
+                    return { success: false, error: 'Menu item not found at click time' };
+                }
+                triggerClick(node);
+                return { success: true, selector: selector || `text:${label}`, label };
+            }
+        """
+
+        candidate = None
+        last_menu_error: Optional[Exception] = None
+        wait_deadline = time.monotonic() + 4.0
+        while time.monotonic() < wait_deadline:
+            try:
+                candidate = page.evaluate(candidate_probe_script, labels)
+            except Exception as exc:
+                last_menu_error = exc
+                candidate = None
+            if candidate:
+                break
+            try:
+                page.wait_for_timeout(100)
+            except Exception:
+                time.sleep(0.1)
+
+        if candidate:
+            selector = str(candidate.get("selector") or "").strip()
+            label = str(candidate.get("label") or "").strip()
+
+            if selector and not selector.startswith("text:"):
+                try:
+                    locator = page.locator(selector).first
+                    locator.wait_for(state="visible", timeout=3000)
+                    locator.scroll_into_view_if_needed(timeout=3000)
+                    locator.click(timeout=3000, force=True)
+                    print(f"âœ… Playwright: Clicked '{label}' via {selector}")
+                    return True
+                except Exception as exc:
+                    last_menu_error = exc
+
+            try:
+                result = page.evaluate(click_candidate_script, candidate)
+                if isinstance(result, dict) and result.get("success"):
+                    print(
+                        f"âœ… Playwright: Clicked '{label}' via JS dispatch ({result.get('selector')})"
+                    )
+                    return True
+                if isinstance(result, dict) and result.get("error"):
+                    last_menu_error = RuntimeError(str(result.get("error")))
+            except Exception as exc:
+                last_menu_error = exc
+
+        print(
+            f"âš ï¸ Playwright: Could not click any visit action {labels}: {last_menu_error}"
+        )
+        return False
+
     def start_invisit_clicker(self):
         """Start the in-visit auto-clicker (runs quick_next_task repeatedly)"""
         if self.invisit_running:
             return
-        
+
         self.invisit_running = True
         self.clicker_invisit_btn.SetLabel("Stop Autoclick: In-Visit")
         self.clicker_status_text.SetLabel("Status: RUNNING (In-Visit)")
         self.clicker_status_text.SetForegroundColour(wx.Colour(0, 200, 0))  # Green
-        
+        self._push_overlay_invisit_autoclicker_state()
+
         # Get interval from settings
         try:
             interval = float(self.clicker_interval_text.GetValue())
         except ValueError:
             interval = 3.0
-        
+
         # Start monitoring thread
         def monitor_and_click():
             grabber = BrowserEMRGrabber()
             if not grabber.connect_to_chrome():
-                wx.CallAfter(lambda: print("❌ Could not connect to browser for in-visit autoclick"))
+                wx.CallAfter(lambda: print("âŒ Could not connect to browser for in-visit autoclick"))
                 wx.CallAfter(self.stop_invisit_clicker)
                 return
-            
+
             def normalize_url(u: str) -> str:
                 try:
                     if not u:
@@ -12178,65 +18759,18 @@ class MyFrame(wx.Frame):
                 ))
                 wx.CallAfter(self.beep_sound)
                 self.invisit_running = False
+                self._push_overlay_invisit_autoclicker_state()
                 return
             print(f"[In-Visit Autoclick] Starting on URL: {initial_url}")
             unresolved_url_checks = 0
-            
+
             # Helper to perform the click sequence via Playwright simulated clicks
             def do_click_sequence():
-                page = grabber.driver.page if grabber.driver else None
-                if not page:
-                    print("⚠️ In-Visit: No Playwright page available")
-                    return False
+                return self._click_floating_menu_action_playwright(
+                    grabber,
+                    action_labels=["Get Next Task", "Get New Visit"],
+                )
 
-                # Step 1: Click floating action button
-                fab_selector = '[data-testid="floatingActionButton"]'
-                fab_retries = 2
-                fab_clicked = False
-                for attempt in range(fab_retries):
-                    try:
-                        locator = page.locator(fab_selector)
-                        if locator.count() > 0:
-                            locator.first.click(timeout=3000)
-                            fab_clicked = True
-                            break
-                    except Exception as e:
-                        if attempt < fab_retries - 1:
-                            time.sleep(0.05)
-                        else:
-                            print(f"⚠️ In-Visit: FAB click failed after {fab_retries} retries: {e}")
-                if not fab_clicked:
-                    print("⚠️ In-Visit: Could not click floating action button")
-                    return False
-
-                # Wait 120ms after FAB click for menu to appear
-                time.sleep(0.120)
-
-                # Step 2: Click "Get Next Task" menu item
-                menu_selector = '[data-testid="menu-item-Get Next Task"]'
-                menu_retries = 2
-                menu_clicked = False
-                for attempt in range(menu_retries):
-                    try:
-                        locator = page.locator(menu_selector)
-                        if locator.count() > 0:
-                            locator.first.click(timeout=3000)
-                            menu_clicked = True
-                            break
-                    except Exception as e:
-                        if attempt < menu_retries - 1:
-                            time.sleep(0.05)
-                        else:
-                            print(f"⚠️ In-Visit: Menu item click failed after {menu_retries} retries: {e}")
-                if not menu_clicked:
-                    print("⚠️ In-Visit: Could not click 'Get Next Task' menu item")
-                    return False
-
-                # Wait 20ms after menu click
-                time.sleep(0.020)
-                print("✅ In-Visit: Clicked 'Get Next Task' (Playwright)")
-                return True
-            
             while self.invisit_running:
                 try:
                     current_url = resolve_url()
@@ -12252,10 +18786,11 @@ class MyFrame(wx.Frame):
                             ))
                             wx.CallAfter(self.beep_sound)
                             self.invisit_running = False
+                            self._push_overlay_invisit_autoclicker_state()
                             break
                     else:
                         unresolved_url_checks = 0
-                    
+
                     # Stop if URL changed
                     if initial_norm and current_norm != initial_norm:
                         print(f"[In-Visit Autoclick] URL changed, stopping...")
@@ -12268,94 +18803,95 @@ class MyFrame(wx.Frame):
                         wx.CallAfter(lambda url=display_url: self.update_url_display(url))
                         wx.CallAfter(self.beep_sound)
                         self.invisit_running = False
+                        self._push_overlay_invisit_autoclicker_state()
                         break
-                    
+
                     # Perform click sequence synchronously (no additional threads)
                     do_click_sequence()
-                    
+
                     # Wait for interval before next click
                     time.sleep(interval)
-                    
+
                 except Exception as e:
-                    print(f"⚠️ In-Visit monitor error: {e}")
+                    print(f"âš ï¸ In-Visit monitor error: {e}")
                     time.sleep(interval)
-            
+
             print("[In-Visit Autoclick] Stopped")
-        
+
         self.invisit_thread = threading.Thread(target=monitor_and_click, daemon=True)
         self.invisit_thread.start()
-    
+
     def toggle_page_refresh(self):
-        """Toggle page refresh that refreshes the page every 3 minutes ±30%"""
+        """Toggle page refresh that refreshes the page every 3 minutes Â±30%"""
         if self.page_refresh_running:
             self.stop_page_refresh()
         else:
             self.start_page_refresh()
-    
+
     def stop_page_refresh(self):
         """Stop the page refresh"""
         self.page_refresh_running = False
         self.page_refresh_btn.SetLabel("Start Auto-Refresh Page")
         print("[Page Refresh] Stopped by user")
-    
+
     def start_page_refresh(self):
-        """Start page refresh that refreshes page every 3 minutes ±30%"""
+        """Start page refresh that refreshes page every 3 minutes Â±30%"""
         if self.page_refresh_running:
             return
-        
+
         self.page_refresh_running = True
         self.page_refresh_btn.SetLabel("Stop Auto-Refresh Page")
-        
+
         def refresh_loop():
             import random
-            
+
             grabber = BrowserEMRGrabber()
             if not grabber.connect_to_chrome():
-                wx.CallAfter(lambda: print("❌ Could not connect to browser for page refresh"))
+                wx.CallAfter(lambda: print("âŒ Could not connect to browser for page refresh"))
                 wx.CallAfter(self.stop_page_refresh)
                 return
-            
-            print("[Page Refresh] Started - refreshing every 3 minutes ±30%")
-            
+
+            print("[Page Refresh] Started - refreshing every 3 minutes Â±30%")
+
             while self.page_refresh_running:
                 try:
-                    # Calculate random interval: 3 minutes ± 30% = 126-234 seconds
+                    # Calculate random interval: 3 minutes Â± 30% = 126-234 seconds
                     base_interval = 180  # 3 minutes in seconds
                     variance = base_interval * 0.3  # 30% variance
                     interval = random.uniform(base_interval - variance, base_interval + variance)
-                    
+
                     print(f"[Page Refresh] Next refresh in {interval:.1f} seconds ({interval/60:.1f} minutes)")
-                    
+
                     # Wait for the interval
                     time.sleep(interval)
-                    
+
                     if not self.page_refresh_running:
                         break
-                    
+
                     # Refresh the page via CDP
                     refresh_script = """
                         window.location.reload();
                         return { success: true };
                     """
-                    
+
                     result = grabber.driver.execute_script(refresh_script)
                     if result and result.get('success'):
-                        print(f"✅ [Page Refresh] Page refreshed at {time.strftime('%H:%M:%S')}")
+                        print(f"âœ… [Page Refresh] Page refreshed at {time.strftime('%H:%M:%S')}")
                     else:
-                        print("⚠️ [Page Refresh] Refresh command sent but no confirmation")
-                    
+                        print("âš ï¸ [Page Refresh] Refresh command sent but no confirmation")
+
                 except Exception as e:
-                    print(f"⚠️ [Page Refresh] Error: {e}")
+                    print(f"âš ï¸ [Page Refresh] Error: {e}")
                     if self.page_refresh_running:
                         time.sleep(60)  # Wait 1 minute before retrying on error
-            
+
             print("[Page Refresh] Stopped")
-        
+
         self.page_refresh_thread = threading.Thread(target=refresh_loop, daemon=True)
         self.page_refresh_thread.start()
-    
+
     def quick_next_task(self):
-        """Click floating action button, then click 'Get Next Task' menu item using CDP (with Playwright fallback)"""
+        """Click the floating action button, then click the current visit action."""
         def _click_via_cdp(grabber):
             """Try to click using CDP JavaScript injection"""
             try:
@@ -12376,33 +18912,61 @@ class MyFrame(wx.Frame):
                     }
                     return { success: false };
                 """
-                
+
                 result = grabber.driver.execute_script(floating_script)
-                
+
                 if not result or not isinstance(result, dict) or not result.get('success'):
-                    print("⚠️ CDP: Could not find floating button")
+                    print("âš ï¸ CDP: Could not find floating button")
                     return False
-                
-                print(f"✅ CDP: Clicked floating button with: {result.get('selector')}")
+
+                print(f"âœ… CDP: Clicked floating button with: {result.get('selector')}")
                 time.sleep(0.8)  # Wait longer for menu animation to complete
-                
-                # Second click: Get Next Task menu item via CDP
+
+                # Second click: visit action menu item via CDP
                 menu_script = """
                     try {
+                        const actionLabels = ['Get Next Task', 'Get New Visit'];
                         const selectors = [
                             '[data-testid="menu-item-Get Next Task"]',
                             'div.css-1hj5o6h[data-testid="menu-item-Get Next Task"]',
-                            'div[role="button"][data-testid="menu-item-Get Next Task"]'
+                            'div[role="button"][data-testid="menu-item-Get Next Task"]',
+                            '[data-testid="menu-item-Get New Visit"]',
+                            'div.css-1hj5o6h[data-testid="menu-item-Get New Visit"]',
+                            'div[role="button"][data-testid="menu-item-Get New Visit"]'
                         ];
+
+                        const isVisible = (node) => {
+                            if (!node) return false;
+                            const rect = node.getBoundingClientRect();
+                            const style = window.getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                        };
+
+                        const triggerClick = (node) => {
+                            if (!node) return false;
+                            try {
+                                node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                            } catch (e) {}
+                            const eventInit = { bubbles: true, cancelable: true, composed: true, view: window };
+                            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                                try {
+                                    node.dispatchEvent(new MouseEvent(type, eventInit));
+                                } catch (e) {}
+                            }
+                            try {
+                                node.click();
+                            } catch (e) {}
+                            return true;
+                        };
                         
                         // First check if any selector finds the element
                         for (const sel of selectors) {
                             const elem = document.querySelector(sel);
                             if (elem) {
-                                const isVisible = elem.offsetWidth > 0 && elem.offsetHeight > 0;
-                                console.log('Found element with selector:', sel, 'Visible:', isVisible);
-                                if (isVisible) {
-                                    elem.click();
+                                const visible = isVisible(elem);
+                                console.log('Found element with selector:', sel, 'Visible:', visible);
+                                if (visible) {
+                                    triggerClick(elem);
                                     return { success: true, selector: sel };
                                 }
                             }
@@ -12413,9 +18977,9 @@ class MyFrame(wx.Frame):
                         console.log('Searching through', allDivs.length, 'role=button divs');
                         for (const div of allDivs) {
                             const text = (div.textContent || '').trim();
-                            if (text === 'Get Next Task') {
+                            if (actionLabels.includes(text) && isVisible(div)) {
                                 console.log('Found via text search');
-                                div.click();
+                                triggerClick(div);
                                 return { success: true, selector: 'text search: ' + text };
                             }
                         }
@@ -12425,78 +18989,38 @@ class MyFrame(wx.Frame):
                         return { success: false, error: e.message };
                     }
                 """
-                
+
                 result = grabber.driver.execute_script(menu_script)
-                
+
                 if not result or not isinstance(result, dict):
-                    print(f"⚠️ CDP: Menu script returned invalid result: {result}")
+                    print(f"âš ï¸ CDP: Menu script returned invalid result: {result}")
                     return False
-                
+
                 if not result.get('success'):
                     error = result.get('error', 'unknown')
-                    print(f"⚠️ CDP: Could not find 'Get Next Task' menu item: {error}")
+                    print(f"âš ï¸ CDP: Could not find visit action menu item: {error}")
                     return False
-                
-                print(f"✅ CDP: Clicked 'Get Next Task' with: {result.get('selector')}")
+
+                print(f"âœ… CDP: Clicked visit action with: {result.get('selector')}")
                 return True
-                
+
             except Exception as e:
-                print(f"⚠️ CDP click failed: {e}")
+                print(f"âš ï¸ CDP click failed: {e}")
                 return False
-        
+
         def _click_via_playwright(grabber):
             """Fallback to Playwright if CDP fails"""
             try:
-                print("🔄 Falling back to Playwright method...")
-                
-                # First click: Floating action button
-                floating_btn_selectors = [
-                    '[data-testid="floatingActionButton"]',
-                    'button[aria-label="Floating Action Button"]',
-                    'button.rounded-full.bg-black.drop-shadow-md'
-                ]
-                
-                clicked_floating = False
-                for selector in floating_btn_selectors:
-                    try:
-                        locator = grabber.page.locator(selector)
-                        if locator.count() > 0:
-                            locator.first.click()
-                            clicked_floating = True
-                            print(f"✅ Playwright: Clicked floating button with: {selector}")
-                            time.sleep(0.3)
-                            break
-                    except Exception:
-                        continue
-                
-                if not clicked_floating:
-                    return False
-                
-                # Second click: Get Next Task menu item
-                menu_item_selectors = [
-                    '[data-testid="menu-item-Get Next Task"]',
-                    'div[role="button"]:has-text("Get Next Task")',
-                    'div.css-1hj5o6h[data-testid="menu-item-Get Next Task"]'
-                ]
-                
-                clicked_menu = False
-                for selector in menu_item_selectors:
-                    try:
-                        locator = grabber.page.locator(selector)
-                        if locator.count() > 0:
-                            locator.first.click()
-                            clicked_menu = True
-                            print(f"✅ Playwright: Clicked 'Get Next Task' with: {selector}")
-                            break
-                    except Exception:
-                        continue
-                
-                return clicked_menu
-                
+                print("ðŸ”„ Falling back to Playwright method...")
+                return self._click_floating_menu_action_playwright(
+                    grabber,
+                    action_labels=["Get Next Task", "Get New Visit"],
+                )
+
             except Exception as e:
-                print(f"⚠️ Playwright click failed: {e}")
+                print(f"âš ï¸ Playwright click failed: {e}")
                 return False
-        
+
         def _click_sequence():
             try:
                 grabber = BrowserEMRGrabber()
@@ -12507,65 +19031,87 @@ class MyFrame(wx.Frame):
                         wx.ICON_WARNING
                     ))
                     return
-                
+
                 # Try CDP first (faster and more reliable)
                 success = _click_via_cdp(grabber)
-                
+
                 # Fall back to Playwright if CDP failed
                 if not success:
                     success = _click_via_playwright(grabber)
-                
+
                 if success:
-                    wx.CallAfter(lambda: print("✅ Quick Next Task completed successfully"))
+                    wx.CallAfter(lambda: print("âœ… Quick Next Task completed successfully"))
                 else:
-                    wx.CallAfter(lambda: wx.MessageBox(
-                        'Could not find floating button or "Get Next Task" menu item using either method.',
-                        'Element Not Found',
-                        wx.ICON_WARNING
-                    ))
-                
+                    wx.CallAfter(
+                        lambda: wx.MessageBox(
+                            "Could not find the floating button or a matching visit action menu item using either method.",
+                            "Element Not Found",
+                            wx.ICON_WARNING,
+                        )
+                    )
+
             except Exception as e:
                 wx.CallAfter(lambda: wx.MessageBox(
                     f'Error during Quick Next Task: {e}',
                     'Error',
                     wx.ICON_ERROR
                 ))
-        
+
         # Run in thread to avoid blocking GUI
         threading.Thread(target=_click_sequence, daemon=True).start()
 
     def toggle_auto_clicker(self):
         """Toggle the auto clicker on/off"""
-        auto_clicker_enabled[0] = not auto_clicker_enabled[0]
-        
+        requested_state = not auto_clicker_enabled[0]
+        print(
+            f"[AUTOCLICKER] Toggle requested -> {'START' if requested_state else 'STOP'} "
+            f"(overlay_active={getattr(self, '_js_overlay_active', False)})"
+        )
+        auto_clicker_enabled[0] = requested_state
+
         if auto_clicker_enabled[0]:
             # Update settings from UI
             try:
-                auto_clicker_x[0] = int(self.clicker_x_text.GetValue())
-                auto_clicker_y[0] = int(self.clicker_y_text.GetValue())
-                auto_clicker_interval[0] = float(self.clicker_interval_text.GetValue())
-            except ValueError:
-                wx.MessageBox("Invalid coordinates or interval values", "Error", wx.ICON_ERROR)
+                next_x, next_y, next_interval = (
+                    self._read_dashboard_autoclicker_settings()
+                )
+                auto_clicker_x[0] = next_x
+                auto_clicker_y[0] = next_y
+                auto_clicker_interval[0] = next_interval
+                print(
+                    "[AUTOCLICKER] Using settings "
+                    f"x={auto_clicker_x[0]}, y={auto_clicker_y[0]}, interval={auto_clicker_interval[0]}s, "
+                    f"method={getattr(self, 'clicker_method_mode', 'cdp')}"
+                )
+            except ValueError as exc:
+                if not getattr(self, "_js_overlay_active", False):
+                    wx.MessageBox(str(exc), "Error", wx.ICON_ERROR)
+                print(f"[AUTOCLICKER] Start aborted: {exc}")
                 auto_clicker_enabled[0] = False
+                self._push_overlay_status(f"Autoclicker config error: {exc}")
+                self._push_overlay_autoclicker_state()
                 return
-            
+
             # Start clicker
             self.clicker_start_btn.SetLabel("Stop Clicking")
             self.clicker_status_text.SetLabel("Status: RUNNING")
             self.clicker_status_text.SetForegroundColour(wx.Colour(0, 128, 0))  # Green
-            
+
             # Start the clicker thread
             if auto_clicker_thread[0] is None or not auto_clicker_thread[0].is_alive():
                 auto_clicker_thread[0] = threading.Thread(target=self.auto_clicker_loop, daemon=True)
                 auto_clicker_thread[0].start()
-            
+
             print(f"Auto clicker started: ({auto_clicker_x[0]}, {auto_clicker_y[0]}) every {auto_clicker_interval[0]}s")
+            self._push_overlay_status("Dashboard autoclicker running")
         else:
             # Stop clicker
             self.clicker_start_btn.SetLabel("Start Autoclick: Dashboard")
             self.clicker_status_text.SetLabel("Status: STOPPED")
             self.clicker_status_text.SetForegroundColour(wx.Colour(255, 0, 0))  # Red
             print("Auto clicker stopped")
+            self._push_overlay_status("Dashboard autoclicker stopped")
+
         self._push_overlay_autoclicker_state()
 
     def get_active_page_url(self):
@@ -12578,10 +19124,10 @@ class MyFrame(wx.Frame):
                 resp = requests.get(debug_url, timeout=1.2)
             resp.raise_for_status()
             tabs = resp.json()
-            
+
             if not isinstance(tabs, list):
                 return ""
-            
+
             # Debug: print first few tabs
             if len(tabs) > 0:
                 print(f"Found {len(tabs)} browser tabs")
@@ -12591,7 +19137,7 @@ class MyFrame(wx.Frame):
                         tab_type = tab.get("type", "")
                         title = tab.get("title", "")[:50]
                         print(f"  Tab {i}: type='{tab_type}', url='{url[:60]}...', title='{title}'")
-            
+
             # Build candidate list of real pages
             candidates = []
             for tab in tabs:
@@ -12617,20 +19163,20 @@ class MyFrame(wx.Frame):
             if candidates:
                 print(f"Selected active URL (first candidate): {candidates[0]}")
                 return candidates[0]
-            
+
             # Fallback: first tab's URL if it's http/https
             if tabs:
                 url = tabs[0].get("url", "") or ""
                 if url.startswith(("http://", "https://")):
                     print(f"Fallback URL: {url}")
                     return url
-                    
+
         except requests.exceptions.ConnectionError:
             print(f"Cannot connect to browser debugging API. Make sure Chrome or Thorium is running with --remote-debugging-port={CDP_DEBUG_PORT}")
             wx.CallAfter(self.show_chrome_error)
         except Exception as e:
             print(f"Chrome API error: {e}")
-        
+
         return ""
 
     def show_chrome_error(self):
@@ -12638,7 +19184,7 @@ class MyFrame(wx.Frame):
         if hasattr(self, '_chrome_error_shown'):
             return  # Don't spam error dialogs
         self._chrome_error_shown = True
-        
+
         msg = ("Cannot connect to Chrome Remote Debugging API.\n\n"
                "To enable URL monitoring:\n"
                "1. Close Chrome completely\n"
@@ -12655,7 +19201,7 @@ class MyFrame(wx.Frame):
             try:
                 winsound.MessageBeep()
             except:
-                print("🔔 URL Changed!")
+                print("ðŸ”” URL Changed!")
 
     def auto_clicker_loop(self):
         """Main auto clicker loop"""
@@ -12678,7 +19224,7 @@ class MyFrame(wx.Frame):
         if baseline_url:
             auto_clicker_last_url[0] = normalize_url(baseline_url)
             wx.CallAfter(self.update_url_display, baseline_url)
-            print(f"🔗 Initial baseline URL: {baseline_url}")
+            print(f"ðŸ”— Initial baseline URL: {baseline_url}")
 
         # Thread-local BrowserEMRGrabber for CDP/browser clicks
         grabber: Optional[BrowserEMRGrabber] = None
@@ -12750,7 +19296,7 @@ class MyFrame(wx.Frame):
 
                     # If URL changed as a result of this click (including the very first click), stop
                     if post_norm and pre_norm and post_norm != pre_norm:
-                        print(f"🔔 URL CHANGED on click #{click_count}!")
+                        print(f"ðŸ”” URL CHANGED on click #{click_count}!")
                         print(f"   From: {pre_url}")
                         print(f"   To:   {post_url}")
                         auto_clicker_enabled[0] = False
@@ -12765,7 +19311,7 @@ class MyFrame(wx.Frame):
 
                     # Otherwise, if we have a last_url and the new URL differs, also stop
                     if post_norm and auto_clicker_last_url[0] and post_norm != auto_clicker_last_url[0]:
-                        print(f"🔔 URL CHANGED on click #{click_count} (vs. stored baseline)!")
+                        print(f"ðŸ”” URL CHANGED on click #{click_count} (vs. stored baseline)!")
                         print(f"   From: {auto_clicker_last_url[0]}")
                         print(f"   To:   {post_url}")
                         auto_clicker_enabled[0] = False
@@ -12785,11 +19331,11 @@ class MyFrame(wx.Frame):
                     # Periodic status updates
                     if post_url:
                         if click_count % 10 == 0:
-                            print(f"✓ Clicked {click_count} times, URL unchanged")
+                            print(f"âœ“ Clicked {click_count} times, URL unchanged")
                             wx.CallAfter(self.update_url_display, post_url)
                     else:
                         if click_count % 5 == 0:
-                            print(f"⚠ No URL detected after {click_count} clicks")
+                            print(f"âš  No URL detected after {click_count} clicks")
                             wx.CallAfter(self.update_url_display, "No active page detected - check Chrome debugging")
 
                     # Update last-click UI string
@@ -12802,7 +19348,7 @@ class MyFrame(wx.Frame):
                         time.sleep(remaining)
 
                 except Exception as e:
-                    print(f"❌ Auto clicker error: {e}")
+                    print(f"âŒ Auto clicker error: {e}")
                     time.sleep(1)
 
             print(f"Auto clicker loop ended after {click_count} clicks")
@@ -12820,8 +19366,8 @@ class MyFrame(wx.Frame):
             self.clicker_invisit_btn.SetLabel("Start Autoclick: In-Visit")
         self.clicker_status_text.SetLabel("Status: STOPPED (URL Changed)")
         self.clicker_status_text.SetForegroundColour(wx.Colour(255, 165, 0))  # Orange
+        self._push_overlay_status("Dashboard autoclicker stopped: URL changed")
         self._push_overlay_autoclicker_state()
-        self._push_overlay_invisit_autoclicker_state()
 
     def update_click_method(self, method: str):
         """Show which method performed the last click and colorize label."""
@@ -12985,13 +19531,13 @@ class MyFrame(wx.Frame):
         """Test connection to Chrome/Thorium debugging API"""
         print("Testing browser connection...")
         url = self.get_active_page_url()
-        
+
         if url:
-            wx.MessageBox(f"✅ Browser connection successful!\n\nActive URL:\n{url}", 
+            wx.MessageBox(f"âœ… Browser connection successful!\n\nActive URL:\n{url}", 
                          "Browser Test Result", wx.ICON_INFORMATION)
             self.update_url_display(url)
         else:
-            msg = (f"❌ Cannot connect to browser or no active pages found.\n\n"
+            msg = (f"âŒ Cannot connect to browser or no active pages found.\n\n"
                    f"Make sure:\n"
                    f"1. Chrome or Thorium is running\n"
                    f"2. Started with --remote-debugging-port={CDP_DEBUG_PORT}\n"
@@ -13001,24 +19547,60 @@ class MyFrame(wx.Frame):
     def setup_global_hotkeys(self):
         """Setup global hotkeys that work regardless of window focus"""
         try:
-            # Register F4 as a global hotkey
-            keyboard.add_hotkey('f4', self.trigger_appropriate_grab)
-            print("Global F4 hotkey registered successfully")
+            if ENABLE_KEYBOARD_MODULE_HOTKEYS:
+                # Register F4 as a global hotkey
+                keyboard.add_hotkey("f4", self.trigger_appropriate_grab)
+                print("Global F4 hotkey registered successfully")
 
-            # Register Ctrl+Alt+Enter for Quick Next Task (optional)
-            if ENABLE_QUICK_NEXT_TASK_HOTKEY:
-                keyboard.add_hotkey(QUICK_NEXT_TASK_HOTKEY, lambda: wx.CallAfter(self.quick_next_task))
-                print(f"Quick Next Task hotkey registered ({QUICK_NEXT_TASK_HOTKEY})")
+                # Register Ctrl+Alt+Enter for Quick Next Task (optional)
+                if ENABLE_QUICK_NEXT_TASK_HOTKEY:
+                    keyboard.add_hotkey(
+                        QUICK_NEXT_TASK_HOTKEY,
+                        lambda: wx.CallAfter(self.quick_next_task),
+                    )
+                    print(
+                        f"Quick Next Task hotkey registered ({QUICK_NEXT_TASK_HOTKEY})"
+                    )
+                else:
+                    print("Quick Next Task hotkey disabled")
+
+                # Register Ctrl+Alt+I for Notepad (JS overlay) / In-Visit Autoclick (fallback)
+                keyboard.add_hotkey(
+                    "ctrl+alt+i",
+                    self._trigger_notepad_toggle,
+                    suppress=True,
+                    trigger_on_release=True,
+                )
+                print("Notepad / In-Visit Autoclick hotkey registered (Ctrl+Alt+I)")
+
+                keyboard.add_hotkey(
+                    "ctrl+alt+l",
+                    self._trigger_selector_panel_toggle,
+                    suppress=True,
+                    trigger_on_release=True,
+                )
+                print("Variable selector overlay hotkey registered (Ctrl+Alt+L)")
+
+                # Register Ctrl+Shift+R for Page Refresh
+                keyboard.add_hotkey(
+                    "ctrl+shift+r", lambda: wx.CallAfter(self.toggle_page_refresh)
+                )
+                print("Page Refresh hotkey registered (Ctrl+Shift+R)")
+
+                # Register Ctrl+Shift+D for template context menu (JS overlay)
+                # trigger_on_release avoids suppress one-shot bug in keyboard module.
+                # suppress=True prevents Chrome "Bookmark All Tabs" from opening.
+                keyboard.add_hotkey(
+                    "ctrl+shift+d",
+                    self._trigger_ctx_menu_toggle,
+                    suppress=True,
+                    trigger_on_release=True,
+                )
+                print("Template context menu hotkey registered (Ctrl+Shift+D)")
             else:
-                print("Quick Next Task hotkey disabled")
-            
-            # Register Ctrl+Alt+I for In-Visit Autoclick
-            keyboard.add_hotkey('ctrl+alt+i', lambda: wx.CallAfter(self.toggle_invisit_clicker))
-            print("In-Visit Autoclick hotkey registered (Ctrl+Alt+I)")
-            
-            # Register Ctrl+Shift+R for Page Refresh
-            keyboard.add_hotkey('ctrl+shift+r', lambda: wx.CallAfter(self.toggle_page_refresh))
-            print("Page Refresh hotkey registered (Ctrl+Shift+R)")
+                print(
+                    "Keyboard-module global hotkeys disabled to avoid interfering with AutoHotkey"
+                )
 
             # Prefer OS-level registration for the GUI toggle
             self._gui_toggle_hotkey_method = None
@@ -13029,39 +19611,53 @@ class MyFrame(wx.Frame):
                         self._gui_toggle_hotkey_id = wx.Window.NewControlId()
                     except Exception:
                         self._gui_toggle_hotkey_id = 9301
-                if self.RegisterHotKey(self._gui_toggle_hotkey_id, wx.MOD_CONTROL | wx.MOD_ALT, ord('H')):
+                if self.RegisterHotKey(
+                    self._gui_toggle_hotkey_id,
+                    self.GUI_TOGGLE_WX_MODIFIERS,
+                    self.GUI_TOGGLE_WX_KEYCODE,
+                ):
                     try:
                         self.Unbind(wx.EVT_HOTKEY, id=self._gui_toggle_hotkey_id)
                     except Exception:
                         pass
                     self.Bind(wx.EVT_HOTKEY, lambda evt: self.toggle_gui_visibility(), id=self._gui_toggle_hotkey_id)
                     self._gui_toggle_hotkey_method = 'wx'
-                    print("GUI toggle OS-level hotkey registered (Ctrl+Alt+H)")
+                    print(
+                        f"GUI toggle OS-level hotkey registered ({self.GUI_TOGGLE_HOTKEY_NAME.upper()})"
+                    )
                 else:
                     raise RuntimeError("RegisterHotKey returned False")
             except Exception as exc:
-                try:
-                    self._gui_toggle_hotkey_handle = keyboard.add_hotkey(
-                        'ctrl+alt+h',
-                        lambda: wx.CallAfter(self.toggle_gui_visibility)
-                    )
-                    self._gui_toggle_hotkey_method = 'keyboard'
-                    print("GUI toggle hotkey registered via keyboard module (Ctrl+Alt+H)")
-                except Exception as fallback_exc:
+                if ENABLE_KEYBOARD_MODULE_HOTKEYS:
+                    try:
+                        self._gui_toggle_hotkey_handle = keyboard.add_hotkey(
+                            self.GUI_TOGGLE_HOTKEY_NAME,
+                            lambda: wx.CallAfter(self.toggle_gui_visibility),
+                        )
+                        self._gui_toggle_hotkey_method = "keyboard"
+                        print(
+                            f"GUI toggle hotkey registered via keyboard module ({self.GUI_TOGGLE_HOTKEY_NAME.upper()})"
+                        )
+                    except Exception as fallback_exc:
+                        self._gui_toggle_hotkey_handle = None
+                        self._gui_toggle_hotkey_method = None
+                        print(
+                            f"Failed to register GUI toggle hotkey: {exc} | Fallback error: {fallback_exc}"
+                        )
+                else:
                     self._gui_toggle_hotkey_handle = None
                     self._gui_toggle_hotkey_method = None
-                    print(f"Failed to register GUI toggle hotkey: {exc} | Fallback error: {fallback_exc}")
-            # Prepare dynamic registration for Tab 1 (T Deficiency), Tab 2 (Hair), and Tab 4 (Sexual Health)
+                    print(f"Failed to register GUI toggle hotkey via wx only: {exc}")
+            # Prepare dynamic registration for Tab 2 (Hair), Tab 4 (Sexual Health), and Tab 7 (Birth Control)
             # hotkeys (active only when the respective tab is selected)
             self._tab4_hotkeys_registered = False
             # Where to change key combos for each tab: update the lists below
-            self._tab1_hotkey_names = ['ctrl+alt+f', 'ctrl+alt+n', 'ctrl+alt+c']  # T Deficiency: F=Lab msg, N=Rx note, C=Referral
             self._tab2_hotkey_names = ['ctrl+alt+f', 'ctrl+alt+n', 'ctrl+alt+c']  # Hair Loss: F=Follow-up, N=Initial, C=Limited
             self._tab4_hotkey_names = ['ctrl+alt+f', 'ctrl+alt+n', 'ctrl+alt+c']  # Sexual Health: F=Follow-up, N=Plan, C=Change
             self._tab7_hotkey_names = ['ctrl+alt+f', 'ctrl+alt+n']               # Birth Control: F=Follow-up note, N=Initial note
             self._tab4_hotkeys_method = None  # 'wx' or 'keyboard'
             self._tab4_keyboard_handles = []  # fallback handles for keyboard lib
-            self._hotkeys_target = None       # 'td', 'hair', or 'sh'
+            self._hotkeys_target = None  # 'hair', 'sh', or 'bc'
             # Pre-create unique IDs for OS-level global hotkeys
             try:
                 self._hk_id_followup = wx.Window.NewControlId()
@@ -13217,27 +19813,6 @@ class MyFrame(wx.Frame):
         except Exception as exc:
             print(f"Failed to show GUI window: {exc}")
 
-    # Inline CDP hotkeys stay close to the auto-hide helpers for easy discovery and editing.
-    CUSTOM_CDP_HOTKEYS: List[Dict[str, Any]] = [
-        {
-            "hotkey": "ctrl+alt+g",
-            "css": [
-                "button.btn:has-text('Dashboard')",  # Most reliable - finds button with "Dashboard" text
-                "button.btn.border-none.bg-transparent",  # Fallback - targets button classes
-            ],
-            "description": "Click dashboard",
-            "auto_hide": True,
-        },
-        {
-            "hotkey": "ctrl+alt+d",
-            "css": [
-                "button.btn.border-none.bg-transparent.hover\\:shadow-none > div.css-1rynq56.r-cqee49",
-                "button.btn.border-none.bg-transparent.hover\\:shadow-none",
-            ],
-            "description": "Click Dashboard button",
-        },
-    ]
-
     def _clear_custom_cdp_hotkeys(self) -> None:
         removed = 0
         for handle in self._custom_cdp_hotkey_handles:
@@ -13247,89 +19822,186 @@ class MyFrame(wx.Frame):
             except Exception:
                 pass
         if removed:
-            print(f"[CDP Hotkeys] Cleared {removed} bindings")
+            print(f"[Playwright Click Paths] Cleared {removed} bindings")
         self._custom_cdp_hotkey_handles = []
         self._custom_cdp_hotkeys_active = []
         self._custom_cdp_hotkeys_registered = False
 
+    def _get_playwright_click_paths(self) -> List[Dict[str, Any]]:
+        return list(getattr(self, "_playwright_click_paths", []) or [])
+
+    def _refresh_playwright_click_paths_display(self) -> None:
+        widget = getattr(self, "playwright_click_paths_text", None)
+        if widget is None:
+            return
+
+        path_entries = self._get_playwright_click_paths()
+        if not path_entries:
+            widget.SetLabel(
+                f"No Playwright click paths loaded. File: {os.path.basename(self._playwright_click_paths_path)}"
+            )
+            return
+
+        lines: List[str] = []
+        for entry in path_entries:
+            hotkey = entry.get("hotkey", "")
+            description = entry.get("description") or entry.get("id") or hotkey
+            steps = len(entry.get("steps", []) or [])
+            enabled_text = "enabled" if entry.get("enabled", True) else "disabled"
+            extra_bits = [enabled_text, f"{steps} step{'s' if steps != 1 else ''}"]
+            if entry.get("auto_hide"):
+                extra_bits.append("auto-hide")
+            if entry.get("suppress"):
+                extra_bits.append("suppressed")
+            lines.append(f"{hotkey} â€” {description} ({', '.join(extra_bits)})")
+
+        widget.SetLabel("\n".join(lines))
+
+    def _set_click_path_status(self, message: str) -> None:
+        try:
+            if hasattr(self, "grab_status_text") and self.grab_status_text:
+                self.grab_status_text.SetLabel(message)
+        except Exception:
+            pass
+
+    def on_edit_playwright_click_paths(self, event=None) -> None:
+        open_in_notepad(self._playwright_click_paths_path)
+
+    def on_reload_playwright_click_paths(self, event=None) -> None:
+        self._playwright_click_paths = load_playwright_click_paths_config()
+        self._register_custom_cdp_hotkeys()
+        self._refresh_playwright_click_paths_display()
+        self._set_click_path_status("Reloaded Playwright click paths")
+        print(
+            f"[Playwright Click Paths] Reloaded from {self._playwright_click_paths_path}"
+        )
+
+    def _get_playwright_emr_page(self, browser) -> Optional[Page]:
+        try:
+            for context in browser.contexts:
+                for page in context.pages:
+                    if _is_grab_target_emr_url(page.url or ""):
+                        return page
+        except Exception:
+            return None
+        return None
+
+    def _get_click_path_locator(self, page: Page, selector: str):
+        token = str(selector or "").strip()
+        if not token:
+            raise ValueError("Empty selector")
+
+        low = token.lower()
+        if low.startswith("testid:"):
+            return page.get_by_test_id(token.split(":", 1)[1].strip())
+        if low.startswith("role:"):
+            payload = token.split(":", 1)[1].strip()
+            role_name, _, accessible_name = payload.partition("|")
+            role_name = role_name.strip()
+            accessible_name = accessible_name.strip()
+            if accessible_name:
+                return page.get_by_role(role_name, name=accessible_name)
+            return page.get_by_role(role_name)
+        if low.startswith("text:"):
+            return page.get_by_text(token.split(":", 1)[1].strip(), exact=True)
+        if low.startswith("text*:"):
+            return page.get_by_text(token.split(":", 1)[1].strip(), exact=False)
+        if low.startswith("xpath:"):
+            return page.locator(f"xpath={token.split(':', 1)[1].strip()}")
+        if low.startswith("css:"):
+            return page.locator(token.split(":", 1)[1].strip())
+        return page.locator(token)
+
     def _register_custom_cdp_hotkeys(self) -> None:
         self._clear_custom_cdp_hotkeys()
+        if not ENABLE_KEYBOARD_MODULE_CLICK_PATH_HOTKEYS:
+            print("[Playwright Click Paths] Keyboard-module click-path hotkeys disabled")
+            return
         active_entries: List[Dict[str, Any]] = []
-        for entry in self.CUSTOM_CDP_HOTKEYS:
+        for entry in self._get_playwright_click_paths():
+            if not entry.get("enabled", True):
+                continue
             hotkey = (entry.get("hotkey") or "").strip().lower()
             if not hotkey:
                 continue
-            css_entries: List[str] = []
-            xpath_entries: List[str] = []
-            # Support explicit css/xpath lists or generic selectors
-            for css in entry.get("css", []) or []:
-                if css:
-                    css_entries.append(css)
-            for xpath in entry.get("xpath", []) or []:
-                if xpath:
-                    xpath_entries.append(xpath)
-            for raw_selector in entry.get("selectors", []) or []:
-                token = (raw_selector or "").strip()
-                if not token:
-                    continue
-                low = token.lower()
-                if low.startswith("css:"):
-                    css_entries.append(token[4:].strip())
-                elif low.startswith("xpath:"):
-                    xpath_entries.append(token[6:].strip())
-                elif token.startswith("//") or token.startswith("(//"):
-                    xpath_entries.append(token)
-                else:
-                    css_entries.append(token)
-            css_entries = [s for s in css_entries if s]
-            xpath_entries = [s for s in xpath_entries if s]
-            if not css_entries and not xpath_entries:
-                print(f"[CDP Hotkeys] Skipped '{hotkey}': no selectors configured")
+            steps = entry.get("steps", []) or []
+            if not steps:
+                print(
+                    f"[Playwright Click Paths] Skipped '{hotkey}': no steps configured"
+                )
                 continue
+            path_id = entry.get("id") or hotkey
             description = entry.get("description") or ""
             auto_hide = bool(entry.get("auto_hide"))
+            suppress = bool(entry.get("suppress"))
+            trigger_on_release = bool(entry.get("trigger_on_release", True))
+            frozen_steps = tuple(
+                {
+                    "selectors": tuple(step.get("selectors", []) or []),
+                    "timeout_ms": int(step.get("timeout_ms", 3000) or 3000),
+                    "wait_after_ms": int(step.get("wait_after_ms", 0) or 0),
+                }
+                for step in steps
+            )
             try:
                 handle = keyboard.add_hotkey(
                     hotkey,
-                    lambda hk=hotkey, css=tuple(css_entries), xp=tuple(xpath_entries), desc=description, hide=auto_hide: wx.CallAfter(
+                    lambda hk=hotkey, pid=path_id, desc=description, frozen=frozen_steps, hide=auto_hide: wx.CallAfter(
                         self._execute_custom_cdp_click,
                         hk,
-                        css,
-                        xp,
+                        pid,
                         desc,
+                        frozen,
                         hide,
-                    )
+                    ),
+                    suppress=suppress,
+                    trigger_on_release=trigger_on_release,
                 )
             except Exception as exc:
-                print(f"[CDP Hotkeys] Failed to register '{hotkey}': {exc}")
+                print(f"[Playwright Click Paths] Failed to register '{hotkey}': {exc}")
                 continue
             self._custom_cdp_hotkey_handles.append(handle)
-            active_entries.append({
-                "hotkey": hotkey,
-                "css": css_entries,
-                "xpath": xpath_entries,
-                "description": description,
-                "auto_hide": auto_hide,
-            })
+            active_entries.append(
+                {
+                    "id": path_id,
+                    "hotkey": hotkey,
+                    "description": description,
+                    "auto_hide": auto_hide,
+                    "suppress": suppress,
+                    "enabled": True,
+                    "steps": [
+                        {
+                            "selectors": list(step.get("selectors", []) or []),
+                            "timeout_ms": int(step.get("timeout_ms", 3000) or 3000),
+                            "wait_after_ms": int(step.get("wait_after_ms", 0) or 0),
+                        }
+                        for step in steps
+                    ],
+                }
+            )
         self._custom_cdp_hotkeys_active = active_entries
         self._custom_cdp_hotkeys_registered = bool(active_entries)
         self._log_custom_cdp_hotkeys()
+        self._refresh_playwright_click_paths_display()
 
     def _execute_custom_cdp_click(
         self,
         hotkey: str,
-        css_entries: Tuple[str, ...],
-        xpath_entries: Tuple[str, ...],
+        path_id: str,
         description: str,
+        steps: Tuple[Dict[str, Any], ...],
         auto_hide: bool,
     ) -> None:
         if getattr(self, "_is_closing", False):
             return
 
         if description:
-            print(f"[CDP Hotkeys] {hotkey} triggered — {description}")
+            print(f"[Playwright Click Paths] {hotkey} triggered â€” {description}")
         else:
-            print(f"[CDP Hotkeys] {hotkey} triggered")
+            print(f"[Playwright Click Paths] {hotkey} triggered")
+        wx.CallAfter(
+            self._set_click_path_status, f"Running click path: {description or path_id}"
+        )
 
         should_restore = False
         if auto_hide and not getattr(self, "_gui_hidden", False):
@@ -13337,64 +20009,124 @@ class MyFrame(wx.Frame):
                 self._hide_gui_window()
                 should_restore = True
             except Exception as exc:
-                print(f"[CDP Hotkeys] Failed to hide GUI before '{hotkey}': {exc}")
-
-        grabber, _ = self._ensure_browser_grabber()
-        if grabber is None:
-            print(f"[CDP Hotkeys] '{hotkey}' aborted: browser grabber unavailable")
-            if should_restore:
-                wx.CallLater(250, self._show_gui_window)
-            return
-
-        if not grabber.connect_to_chrome():
-            print(f"[CDP Hotkeys] '{hotkey}' failed: unable to connect to Chrome")
-            if should_restore:
-                wx.CallLater(250, self._show_gui_window)
-            return
-
-        driver = getattr(grabber, 'driver', None)
-        if driver is None:
-            print(f"[CDP Hotkeys] '{hotkey}' failed: no active driver")
-            if should_restore:
-                wx.CallLater(250, self._show_gui_window)
-            return
-
-        expression = BrowserEMRGrabber._build_cdp_click_expression(list(css_entries), list(xpath_entries))
-        params = {
-            'expression': expression,
-            'returnByValue': True,
-            'awaitPromise': True,
-            'userGesture': True,
-        }
+                print(
+                    f"[Playwright Click Paths] Failed to hide GUI before '{hotkey}': {exc}"
+                )
 
         try:
-            result = driver.execute_cdp_cmd('Runtime.evaluate', params)
-            success = bool(((result or {}).get('result', {}) or {}).get('value'))
-            if success:
-                print(f"[CDP Hotkeys] '{hotkey}' succeeded")
-            else:
-                print(f"[CDP Hotkeys] '{hotkey}' did not match any elements")
+            if sync_playwright is None:
+                print(
+                    f"[Playwright Click Paths] '{hotkey}' failed: playwright is not installed"
+                )
+                wx.CallAfter(
+                    self._set_click_path_status,
+                    "Playwright click path failed: playwright not installed",
+                )
+                return
+
+            with sync_playwright() as p:  # type: ignore
+                browser = p.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{CDP_DEBUG_PORT}"
+                )
+                try:
+                    target_page = self._get_playwright_emr_page(browser)
+                    if target_page is None:
+                        print(
+                            f"[Playwright Click Paths] '{hotkey}' failed: EMR page not found"
+                        )
+                        wx.CallAfter(
+                            self._set_click_path_status,
+                            "Playwright click path failed: EMR page not found",
+                        )
+                        return
+
+                    try:
+                        target_page.bring_to_front()
+                    except Exception:
+                        pass
+
+                    for step_index, step in enumerate(steps, start=1):
+                        selectors = [
+                            str(token).strip()
+                            for token in step.get("selectors", []) or []
+                            if str(token).strip()
+                        ]
+                        timeout_ms = max(250, int(step.get("timeout_ms", 3000) or 3000))
+                        wait_after_ms = max(0, int(step.get("wait_after_ms", 0) or 0))
+                        clicked = False
+                        last_error = None
+
+                        for selector in selectors:
+                            try:
+                                locator = self._get_click_path_locator(
+                                    target_page, selector
+                                ).first
+                                locator.wait_for(state="visible", timeout=timeout_ms)
+                                locator.click(timeout=timeout_ms)
+                                clicked = True
+                                print(
+                                    f"[Playwright Click Paths] '{hotkey}' step {step_index} clicked with selector: {selector}"
+                                )
+                                break
+                            except PlaywrightTimeoutError as exc:
+                                last_error = exc
+                            except Exception as exc:
+                                last_error = exc
+
+                        if not clicked:
+                            print(
+                                f"[Playwright Click Paths] '{hotkey}' failed on step {step_index}: {last_error}"
+                            )
+                            wx.CallAfter(
+                                self._set_click_path_status,
+                                f"Click path failed on step {step_index}: {description or path_id}",
+                            )
+                            return
+
+                        if wait_after_ms:
+                            target_page.wait_for_timeout(wait_after_ms)
+
+                    print(f"[Playwright Click Paths] '{hotkey}' succeeded")
+                    wx.CallAfter(
+                        self._set_click_path_status,
+                        f"Completed click path: {description or path_id}",
+                    )
+                finally:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
         except Exception as exc:
-            print(f"[CDP Hotkeys] '{hotkey}' error: {exc}")
+            print(f"[Playwright Click Paths] '{hotkey}' error: {exc}")
+            wx.CallAfter(
+                self._set_click_path_status,
+                f"Playwright click path error: {description or path_id}",
+            )
         finally:
             if should_restore:
                 wx.CallLater(250, self._show_gui_window)
 
     def _log_custom_cdp_hotkeys(self) -> None:
         if not self._custom_cdp_hotkeys_registered:
-            print("[CDP Hotkeys] None active")
+            print("[Playwright Click Paths] None active")
             return
-        print(f"[CDP Hotkeys] Active count: {len(self._custom_cdp_hotkeys_active)}")
+        print(
+            f"[Playwright Click Paths] Active count: {len(self._custom_cdp_hotkeys_active)}"
+        )
         for entry in self._custom_cdp_hotkeys_active:
             desc = entry.get("description") or ""
             label = f"{entry.get('hotkey')}"
             if desc:
-                label = f"{label} — {desc}"
+                label = f"{label} â€” {desc}"
             print(f"  - {label}")
 
     def trigger_appropriate_grab(self):
         """Trigger the grab function for the currently active tab"""
         try:
+            # When the JS overlay is active, route the global F4 hotkey through
+            # the overlay grab path as a fallback. _do_overlay_grab debounces
+            # near-simultaneous triggers so the document keydown handler and the
+            # global hotkey do not spawn duplicate grabs.
             if getattr(self, "_js_overlay_active", False):
                 wx.CallAfter(self._do_overlay_grab)
                 return
@@ -13407,23 +20139,23 @@ class MyFrame(wx.Frame):
         """Internal method to execute grab on main thread"""
         try:
             active_tab = self.notebook.GetSelection()
-            
-            if active_tab == getattr(self, '_tab_index_t_def', 0):  # T Deficiency tab
-                grab_all_labs()
-            elif active_tab == getattr(self, '_tab_index_hair_loss', 1):  # Hair Loss tab
+
+            if active_tab == getattr(self, "_tab_index_hair_loss", 0):  # Hair Loss tab
                 self.grab_hair()
-            elif active_tab == 2:  # Photoaging tab (fixed position)
+            elif active_tab == 1:  # Photoaging tab
                 self.grab_photoaging()
-            elif active_tab == getattr(self, '_tab_index_sexual_health', 3):  # Sexual Health tab
+            elif active_tab == getattr(
+                self, "_tab_index_sexual_health", 2
+            ):  # Sexual Health tab
                 self.grab_sexual_health()
-            elif active_tab == 4:  # Auto Clicker tab
+            elif active_tab == 3:  # Auto Clicker tab
                 # No grab function for auto clicker tab
                 print("F4 pressed on Auto Clicker tab - no grab function available")
-            elif active_tab == getattr(self, '_tab_index_performance_anxiety', 5):
+            elif active_tab == getattr(self, "_tab_index_performance_anxiety", 4):
                 self.grab_performance_anxiety()
-            elif active_tab == getattr(self, '_tab_index_birth_control', 6):
+            elif active_tab == getattr(self, "_tab_index_birth_control", 5):
                 self.grab_birth_control()
-            
+
             print(f"F4 triggered grab for tab {active_tab}")
         except Exception as e:
             print(f"Error executing grab function: {e}")
@@ -13441,17 +20173,13 @@ class MyFrame(wx.Frame):
             sel = self.notebook.GetSelection()
         except Exception:
             sel = None
-        td_idx = getattr(self, '_tab_index_t_def', 0)
-        hair_idx = getattr(self, '_tab_index_hair_loss', 1)
-        sh_idx = getattr(self, '_tab_index_sexual_health', 3)
+        hair_idx = getattr(self, "_tab_index_hair_loss", 0)
+        sh_idx = getattr(self, "_tab_index_sexual_health", 2)
         bc_idx = getattr(self, '_tab_index_birth_control', None)
         if sel is None:
             self._unregister_tab4_hotkeys()
             return
-        if sel == td_idx:
-            # T Deficiency tab selected -> map Ctrl+Alt+F/N/C to T Deficiency actions
-            self._register_tab1_hotkeys()
-        elif sel == hair_idx:
+        if sel == hair_idx:
             # Hair Loss tab selected -> map Ctrl+Alt+F/N/C to Hair Loss actions
             self._register_tab2_hotkeys()
         elif sel == sh_idx:
@@ -13461,53 +20189,6 @@ class MyFrame(wx.Frame):
             self._register_tab7_hotkeys()
         else:
             self._unregister_tab4_hotkeys()
-
-    def _register_tab1_hotkeys(self):
-        """Register T Deficiency (Tab 1) global hotkeys. Active only when Tab 1 is selected.
-        Where to change: shortcuts are Ctrl+Alt+F/N/C below via modifiers and keycodes.
-        """
-        if getattr(self, '_tab4_hotkeys_registered', False):
-            if getattr(self, '_hotkeys_target', None) == 'td':
-                return
-            self._unregister_tab4_hotkeys()
-        # Try OS-level global hotkeys via wx.RegisterHotKey (works when app is not active)
-        try:
-            # Clear old handlers for these IDs before rebinding
-            try:
-                self.Unbind(wx.EVT_HOTKEY, id=self._hk_id_followup)
-                self.Unbind(wx.EVT_HOTKEY, id=self._hk_id_plan)
-                self.Unbind(wx.EVT_HOTKEY, id=self._hk_id_change)
-            except Exception:
-                pass
-            ok1 = self.RegisterHotKey(self._hk_id_followup, wx.MOD_CONTROL | wx.MOD_ALT, ord('F'))
-            ok2 = self.RegisterHotKey(self._hk_id_plan,    wx.MOD_CONTROL | wx.MOD_ALT, ord('N'))
-            ok3 = self.RegisterHotKey(self._hk_id_change,  wx.MOD_CONTROL | wx.MOD_ALT, ord('C'))
-            if ok1 and ok2 and ok3:
-                # Map to T Deficiency actions
-                self.Bind(wx.EVT_HOTKEY, lambda e: self._trigger_td_lab_message(), id=self._hk_id_followup)
-                self.Bind(wx.EVT_HOTKEY, lambda e: self._trigger_td_rx_note(), id=self._hk_id_plan)
-                self.Bind(wx.EVT_HOTKEY, lambda e: self._trigger_td_referral_note(), id=self._hk_id_change)
-                self._tab4_hotkeys_method = 'wx'
-                self._tab4_hotkeys_registered = True
-                self._hotkeys_target = 'td'
-                print("Tab 1 (T Deficiency) OS-level hotkeys registered (Ctrl+Alt+F/N/C)")
-                return
-        except Exception as e:
-            print(f"wx.RegisterHotKey failed for Tab 1 (T Deficiency), will try keyboard fallback: {e}")
-
-        # Fallback: keyboard module global hooks for T Deficiency
-        try:
-            # Where to change: update _tab1_hotkey_names above for T Deficiency keys
-            h1 = keyboard.add_hotkey(self._tab1_hotkey_names[0], self._trigger_td_lab_message)
-            h2 = keyboard.add_hotkey(self._tab1_hotkey_names[1], self._trigger_td_rx_note)
-            h3 = keyboard.add_hotkey(self._tab1_hotkey_names[2], self._trigger_td_referral_note)
-            self._tab4_keyboard_handles = [h1, h2, h3]
-            self._tab4_hotkeys_method = 'keyboard'
-            self._tab4_hotkeys_registered = True
-            self._hotkeys_target = 'td'
-            print("Tab 1 (T Deficiency) global hotkeys registered via keyboard module (Ctrl+Alt+F/N/C)")
-        except Exception as e:
-            print(f"Failed to register Tab 1 (T Deficiency) hotkeys (fallback): {e}")
 
     def _register_tab4_hotkeys(self):
         if getattr(self, '_tab4_hotkeys_registered', False):
@@ -13542,6 +20223,9 @@ class MyFrame(wx.Frame):
             print(f"wx.RegisterHotKey failed, will try keyboard fallback: {e}")
 
         # Fallback: keyboard module global hooks
+        if not ENABLE_KEYBOARD_MODULE_HOTKEYS:
+            print("Tab 4 keyboard fallback disabled to avoid AutoHotkey interference")
+            return
         try:
             # Where to change: update _tab4_hotkey_names above for SH keys
             h1 = keyboard.add_hotkey(self._tab4_hotkey_names[0], self._trigger_sh_followup)
@@ -13588,6 +20272,9 @@ class MyFrame(wx.Frame):
             print(f"wx.RegisterHotKey failed for Tab 2, will try keyboard fallback: {e}")
 
         # Fallback: keyboard module global hooks for Hair Loss
+        if not ENABLE_KEYBOARD_MODULE_HOTKEYS:
+            print("Tab 2 keyboard fallback disabled to avoid AutoHotkey interference")
+            return
         try:
             # Where to change: update _tab2_hotkey_names above for Hair keys
             h1 = keyboard.add_hotkey(self._tab2_hotkey_names[0], self._trigger_hair_followup)
@@ -13627,6 +20314,11 @@ class MyFrame(wx.Frame):
         except Exception as e:
             print(f"wx.RegisterHotKey failed for Birth Control, will try keyboard fallback: {e}")
 
+        if not ENABLE_KEYBOARD_MODULE_HOTKEYS:
+            print(
+                "Birth Control keyboard fallback disabled to avoid AutoHotkey interference"
+            )
+            return
         try:
             handles = []
             if self._tab7_hotkey_names:
@@ -13718,6 +20410,74 @@ class MyFrame(wx.Frame):
         except Exception as e:
             print(f"Error in _trigger_hair_limited: {e}")
 
+    # --- Notepad toggle (Ctrl+Alt+I) ---
+    def _trigger_notepad_toggle(self):
+        """Toggle the JS overlay notepad.
+
+        Called from the keyboard module hook thread. Must return quickly.
+        """
+        try:
+            if not getattr(self, "_js_overlay_active", False):
+                # Fall back to original autoclick toggle when overlay is inactive
+                wx.CallAfter(self.toggle_invisit_clicker)
+                return
+            self._queue_overlay_cmd("toggle_notepad")
+        except Exception as e:
+            print(f"Error in _trigger_notepad_toggle: {e}")
+
+    def _trigger_selector_panel_toggle(self):
+        """Toggle the JS overlay variable-selector panel."""
+        try:
+            if not getattr(self, "_js_overlay_active", False):
+                return
+            self._queue_overlay_cmd("toggle_selector_panel")
+        except Exception as e:
+            print(f"Error in _trigger_selector_panel_toggle: {e}")
+
+    def variable_selector_overlay(self, event=None):
+        """Public action for opening or closing the JS selector finder."""
+        self._trigger_selector_panel_toggle()
+
+    def _do_notepad_insert(self, text):
+        """Insert notepad text at the active cursor position via clipboard paste."""
+        try:
+            import pyperclip
+
+            pyperclip.copy(text)
+            time.sleep(0.05)
+            pyautogui.hotkey("ctrl", "v")
+        except Exception as e:
+            print(f"Error in _do_notepad_insert: {e}")
+
+    # --- Overlay minimize/restore (Ctrl+Alt+H) ---
+    def _trigger_overlay_minimize_toggle(self):
+        """Toggle the JS overlay between minimized and full bar.
+
+        Called from the keyboard module hook thread. Must return quickly.
+        """
+        try:
+            if not getattr(self, "_js_overlay_active", False):
+                return
+            self._queue_overlay_cmd("toggle_minimize")
+        except Exception as e:
+            print(f"Error in _trigger_overlay_minimize_toggle: {e}")
+
+    # --- Template context menu (Ctrl+Shift+D) ---
+    def _trigger_ctx_menu_toggle(self):
+        """Toggle the JS overlay template context menu at the current mouse position.
+
+        Called from the keyboard module hook thread. Must return quickly
+        to avoid Windows unhooking the low-level keyboard hook.
+        """
+        try:
+            if not getattr(self, "_js_overlay_active", False):
+                print("[CTX MENU] Ignored â€” overlay not active")
+                return
+            print("[CTX MENU] Ctrl+Shift+D pressed, queuing toggle_ctx_menu")
+            self._queue_overlay_cmd("toggle_ctx_menu")
+        except Exception as e:
+            print(f"Error in _trigger_ctx_menu_toggle: {e}")
+
     # --- Global Birth Control (Tab 7) hotkey triggers ---
     def _trigger_bc_followup(self):
         try:
@@ -13733,398 +20493,6 @@ class MyFrame(wx.Frame):
         except Exception as e:
             print(f"Error in _trigger_bc_initial: {e}")
 
-    # --- Global T Deficiency (Tab 1) hotkey triggers ---
-    def _trigger_td_lab_message(self):
-        try:
-            delay = getattr(self, "global_insert_delay_ms", 200)
-            # Lab message for T Deficiency
-            # Prefer the templates.txt entry named "Lab Message" if available; otherwise fallback to legacy builder
-            def do_insert():
-                try:
-                    if 'Lab Message' in templates:
-                        self.insert_specific_template('Lab Message')
-                    else:
-                        insert_template(lab_message=True)
-                except Exception:
-                    # Last-resort fallback
-                    insert_template(lab_message=True)
-            wx.CallLater(delay, do_insert)
-        except Exception as e:
-            print(f"Error in _trigger_td_lab_message: {e}")
-
-    def _trigger_td_rx_note(self):
-        try:
-            delay = getattr(self, "global_insert_delay_ms", 200)
-            # Rx note for T Deficiency
-            # Prefer a template named some variant of "Rx Note" if available; otherwise fallback to legacy builder
-            def do_insert():
-                try:
-                    # Build a case-insensitive lookup over template names
-                    candidates = ['Rx Note', 'Rx note', 'RxNote', 'rx note', 'rxnote']
-                    match_key = None
-                    try:
-                        for k in templates.keys():
-                            if any(k.lower() == c.lower() for c in candidates):
-                                match_key = k
-                                break
-                    except Exception:
-                        match_key = None
-
-                    if match_key:
-                        self.insert_specific_template(match_key)
-                    else:
-                        insert_template(rx_note=True)
-                except Exception:
-                    # Last-resort fallback
-                    insert_template(rx_note=True)
-            wx.CallLater(delay, do_insert)
-        except Exception as e:
-            print(f"Error in _trigger_td_rx_note: {e}")
-
-    def _trigger_td_referral_note(self):
-        try:
-            delay = getattr(self, "global_insert_delay_ms", 200)
-            # Referral note template (must exist in templates.txt as "Referral note")
-            wx.CallLater(delay, lambda: self.insert_specific_template("Referral note"))
-        except Exception as e:
-            print(f"Error in _trigger_td_referral_note: {e}")
-
-    def _queue_overlay_cmd(self, cmd, data=None):
-        try:
-            self._js_overlay_cmd_queue.put_nowait((cmd, data))
-        except Exception:
-            pass
-
-    def inject_js_overlay(self, evt=None, show_error_on_fail=True):
-        if self._js_overlay_active:
-            return
-        if sync_playwright is None:
-            if show_error_on_fail:
-                wx.MessageBox(
-                    "Playwright is not available, so the JS overlay cannot start.",
-                    "JS Overlay Error",
-                    wx.ICON_ERROR,
-                )
-            return
-
-        self._js_overlay_active = True
-        self._js_overlay_show_error_on_fail = bool(show_error_on_fail)
-        self._orig_wx_Show = self.Show
-        self.Show = lambda show=True: None if self._js_overlay_active else self._orig_wx_Show(show)
-
-        global _emr_bridge_hook
-        _emr_bridge_hook = lambda payload=None: self._queue_overlay_cmd("push_vars", payload or {})
-
-        while not self._js_overlay_cmd_queue.empty():
-            try:
-                self._js_overlay_cmd_queue.get_nowait()
-            except queue.Empty:
-                break
-
-        self._js_overlay_thread = threading.Thread(
-            target=self._overlay_thread_run,
-            daemon=True,
-            name="JSOverlay",
-        )
-        self._js_overlay_thread.start()
-
-    def _overlay_thread_run(self):
-        pw = None
-        browser = None
-        page = None
-        try:
-            pw = sync_playwright().start()
-            browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_DEBUG_PORT}")
-
-            for ctx in browser.contexts:
-                for candidate in ctx.pages:
-                    url_lower = (candidate.url or "").lower()
-                    if "emr" in url_lower or "hims" in url_lower:
-                        page = candidate
-                        break
-                if page is not None:
-                    break
-            if page is None:
-                for ctx in browser.contexts:
-                    if ctx.pages:
-                        page = ctx.pages[0]
-                        break
-            if page is None:
-                wx.CallAfter(self._on_overlay_start_failed, "No browser page found")
-                return
-
-            self._js_overlay_page = page
-            self._register_overlay_exposed_functions(page)
-            page.evaluate(OVERLAY_JS)
-            self._overlay_eval_push_visit(page, self._get_overlay_visit_display())
-            self._overlay_eval_push_vars(page)
-            self._overlay_eval_push_autoclicker_state(page)
-            self._overlay_eval_push_invisit_autoclicker_state(page)
-            self._overlay_eval_push_dark_mode(page)
-            wx.CallAfter(self.Hide)
-
-            while self._js_overlay_active:
-                try:
-                    page.wait_for_timeout(120)
-                except Exception:
-                    break
-
-                while True:
-                    try:
-                        cmd, data = self._js_overlay_cmd_queue.get_nowait()
-                    except queue.Empty:
-                        break
-
-                    if cmd == "stop":
-                        return
-                    if cmd == "push_vars":
-                        self._overlay_eval_push_vars(page, data)
-                    elif cmd == "push_visit":
-                        self._overlay_eval_push_visit(page, data)
-                    elif cmd == "push_status":
-                        self._overlay_eval_push_status(page, data)
-                    elif cmd == "push_autoclicker_state":
-                        self._overlay_eval_push_autoclicker_state(page, data)
-                    elif cmd == "push_invisit_autoclicker_state":
-                        self._overlay_eval_push_invisit_autoclicker_state(page, data)
-                    elif cmd == "push_dark_mode":
-                        self._overlay_eval_push_dark_mode(page, data)
-                    elif cmd == "reinject":
-                        self._overlay_eval_reinject(page)
-                    elif cmd == "toggle_minimize":
-                        try:
-                            page.evaluate("window.__emrToggleMinimize()")
-                        except Exception:
-                            pass
-        except Exception as exc:
-            wx.CallAfter(self._on_overlay_start_failed, str(exc))
-        finally:
-            self._js_overlay_page = None
-            try:
-                if page is not None:
-                    page.evaluate(OVERLAY_REMOVE_JS)
-            except Exception:
-                pass
-            try:
-                if browser is not None:
-                    browser.close()
-            except Exception:
-                pass
-            try:
-                if pw is not None:
-                    pw.stop()
-            except Exception:
-                pass
-
-    def _on_overlay_start_failed(self, msg):
-        self._js_overlay_active = False
-        global _emr_bridge_hook
-        _emr_bridge_hook = None
-        if hasattr(self, "_orig_wx_Show"):
-            self.Show = self._orig_wx_Show
-        if self._js_overlay_show_error_on_fail:
-            wx.MessageBox(
-                f"Could not start JS overlay:\n{msg}\n\nMake sure Chrome is running with --remote-debugging-port={CDP_DEBUG_PORT}.",
-                "JS Overlay Error",
-                wx.ICON_ERROR,
-            )
-
-    def _register_overlay_exposed_functions(self, page):
-        def on_grab():
-            wx.CallAfter(self._do_overlay_grab)
-
-        def on_detect_visit():
-            wx.CallAfter(self._do_overlay_detect_visit)
-
-        def on_insert_template(template_name, insert_source="overlay"):
-            wx.CallAfter(self.insert_specific_template, template_name, insert_source)
-
-        def on_switch_to_python():
-            wx.CallAfter(self._remove_js_overlay)
-
-        def on_close():
-            wx.CallAfter(self.Close)
-
-        def on_toggle_autoclicker():
-            wx.CallAfter(self._handle_overlay_toggle_autoclicker)
-
-        def on_toggle_invisit_autoclicker():
-            wx.CallAfter(self._handle_overlay_toggle_invisit_clicker)
-
-        def on_toggle_dark_mode():
-            next_state = not bool(getattr(self, "_js_overlay_dark_mode", False))
-            self._js_overlay_dark_mode = next_state
-            self._queue_overlay_cmd("push_dark_mode", next_state)
-
-        funcs = {
-            "__emr_grab": on_grab,
-            "__emr_detect_visit": on_detect_visit,
-            "__emr_insert_template": on_insert_template,
-            "__emr_toggle_autoclicker": on_toggle_autoclicker,
-            "__emr_toggle_invisit_autoclicker": on_toggle_invisit_autoclicker,
-            "__emr_toggle_dark_mode": on_toggle_dark_mode,
-            "__emr_switch_to_python": on_switch_to_python,
-            "__emr_close": on_close,
-        }
-        for name, fn in funcs.items():
-            try:
-                page.expose_function(name, fn)
-            except Exception as exc:
-                if "already registered" not in str(exc).lower():
-                    print(f"[JS OVERLAY] expose_function({name}) error: {exc}")
-
-    def _remove_js_overlay(self):
-        self._js_overlay_active = False
-        global _emr_bridge_hook
-        _emr_bridge_hook = None
-        self._queue_overlay_cmd("stop")
-        if hasattr(self, "_orig_wx_Show"):
-            self.Show = self._orig_wx_Show
-        self.Show()
-        self.Raise()
-
-    def _get_overlay_visit_display(self) -> str:
-        candidates = [
-            getattr(self, "_js_overlay_visit_type", None),
-            getattr(self, "_cdp_last_display", None),
-        ]
-        try:
-            label_text = str(self.visit_type_text.GetLabel() or "").strip()
-            if ":" in label_text:
-                candidates.append(label_text.split(":", 1)[1].strip())
-        except Exception:
-            pass
-        for candidate in candidates:
-            text = str(candidate or "").strip()
-            if text:
-                return text
-        return "Unknown"
-
-    def _overlay_eval_push_vars(self, page, payload=None):
-        try:
-            vars_dict = dict(grabbed_vars)
-            if isinstance(payload, dict):
-                for key, value in payload.items():
-                    if key in {"timestamp", "grabbed_vars", "context"}:
-                        continue
-                    if isinstance(value, (dict, list)):
-                        continue
-                    vars_dict[str(key)] = "" if value is None else str(value)
-            page.evaluate("(payload) => window.__emrUpdateVariables(payload)", vars_dict)
-        except Exception as exc:
-            print(f"[JS OVERLAY] Push vars error: {exc}")
-
-    def _overlay_eval_push_visit(self, page, visit_type):
-        self._js_overlay_visit_type = visit_type
-        try:
-            templates_for_visit = load_tab_template_list(visit_type)
-            page.evaluate(
-                "([visitType, templates]) => window.__emrUpdateVisitType(visitType, templates)",
-                [str(visit_type or "Unknown"), templates_for_visit],
-            )
-        except Exception as exc:
-            print(f"[JS OVERLAY] Push visit error: {exc}")
-
-    def _overlay_eval_push_status(self, page, msg):
-        try:
-            page.evaluate("(message) => window.__emrSetStatus(message)", str(msg or ""))
-        except Exception:
-            pass
-
-    def _overlay_eval_push_autoclicker_state(self, page, enabled=None):
-        try:
-            state = bool(auto_clicker_enabled[0] if enabled is None else enabled)
-            page.evaluate("(enabled) => window.__emrSetAutoclickerState(enabled)", state)
-        except Exception:
-            pass
-
-    def _overlay_eval_push_invisit_autoclicker_state(self, page, enabled=None):
-        try:
-            state = bool(self.invisit_running if enabled is None else enabled)
-            page.evaluate("(enabled) => window.__emrSetInvisitAutoclickerState(enabled)", state)
-        except Exception:
-            pass
-
-    def _overlay_eval_push_dark_mode(self, page, enabled=None):
-        try:
-            state = bool(self._js_overlay_dark_mode if enabled is None else enabled)
-            self._js_overlay_dark_mode = state
-            page.evaluate("(enabled) => window.__emrSetDarkMode(enabled)", state)
-        except Exception:
-            pass
-
-    def _overlay_eval_reinject(self, page):
-        try:
-            still_there = page.evaluate("!!document.getElementById('emr-assist-overlay')")
-            if still_there:
-                return
-            self._register_overlay_exposed_functions(page)
-            page.evaluate(OVERLAY_JS)
-            self._overlay_eval_push_visit(page, self._get_overlay_visit_display())
-            self._overlay_eval_push_vars(page)
-            self._overlay_eval_push_autoclicker_state(page)
-            self._overlay_eval_push_invisit_autoclicker_state(page)
-            self._overlay_eval_push_dark_mode(page)
-        except Exception as exc:
-            print(f"[JS OVERLAY] Reinject error: {exc}")
-
-    def _do_overlay_grab(self):
-        visit_type = self._canonicalize_visit_type(self._get_overlay_visit_display())
-        try:
-            if visit_type == "T Deficiency":
-                grab_all_labs()
-            elif visit_type == "Hair Loss":
-                self.grab_hair()
-            elif visit_type == "Photoaging":
-                self.grab_photoaging()
-            elif visit_type == "Sexual Health":
-                self.grab_sexual_health()
-            elif visit_type == "Performance Anxiety":
-                self.grab_performance_anxiety()
-            elif visit_type == "Birth Control":
-                self.grab_birth_control()
-            else:
-                self._push_overlay_status(f"No grab handler for {visit_type or 'Unknown'}")
-                return
-            self._push_overlay_status(f"Grab completed for {visit_type}")
-        except Exception as exc:
-            self._push_overlay_status(f"Grab error: {exc}")
-
-    def _do_overlay_detect_visit(self):
-        try:
-            self.detect_visit_type_and_switch_tab()
-            visit_type = self._get_overlay_visit_display()
-            self._queue_overlay_cmd("push_visit", visit_type)
-            self._queue_overlay_cmd("push_status", f"Detected visit: {visit_type}")
-        except Exception as exc:
-            self._push_overlay_status(f"Detect error: {exc}")
-
-    def _push_overlay_autoclicker_state(self):
-        if getattr(self, "_js_overlay_active", False):
-            self._queue_overlay_cmd("push_autoclicker_state", bool(auto_clicker_enabled[0]))
-
-    def _push_overlay_invisit_autoclicker_state(self):
-        if getattr(self, "_js_overlay_active", False):
-            self._queue_overlay_cmd("push_invisit_autoclicker_state", bool(self.invisit_running))
-
-    def _push_overlay_status(self, message):
-        if getattr(self, "_js_overlay_active", False):
-            self._queue_overlay_cmd("push_status", str(message or ""))
-
-    def _handle_overlay_toggle_autoclicker(self):
-        try:
-            self.toggle_auto_clicker()
-            self._push_overlay_autoclicker_state()
-        except Exception as exc:
-            self._push_overlay_status(f"Autoclicker error: {exc}")
-
-    def _handle_overlay_toggle_invisit_clicker(self):
-        try:
-            self.toggle_invisit_clicker()
-            self._push_overlay_invisit_autoclicker_state()
-        except Exception as exc:
-            self._push_overlay_status(f"In-visit error: {exc}")
-
     def on_close(self, event):
         """Handle application close event"""
         try:
@@ -14134,6 +20502,10 @@ class MyFrame(wx.Frame):
             # Stop auto clicker loops ASAP
             try:
                 auto_clicker_enabled[0] = False
+            except Exception:
+                pass
+            try:
+                self._overlay_keep_awake_enabled = False
             except Exception:
                 pass
 
@@ -14169,14 +20541,13 @@ class MyFrame(wx.Frame):
             self._cdp_monitor_running = False
         except Exception:
             pass
+        # Stop JS overlay thread
         try:
             self._js_overlay_active = False
-            global _emr_bridge_hook
-            _emr_bridge_hook = None
             self._queue_overlay_cmd("stop")
-            thread = getattr(self, "_js_overlay_thread", None)
-            if thread and thread.is_alive():
-                thread.join(timeout=1.5)
+            t = getattr(self, "_js_overlay_thread", None)
+            if t and t.is_alive():
+                t.join(timeout=2.0)
         except Exception:
             pass
         # Wait briefly for CDP monitor thread to exit before tearing down Playwright
@@ -14220,7 +20591,12 @@ class MyFrame(wx.Frame):
                 threading.Thread(target=_cleanup_grabber, daemon=True).start()
         except Exception:
             pass
-        
+
+        try:
+            self._destroy_taskbar_icon()
+        except Exception:
+            pass
+
         # Continue with normal close
         try:
             self.Destroy()
@@ -14244,13 +20620,13 @@ threading.Thread(target=window_tracker, daemon=True).start()
 
 def start_template_popup_listener():
     """Start a mouse listener for Ctrl+Right-click template popup using mouse library."""
-    
+
     if mouse_lib is None:
         print("[STARTUP] mouse library not available, using keyboard shortcut only...")
         return
-    
+
     print("[STARTUP] Setting up mouse library right-click hook...")
-    
+
     def on_right_click():
         """Handle right-click - show template popup if Ctrl is held."""
         try:
@@ -14258,49 +20634,49 @@ def start_template_popup_listener():
             VK_CONTROL = 0x11
             ctrl_state = ctypes.windll.user32.GetAsyncKeyState(VK_CONTROL)
             ctrl_pressed = ctrl_state & 0x8000
-            
+
             if not ctrl_pressed:
                 return  # Ctrl not held, ignore
-            
+
             # Get current mouse position
             class POINT(ctypes.Structure):
                 _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-            
+
             pt = POINT()
             ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
             x, y = pt.x, pt.y
-            
+
             print(f"[MOUSE] Ctrl+Right-click detected at ({x}, {y})")
-            
+
             # Show template popup via wx.CallAfter (thread-safe)
             def show_popup():
                 try:
                     if not frame or not frame.IsShown():
                         return
-                    
+
                     # Get current tab name
-                    tab_name = getattr(frame, '_current_template_tab', 'T Deficiency')
-                    
+                    tab_name = getattr(frame, "_current_template_tab", "Hair Loss")
+
                     # Skip if Auto Clicker tab (no templates)
                     if tab_name is None:
                         return
-                    
+
                     # Create and show popup
                     popup = TemplatePopup(frame, tab_name, frame.insert_specific_template)
                     popup.position_on_screen(x, y)
                     popup.Popup()
                     print(f"[MOUSE] Popup shown for tab: {tab_name}")
-                    
+
                 except Exception as e:
                     print(f"Template popup error: {e}")
                     import traceback
                     traceback.print_exc()
-            
+
             wx.CallAfter(show_popup)
-            
+
         except Exception as e:
             print(f"[MOUSE] Error in right-click handler: {e}")
-    
+
     # Hook right-click using mouse library
     try:
         mouse_lib.on_right_click(on_right_click)
@@ -14314,45 +20690,51 @@ def start_template_popup_listener():
 
 def start_keyboard_template_popup():
     """Alternative: Use Ctrl+Alt+T keyboard shortcut to show template popup at mouse position."""
+    if not ENABLE_KEYBOARD_MODULE_HOTKEYS:
+        print(
+            "[STARTUP] Keyboard template popup listener disabled to avoid AutoHotkey interference"
+        )
+        return
+
     print("[STARTUP] Setting up keyboard shortcut Ctrl+Alt+T for template popup...")
-    
+
     def show_template_popup_at_mouse():
         """Show template popup at current mouse position."""
         try:
             # Get mouse position using ctypes
             class POINT(ctypes.Structure):
                 _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-            
+
             pt = POINT()
             ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
             x, y = pt.x, pt.y
-            
+
             print(f"[KEYBOARD] Ctrl+Alt+T pressed, showing popup at ({x}, {y})")
-            
+
             def show_popup():
                 try:
                     if not frame or not frame.IsShown():
                         return
-                    
-                    tab_name = getattr(frame, '_current_template_tab', 'T Deficiency')
+
+                    tab_name = getattr(frame, "_current_template_tab", "Hair Loss")
                     if tab_name is None:
                         return
-                    
+
                     popup = TemplatePopup(frame, tab_name, frame.insert_specific_template)
                     popup.position_on_screen(x, y)
                     popup.Popup()
                     print("[KEYBOARD] Popup shown")
-                    
+
                 except Exception as e:
                     print(f"Template popup error: {e}")
                     import traceback
                     traceback.print_exc()
-            
+
             wx.CallAfter(show_popup)
-            
+
         except Exception as e:
             print(f"[KEYBOARD] Error getting mouse position: {e}")
-    
+
     try:
         keyboard.add_hotkey('ctrl+alt+t', show_template_popup_at_mouse, suppress=False)
         print("Template popup keyboard shortcut registered: Ctrl+Alt+T")
