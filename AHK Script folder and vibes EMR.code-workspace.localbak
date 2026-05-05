@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../../OneDrive/Desktop/Telehealth apps/AHK Script folder"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../voice_assist"
+		}
+	],
+	"settings": {
+		"ahkConverter.autoHotkeyV2Path": "C:\\Program Files\\AutoHotkey\\v2\\AutoHotkey64.exe"
+	}
+}

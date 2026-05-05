@@ -1,4 +1,4 @@
-# ================================================================
+﻿# ================================================================
 # EMR Assist (wxPython + Playwright)
 # ------------------------------------------------
 # Browser Configuration:
@@ -34,6 +34,8 @@ import queue
 from functools import partial
 import re
 import os
+import subprocess
+import sys
 from typing import Dict, Any, Optional, List, Tuple, Callable, Set
 import json
 import requests
@@ -110,6 +112,10 @@ class By:
     CSS_SELECTOR = "css"
     XPATH = "xpath"
     TAG_NAME = "tag"
+
+
+TOAST_APP_ID = "EMRAssist.Desktop"
+TOAST_SHORTCUT_NAME = "EMR Assist.lnk"
 
 
 class _ExpectedConditions:
@@ -793,6 +799,14 @@ def load_templates_from_file():
 # ================================================================
 OVERLAY_JS = r"""
 (() => {
+    if (typeof window.__emrOverlayCleanup === 'function') {
+        try {
+            window.__emrOverlayCleanup();
+        } catch (e) {
+            console.warn('overlay cleanup before reinject failed:', e);
+        }
+    }
+
     // Remove existing overlay if re-injecting
     const existing = document.getElementById('emr-assist-overlay');
     if (existing) existing.remove();
@@ -860,6 +874,366 @@ OVERLAY_JS = r"""
             border-color: #3bd3ff;
             color: #fff;
         }
+        .emr-bar,
+        .emr-vars-panel,
+        .emr-dashboard-payroll-panel {
+            position: relative;
+            z-index: 2;
+        }
+        .emr-debug-layer {
+            position: fixed;
+            inset: 0;
+            z-index: 1;
+            pointer-events: none;
+            display: none;
+            overflow: hidden;
+        }
+        .emr-debug-layer.emr-debug-layer-visible {
+            display: block;
+        }
+        .emr-text-mirror-layer {
+            position: fixed;
+            inset: 0;
+            z-index: 1;
+            pointer-events: none;
+            display: none;
+            overflow: hidden;
+        }
+        .emr-text-mirror-layer.emr-text-mirror-layer-visible {
+            display: block;
+        }
+        .emr-debug-box {
+            position: fixed;
+            border: 1px solid rgba(59, 211, 255, 0.34);
+            background: rgba(59, 211, 255, 0.08);
+            border-radius: 3px;
+            box-shadow: inset 0 0 0 1px rgba(147, 192, 255, 0.1);
+        }
+        .emr-text-mirror-chip {
+            position: fixed;
+            padding: 1px 4px;
+            border-radius: 4px;
+            border: 1px solid rgba(59, 211, 255, 0.24);
+            background: rgba(7, 20, 39, 0.78);
+            color: #edf4fb;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+            font: 600 11px/1.25 "Segoe UI", Arial, sans-serif;
+            letter-spacing: 0.01em;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            cursor: pointer;
+            pointer-events: auto;
+            transition: border-color 120ms ease, background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+        }
+        .emr-text-mirror-chip:hover {
+            border-color: rgba(59, 211, 255, 0.68);
+            background: rgba(15, 34, 51, 0.96);
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(59, 211, 255, 0.18);
+        }
+        .emr-text-mirror-chip.emr-text-mirror-chip-selected {
+            background: linear-gradient(180deg, rgba(59, 211, 255, 0.94) 0%, rgba(18, 174, 230, 0.96) 100%);
+            color: #002233;
+            border-color: rgba(59, 211, 255, 0.95);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(59, 211, 255, 0.42);
+        }
+        .emr-text-selection-panel {
+            position: fixed;
+            right: 12px;
+            bottom: 12px;
+            width: min(420px, calc(100vw - 24px));
+            max-height: min(42vh, 460px);
+            z-index: 3;
+            display: none;
+            flex-direction: column;
+            background: rgba(7, 20, 39, 0.96);
+            border: 1px solid rgba(59, 211, 255, 0.26);
+            border-radius: 10px;
+            box-shadow: 0 14px 30px rgba(0, 0, 0, 0.32);
+            overflow: hidden;
+            backdrop-filter: blur(8px);
+            pointer-events: auto;
+        }
+        .emr-text-selection-panel.emr-text-selection-open {
+            display: flex;
+        }
+        .emr-text-selection-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.2);
+            background: rgba(15, 34, 51, 0.98);
+        }
+        .emr-text-selection-title-wrap {
+            min-width: 0;
+            flex: 1;
+        }
+        .emr-text-selection-title {
+            color: #93c0ff;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+        }
+        .emr-text-selection-subtitle {
+            color: #7f93a4;
+            font-size: 10px;
+            margin-top: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .emr-text-selection-actions {
+            display: flex;
+            gap: 6px;
+        }
+        .emr-text-selection-btn {
+            background: #11293a;
+            color: #cfe7ff;
+            border: 1px solid #243948;
+            border-radius: 6px;
+            min-width: 54px;
+            height: 28px;
+            cursor: pointer;
+            font-size: 11px;
+            padding: 0 10px;
+        }
+        .emr-text-selection-btn:hover {
+            background: #1a3a52;
+            border-color: #3bd3ff;
+        }
+        .emr-text-selection-btn:disabled {
+            opacity: 0.5;
+            cursor: default;
+            border-color: #243948;
+            background: #11293a;
+        }
+        .emr-text-selection-body {
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .emr-text-selection-empty {
+            padding: 12px;
+            color: #7f93a4;
+            font-size: 11px;
+            font-style: italic;
+        }
+        .emr-text-selection-list {
+            flex: 1;
+            min-height: 0;
+            overflow: auto;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .emr-text-selection-card {
+            background: rgba(15, 34, 51, 0.9);
+            border: 1px solid rgba(59, 211, 255, 0.16);
+            border-radius: 8px;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .emr-text-selection-card.emr-text-selection-card-missing {
+            border-color: rgba(255, 176, 176, 0.35);
+        }
+        .emr-text-selection-toprow {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+        .emr-text-selection-index {
+            min-width: 18px;
+            height: 18px;
+            border-radius: 999px;
+            background: rgba(59, 211, 255, 0.18);
+            color: #93c0ff;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 18px;
+            text-align: center;
+            flex: 0 0 auto;
+        }
+        .emr-text-selection-main {
+            min-width: 0;
+            flex: 1;
+        }
+        .emr-text-selection-text {
+            color: #ddeefb;
+            font-size: 11px;
+            font-weight: 600;
+            line-height: 1.35;
+            white-space: normal;
+            word-break: break-word;
+        }
+        .emr-text-selection-status {
+            color: #7f93a4;
+            font-size: 10px;
+            margin-top: 2px;
+        }
+        .emr-text-selection-status.emr-text-selection-status-missing {
+            color: #ffb0b0;
+        }
+        .emr-text-selection-card-actions {
+            display: flex;
+            gap: 6px;
+            flex: 0 0 auto;
+        }
+        .emr-text-selection-card-btn {
+            background: rgba(17, 41, 58, 0.96);
+            color: #cfe7ff;
+            border: 1px solid rgba(36, 57, 72, 0.96);
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-size: 10px;
+            cursor: pointer;
+        }
+        .emr-text-selection-card-btn:hover {
+            border-color: rgba(59, 211, 255, 0.72);
+            background: rgba(26, 58, 82, 0.96);
+        }
+        .emr-text-selection-card-btn:disabled {
+            opacity: 0.45;
+            cursor: default;
+        }
+        .emr-text-selection-meta {
+            color: #7f93a4;
+            font: 10px/1.35 Consolas, monospace;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .emr-text-selection-maprow {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .emr-text-selection-maplabel {
+            color: #c7d8ea;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .emr-text-selection-input {
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .emr-review-panel {
+            position: fixed;
+            right: 12px;
+            top: 58px;
+            left: 50vw;
+            height: 34vh;
+            min-height: 220px;
+            max-height: calc(100vh - 70px);
+            z-index: 3;
+            display: none;
+            flex-direction: column;
+            background: rgba(7, 20, 39, 0.96);
+            border: 1px solid rgba(59, 211, 255, 0.26);
+            border-radius: 10px;
+            box-shadow: 0 14px 30px rgba(0, 0, 0, 0.32);
+            overflow: hidden;
+            backdrop-filter: blur(8px);
+        }
+        .emr-review-panel.emr-review-open {
+            display: flex;
+        }
+        .emr-review-panel.emr-review-minimized {
+            height: auto !important;
+            min-height: 0;
+        }
+        .emr-review-panel.emr-review-minimized .emr-review-body {
+            display: none;
+        }
+        .emr-review-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.2);
+            background: rgba(15, 34, 51, 0.98);
+            user-select: none;
+        }
+        .emr-review-title-wrap {
+            min-width: 0;
+            flex: 1;
+        }
+        .emr-review-title {
+            color: #93c0ff;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.2px;
+        }
+        .emr-review-subtitle {
+            color: #7f93a4;
+            font-size: 10px;
+            margin-top: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .emr-review-min-btn {
+            background: #11293a;
+            color: #cfe7ff;
+            border: 1px solid #243948;
+            border-radius: 6px;
+            min-width: 28px;
+            height: 28px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .emr-review-min-btn:hover {
+            background: #1a3a52;
+            border-color: #3bd3ff;
+        }
+        .emr-review-body {
+            flex: 1;
+            min-height: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+            gap: 0;
+        }
+        .emr-review-section {
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .emr-review-section + .emr-review-section {
+            border-left: 1px solid rgba(59, 211, 255, 0.16);
+        }
+        .emr-review-section-header {
+            padding: 4px 6px 3px;
+            border-bottom: 1px solid rgba(59, 211, 255, 0.14);
+        }
+        .emr-review-section-title {
+            color: #cbd7e6;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .emr-review-section-note {
+            display: none;
+        }
+        .emr-review-content {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            overscroll-behavior: contain;
+            padding: 4px 6px 6px;
+            color: #ddeefb;
+            font: 11px/1.45 Consolas, monospace;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .emr-review-empty {
+            color: #7f93a4;
+            font-style: italic;
+        }
         .emr-btn-accent {
             background: linear-gradient(180deg, #3bd3ff 0%, #12aee6 100%);
             color: #002233;
@@ -878,7 +1252,10 @@ OVERLAY_JS = r"""
         .emr-icon-btn.emr-btn-active,
         .emr-invisit-btn.emr-btn-active,
         .emr-keepawake-btn.emr-btn-active,
-        .emr-dark-btn.emr-btn-active {
+        .emr-dark-btn.emr-btn-active,
+        .emr-debug-geometry-btn.emr-btn-active,
+        .emr-text-mirror-btn.emr-btn-active,
+        .emr-review-btn.emr-btn-active {
             background: linear-gradient(180deg, #3bd3ff 0%, #12aee6 100%);
             color: #002233;
             font-weight: 700;
@@ -2105,7 +2482,6 @@ OVERLAY_JS = r"""
 
         <!-- Section 1: Visit type. -->
         <div class="emr-section">
-            <span class="emr-visit-label" id="emr-visit-label">Visit: -</span>
             <button class="emr-btn" id="emr-detect-btn" title="Detect visit type from EMR">Detect</button>
         </div>
 
@@ -2141,6 +2517,9 @@ OVERLAY_JS = r"""
             <button class="emr-vars-menu-toggle emr-toggle-on" id="emr-vars-menu-toggle" title="Show grabbed variables in the Ctrl+Shift+D template menu">In Menu</button>
             <button class="emr-btn" id="emr-ad-hoc-grab-btn" title="Open ad hoc selector grab at the current mouse position">Ad Hoc Grab</button>
             <button class="emr-btn" id="emr-selector-toggle-btn" title="Open variable selector overlay">Selectors<span class="emr-shortcut">Ctrl+Alt+L</span></button>
+            <button class="emr-btn emr-debug-geometry-btn" id="emr-debug-geometry-btn" title="Toggle the Phase 1 text geometry debug layer">Boxes</button>
+            <button class="emr-btn emr-text-mirror-btn" id="emr-text-mirror-btn" title="Toggle the Phase 2 text mirror overlay">Text</button>
+            <button class="emr-btn emr-review-btn" id="emr-review-btn" title="Toggle the limited review overlay">Review</button>
         </div>
 
         <div class="emr-section-divider"></div>
@@ -2168,11 +2547,47 @@ OVERLAY_JS = r"""
 
     <!-- Minimized mini-bar. -->
     <div class="emr-mini-bar" id="emr-mini-bar">
+        <button class="emr-btn emr-review-btn" id="emr-mini-review-btn" title="Toggle the limited review overlay">Review</button>
         <button class="emr-btn emr-invisit-btn" id="emr-mini-invisit-btn" title="Start in-visit auto clicker">In Visit &#x21BB;</button>
         <button class="emr-btn emr-keepawake-btn" id="emr-mini-keepawake-btn" title="Start Keep Awake clicks">Keep Awake</button>
         <button class="emr-btn emr-icon-btn" id="emr-mini-autoclicker-btn" title="Start dashboard auto clicker">&#x21BB;</button>
         <button class="emr-mini-btn" id="emr-restore-btn" title="Restore overlay">[]</button>
         <button class="emr-mini-btn emr-mini-btn-close" id="emr-mini-close-btn" title="Close EMR Assist">X</button>
+    </div>
+
+    <div class="emr-debug-layer" id="emr-debug-layer" aria-hidden="true"></div>
+    <div class="emr-text-mirror-layer" id="emr-text-mirror-layer" aria-hidden="true"></div>
+    <div class="emr-text-selection-panel" id="emr-text-selection-panel" aria-hidden="true">
+        <div class="emr-text-selection-header">
+            <div class="emr-text-selection-title-wrap">
+                <div class="emr-text-selection-title">Text Mapping</div>
+                <div class="emr-text-selection-subtitle" id="emr-text-selection-subtitle">Click text chips to collect mappings.</div>
+            </div>
+            <div class="emr-text-selection-actions">
+                <button class="emr-text-selection-btn" id="emr-text-selection-copy-btn" type="button" title="Copy selected mappings as JSON">Copy</button>
+                <button class="emr-text-selection-btn" id="emr-text-selection-clear-btn" type="button" title="Clear selected mappings">Clear</button>
+            </div>
+        </div>
+        <div class="emr-text-selection-body" id="emr-text-selection-body">
+            <div class="emr-text-selection-empty" id="emr-text-selection-empty">Click text overlay chips to select them. Hover a chip to highlight its source element; add a map key here for later box-text mapping.</div>
+            <div class="emr-text-selection-list" id="emr-text-selection-list"></div>
+        </div>
+    </div>
+    <div class="emr-review-panel" id="emr-review-panel" aria-hidden="true">
+        <div class="emr-review-body" id="emr-review-body">
+            <div class="emr-review-section">
+                <div class="emr-review-section-header">
+                    <div class="emr-review-section-title">Middle</div>
+                </div>
+                <div class="emr-review-content" id="emr-review-middle-content"></div>
+            </div>
+            <div class="emr-review-section">
+                <div class="emr-review-section-header">
+                    <div class="emr-review-section-title">Notes</div>
+                </div>
+                <div class="emr-review-content" id="emr-review-notes-content"></div>
+            </div>
+        </div>
     </div>
 
     <!-- Variables panel. -->
@@ -2183,7 +2598,6 @@ OVERLAY_JS = r"""
         <div class="emr-selector-window-header" id="emr-selector-window-header">
             <div class="emr-selector-window-titleblock">
                 <div class="emr-selector-title">Selector Workbench</div>
-                <div class="emr-selector-subtitle" id="emr-selector-visit-label">Visit: -</div>
                 <div class="emr-selector-tabs">
                     <button class="emr-selector-tab emr-selector-tab-active" id="emr-selector-tab-variables" type="button">Variables</button>
                     <button class="emr-selector-tab" id="emr-selector-tab-templates" type="button">Templates</button>
@@ -2324,6 +2738,8 @@ OVERLAY_JS = r"""
     overlay.addEventListener('mousedown', (e) => {
         if (e.target && e.target.id === 'emr-notepad-textarea') return;
         if (e.target && typeof e.target.closest === 'function' && e.target.closest('#emr-selector-panel')) return;
+        if (e.target && typeof e.target.closest === 'function' && e.target.closest('#emr-text-selection-panel')) return;
+        if (e.target && typeof e.target.closest === 'function' && e.target.closest('#emr-review-panel')) return;
         e.preventDefault();
     });
 
@@ -2371,7 +2787,25 @@ OVERLAY_JS = r"""
     let lastQuickTemplateActions = [];
     let lastDashboardPayroll = null;
     let dashboardPayrollVisible = false;
+    let dashboardPayrollPanelOpen = false;
     const darkModeBtn = document.getElementById('emr-dark-mode-btn');
+    const debugGeometryBtn = document.getElementById('emr-debug-geometry-btn');
+    const debugGeometryLayer = document.getElementById('emr-debug-layer');
+    const textMirrorBtn = document.getElementById('emr-text-mirror-btn');
+    const textMirrorLayer = document.getElementById('emr-text-mirror-layer');
+    const textSelectionPanel = document.getElementById('emr-text-selection-panel');
+    const textSelectionSubtitle = document.getElementById('emr-text-selection-subtitle');
+    const textSelectionEmpty = document.getElementById('emr-text-selection-empty');
+    const textSelectionList = document.getElementById('emr-text-selection-list');
+    const textSelectionCopyBtn = document.getElementById('emr-text-selection-copy-btn');
+    const textSelectionClearBtn = document.getElementById('emr-text-selection-clear-btn');
+    const reviewBtn = document.getElementById('emr-review-btn');
+    const reviewPanel = document.getElementById('emr-review-panel');
+    const reviewMinBtn = document.getElementById('emr-review-min-btn');
+    const miniReviewBtn = document.getElementById('emr-mini-review-btn');
+    const reviewSubtitle = document.getElementById('emr-review-subtitle');
+    const reviewMiddleContent = document.getElementById('emr-review-middle-content');
+    const reviewNotesContent = document.getElementById('emr-review-notes-content');
     const varsMenuToggle = document.getElementById('emr-vars-menu-toggle');
     if (varsMenuToggle) {
         varsMenuToggle.addEventListener('click', () => {
@@ -2390,9 +2824,2015 @@ OVERLAY_JS = r"""
         });
     }
 
+    const DEBUG_GEOMETRY_STORAGE_KEY = '__emr_phase1_debug_geometry';
+    const DEBUG_GEOMETRY_MAX_TEXT_NODES = 450;
+    const DEBUG_GEOMETRY_MAX_RECTS = 900;
+    const DEBUG_GEOMETRY_MIN_WIDTH = 6;
+    const DEBUG_GEOMETRY_MIN_HEIGHT = 8;
+    const TEXT_MIRROR_STORAGE_KEY = '__emr_phase2_text_mirror';
+    const REVIEW_PANEL_STORAGE_KEY = '__emr_review_panel_enabled';
+    const REVIEW_PANEL_MINIMIZED_STORAGE_KEY = '__emr_review_panel_minimized';
+    const TEXT_MIRROR_MAX_TEXT_NODES = 450;
+    const TEXT_MIRROR_MAX_ITEMS = 500;
+    const TEXT_MIRROR_MAX_CHARS = 180;
+    const TEXT_MIRROR_SELECTION_MAX_ITEMS = 48;
+    const REVIEW_PANEL_MAX_ITEMS = 260;
+    const REVIEW_PANEL_NOTE_TIMESTAMP_RE = /(?:•\s*)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:am|pm)/i;
+    const REVIEW_PANEL_NOTES_ROOT_SELECTOR = 'body > div.css-1hj5o6h.r-13awgt0 > div > div.relative.min-h-0.flex-1 > div.flex.h-full.min-w-\\[600px\\].flex-1.flex-row.overflow-hidden > div > div:nth-child(2) > div.css-1hj5o6h.r-1niwhzg.r-5chvjn.r-gxnn5r.r-10g5efv > div > div > div.css-1hj5o6h.r-13awgt0 > div > div.css-1hj5o6h.r-150rngu.r-18u37iz.r-16y2uox.r-1wbh5a2.r-lltvgl.r-buy8e9.r-1sncvnh.r-mfh4gg.r-2eszeu > div > div:nth-child(2) > div > div > div > div.css-1hj5o6h.r-150rngu.r-eqz5dr.r-16y2uox.r-1wbh5a2.r-11yh6sk.r-1rnoaur.r-1sncvnh';
+    const TEXT_OVERLAY_CONTROL_SELECTOR = 'input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]';
+    const TEXT_OVERLAY_IGNORED_INPUT_TYPES = new Set([
+        'hidden',
+        'password',
+        'checkbox',
+        'radio',
+        'file',
+        'image',
+        'button',
+        'submit',
+        'reset',
+        'range',
+        'color',
+    ]);
+    const DEBUG_GEOMETRY_IGNORED_TAGS = new Set([
+        'script',
+        'style',
+        'noscript',
+        'svg',
+        'path',
+        'input',
+        'textarea',
+        'select',
+        'option',
+        'canvas',
+        'img',
+        'video',
+        'audio',
+    ]);
+    let debugGeometryEnabled = false;
+    let debugGeometryFrameToken = 0;
+    let textMirrorEnabled = false;
+    let textMirrorFrameToken = 0;
+    let textMirrorSelectedIds = [];
+    let reviewPanelEnabled = false;
+    let reviewPanelMinimized = false;
+    let reviewPanelFrameToken = 0;
+    let reviewPanelNotesAutoloadPending = false;
+    let reviewPanelNotesRestoreTabKey = '';
+    let reviewPanelNotesSnapshot = null;
+    let debugGeometryBoundDocs = [];
+    let debugGeometryCleanupFns = [];
+    const textMirrorSelectionState = new Map();
+    let selectorHoverElement = null;
+    let selectorHoverOutline = '';
+    let selectorHoverOutlineOffset = '';
+
+    function debugGeometryLoadPreference() {
+        try {
+            return localStorage.getItem(DEBUG_GEOMETRY_STORAGE_KEY) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function debugGeometryPersistPreference(enabled) {
+        try {
+            localStorage.setItem(DEBUG_GEOMETRY_STORAGE_KEY, enabled ? '1' : '0');
+        } catch (e) {}
+    }
+
+    function textMirrorLoadPreference() {
+        try {
+            return localStorage.getItem(TEXT_MIRROR_STORAGE_KEY) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function textMirrorPersistPreference(enabled) {
+        try {
+            localStorage.setItem(TEXT_MIRROR_STORAGE_KEY, enabled ? '1' : '0');
+        } catch (e) {}
+    }
+
+    function reviewPanelLoadPreference() {
+        try {
+            return localStorage.getItem(REVIEW_PANEL_STORAGE_KEY) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function reviewPanelPersistPreference(enabled) {
+        try {
+            localStorage.setItem(REVIEW_PANEL_STORAGE_KEY, enabled ? '1' : '0');
+        } catch (e) {}
+    }
+
+    function reviewPanelLoadMinimized() {
+        try {
+            return localStorage.getItem(REVIEW_PANEL_MINIMIZED_STORAGE_KEY) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function reviewPanelPersistMinimized(minimized) {
+        try {
+            localStorage.setItem(REVIEW_PANEL_MINIMIZED_STORAGE_KEY, minimized ? '1' : '0');
+        } catch (e) {}
+    }
+
+    function debugGeometryUpdateButton(stats = null) {
+        if (!debugGeometryBtn) return;
+        const rectCount = stats && Number.isFinite(stats.rectCount) ? stats.rectCount : 0;
+        const textNodeCount = stats && Number.isFinite(stats.textNodeCount) ? stats.textNodeCount : 0;
+        debugGeometryBtn.classList.toggle('emr-btn-active', debugGeometryEnabled);
+        debugGeometryBtn.textContent = debugGeometryEnabled ? `Boxes ${rectCount}` : 'Boxes';
+        debugGeometryBtn.title = debugGeometryEnabled
+            ? `Hide the Phase 1 text geometry debug layer (${rectCount} rects from ${textNodeCount} text nodes)`
+            : 'Show the Phase 1 text geometry debug layer';
+        debugGeometryBtn.setAttribute('aria-pressed', debugGeometryEnabled ? 'true' : 'false');
+    }
+
+    function textMirrorUpdateButton(stats = null) {
+        if (!textMirrorBtn) return;
+        const itemCount = stats && Number.isFinite(stats.itemCount) ? stats.itemCount : 0;
+        const textNodeCount = stats && Number.isFinite(stats.textNodeCount) ? stats.textNodeCount : 0;
+        const selectedCount = textMirrorSelectedIds.length;
+        textMirrorBtn.classList.toggle('emr-btn-active', textMirrorEnabled);
+        textMirrorBtn.textContent = textMirrorEnabled ? `Text ${itemCount}` : 'Text';
+        textMirrorBtn.title = textMirrorEnabled
+            ? `Hide the Phase 2 text mirror overlay (${itemCount} labels from ${textNodeCount} text nodes, ${selectedCount} selected)`
+            : 'Show the Phase 2 text mirror overlay';
+        textMirrorBtn.setAttribute('aria-pressed', textMirrorEnabled ? 'true' : 'false');
+    }
+
+    function reviewPanelUpdateButton() {
+        const buttons = [reviewBtn, miniReviewBtn].filter(Boolean);
+        if (!buttons.length) return;
+        buttons.forEach((button) => {
+            button.classList.toggle('emr-btn-active', reviewPanelEnabled);
+            button.textContent = 'Review';
+            button.title = reviewPanelEnabled
+                ? 'Hide the limited review overlay'
+                : 'Show the limited review overlay';
+            button.setAttribute('aria-pressed', reviewPanelEnabled ? 'true' : 'false');
+        });
+    }
+
+    function textOverlayHasActiveMode() {
+        return !!(debugGeometryEnabled || textMirrorEnabled || reviewPanelEnabled);
+    }
+
+    function textOverlayScheduleRefresh() {
+        if (debugGeometryEnabled) {
+            debugGeometryScheduleRefresh();
+        }
+        if (textMirrorEnabled) {
+            textMirrorScheduleRefresh();
+        }
+        if (reviewPanelEnabled) {
+            reviewPanelScheduleRefresh();
+        }
+    }
+
+    function textOverlayMaybeClearWatchers() {
+        if (!textOverlayHasActiveMode()) {
+            debugGeometryClearWatchers();
+        }
+    }
+
+    function debugGeometryDocsEqual(a, b) {
+        if (!a || !b) return false;
+        if (a.length !== b.length) return false;
+        for (let idx = 0; idx < a.length; idx += 1) {
+            if (a[idx] !== b[idx]) return false;
+        }
+        return true;
+    }
+
+    function debugGeometryClearWatchers() {
+        for (const cleanup of debugGeometryCleanupFns) {
+            try {
+                cleanup();
+            } catch (e) {
+                console.warn('debug geometry cleanup failed:', e);
+            }
+        }
+        debugGeometryCleanupFns = [];
+        debugGeometryBoundDocs = [];
+    }
+
+    function debugGeometryTranslateRect(doc, rect) {
+        let left = rect.left;
+        let top = rect.top;
+        let view = doc && doc.defaultView ? doc.defaultView : window;
+        while (view && view !== window && view.frameElement) {
+            const frameRect = view.frameElement.getBoundingClientRect();
+            left += frameRect.left;
+            top += frameRect.top;
+            view = view.parent;
+        }
+        return {
+            left,
+            top,
+            width: rect.width,
+            height: rect.height,
+        };
+    }
+
+    function debugGeometryIsUsefulRect(rect) {
+        return !!(
+            rect &&
+            rect.width >= DEBUG_GEOMETRY_MIN_WIDTH &&
+            rect.height >= DEBUG_GEOMETRY_MIN_HEIGHT &&
+            rect.left < window.innerWidth &&
+            rect.top < window.innerHeight &&
+            rect.left + rect.width > 0 &&
+            rect.top + rect.height > 0
+        );
+    }
+
+    function debugGeometryEligibleTextParent(el) {
+        if (!selectorEligibleElement(el)) return false;
+        const tag = (el.tagName || '').toLowerCase();
+        if (DEBUG_GEOMETRY_IGNORED_TAGS.has(tag)) return false;
+        if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
+        return true;
+    }
+
+    function reviewPanelEligibleTextParent(el) {
+        if (!selectorIsElementNode(el)) return false;
+        if (el === overlay || overlay.contains(el)) return false;
+        const tag = (el.tagName || '').toLowerCase();
+        if (DEBUG_GEOMETRY_IGNORED_TAGS.has(tag)) return false;
+        if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
+        return true;
+    }
+
+    function debugGeometryIsOverlayNode(node) {
+        if (!node || !overlay || !overlay.ownerDocument) return false;
+        const element = node.nodeType === 1 ? node : node.parentElement;
+        if (!element || element.ownerDocument !== overlay.ownerDocument) return false;
+        return element === overlay || overlay.contains(element);
+    }
+
+    function textOverlayNormalizeText(value) {
+        return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function textOverlayTruncateText(value, maxChars = TEXT_MIRROR_MAX_CHARS) {
+        const text = textOverlayNormalizeText(value);
+        if (!text) return '';
+        if (text.length <= maxChars) return text;
+        return `${text.slice(0, maxChars - 1).trimEnd()}…`;
+    }
+
+    function textOverlayDescribeElement(el) {
+        if (!selectorIsElementNode(el)) {
+            return {
+                selector: '',
+                tag: '',
+                dataTestId: '',
+                role: '',
+                ariaLabel: '',
+            };
+        }
+        return {
+            selector: selectorCssPath(el),
+            tag: String(el.tagName || '').toLowerCase(),
+            dataTestId: String(el.getAttribute('data-testid') || ''),
+            role: String(el.getAttribute('role') || ''),
+            ariaLabel: textOverlayNormalizeText(
+                el.getAttribute('aria-label')
+                || el.getAttribute('placeholder')
+                || el.getAttribute('title')
+            ),
+        };
+    }
+
+    function textOverlayBuildSourceId(el, text, rect) {
+        const descriptor = textOverlayDescribeElement(el);
+        const selectorPart = descriptor.selector || descriptor.dataTestId || descriptor.tag || 'node';
+        const textPart = selectorNormalize(text).slice(0, 48) || 'text';
+        const left = rect ? Math.round(rect.left) : 0;
+        const top = rect ? Math.round(rect.top) : 0;
+        return `${selectorPart}::${textPart}::${left}x${top}`;
+    }
+
+    function textOverlayBuildItem(el, rect, text, kind = 'text') {
+        const descriptor = textOverlayDescribeElement(el);
+        return {
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+            text,
+            kind,
+            selector: descriptor.selector,
+            tag: descriptor.tag,
+            dataTestId: descriptor.dataTestId,
+            role: descriptor.role,
+            ariaLabel: descriptor.ariaLabel,
+            sourceId: textOverlayBuildSourceId(el, text, rect),
+            sourceElement: el,
+        };
+    }
+
+    function textOverlayContentEditableHost(el) {
+        if (!selectorIsElementNode(el)) return null;
+        let node = el;
+        while (node && selectorIsElementNode(node)) {
+            if (node.isContentEditable && (!node.parentElement || !node.parentElement.isContentEditable)) {
+                return node;
+            }
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    function textOverlayPushUniqueRect(rects, seen, rect) {
+        if (!debugGeometryIsUsefulRect(rect)) return false;
+        const dedupeKey = [
+            Math.round(rect.left),
+            Math.round(rect.top),
+            Math.round(rect.width),
+            Math.round(rect.height),
+        ].join('|');
+        if (seen.has(dedupeKey)) return false;
+        seen.add(dedupeKey);
+        rects.push(rect);
+        return true;
+    }
+
+    function textOverlayPushUniqueItem(items, seen, item) {
+        if (!item || !debugGeometryIsUsefulRect(item)) return false;
+        const labelText = textOverlayTruncateText(item.text);
+        if (!labelText) return false;
+        const dedupeKey = item.sourceId || [
+            Math.round(item.left),
+            Math.round(item.top),
+            Math.round(item.width),
+            Math.round(item.height),
+            labelText.toLowerCase(),
+        ].join('|');
+        if (seen.has(dedupeKey)) return false;
+        seen.add(dedupeKey);
+        items.push({
+            left: item.left,
+            top: item.top,
+            width: item.width,
+            height: item.height,
+            text: labelText,
+            kind: item.kind || 'text',
+            selector: item.selector || '',
+            tag: item.tag || '',
+            dataTestId: item.dataTestId || '',
+            role: item.role || '',
+            ariaLabel: item.ariaLabel || '',
+            sourceId: item.sourceId || dedupeKey,
+            sourceElement: item.sourceElement || null,
+        });
+        return true;
+    }
+
+    function textMirrorCloneSelectionRecord(item, overrides = {}) {
+        return {
+            sourceId: item.sourceId || '',
+            text: item.text || '',
+            selector: item.selector || '',
+            tag: item.tag || '',
+            dataTestId: item.dataTestId || '',
+            role: item.role || '',
+            ariaLabel: item.ariaLabel || '',
+            kind: item.kind || 'text',
+            mapKey: item.mapKey || '',
+            visible: item.visible !== false,
+            left: Number(item.left || 0),
+            top: Number(item.top || 0),
+            width: Number(item.width || 0),
+            height: Number(item.height || 0),
+            sourceElement: item.sourceElement || null,
+            ...overrides,
+        };
+    }
+
+    function textMirrorSetStatus(message, delayMs = 1200) {
+        if (typeof window.__emrSetStatus !== 'function') return;
+        window.__emrSetStatus(message || '');
+        if (message) {
+            window.setTimeout(() => {
+                if (typeof window.__emrSetStatus === 'function') {
+                    window.__emrSetStatus('');
+                }
+            }, delayMs);
+        }
+    }
+
+    function textMirrorBuildSelectionExport() {
+        return textMirrorSelectedIds
+            .map((sourceId, index) => {
+                const item = textMirrorSelectionState.get(sourceId);
+                if (!item) return null;
+                return {
+                    index: index + 1,
+                    mapKey: item.mapKey || '',
+                    sourceId: item.sourceId,
+                    text: item.text,
+                    selector: item.selector,
+                    kind: item.kind,
+                    tag: item.tag,
+                    dataTestId: item.dataTestId,
+                    role: item.role,
+                    ariaLabel: item.ariaLabel,
+                    visible: item.visible !== false,
+                    rect: {
+                        left: Math.round(item.left),
+                        top: Math.round(item.top),
+                        width: Math.round(item.width),
+                        height: Math.round(item.height),
+                    },
+                };
+            })
+            .filter(Boolean);
+    }
+
+    function textMirrorUpdateSelectionMapKey(sourceId, value) {
+        const existing = textMirrorSelectionState.get(sourceId);
+        if (!existing) return;
+        textMirrorSelectionState.set(sourceId, textMirrorCloneSelectionRecord(existing, {
+            mapKey: String(value || '').trim(),
+        }));
+    }
+
+    function textMirrorRemoveSelection(sourceId) {
+        textMirrorSelectedIds = textMirrorSelectedIds.filter((id) => id !== sourceId);
+        textMirrorSelectionState.delete(sourceId);
+        textMirrorRenderSelectionPanel();
+        textMirrorScheduleRefresh();
+    }
+
+    function textMirrorClearSelection(silent = false) {
+        textMirrorSelectedIds = [];
+        textMirrorSelectionState.clear();
+        selectorClearHoverHighlight();
+        textMirrorRenderSelectionPanel();
+        textMirrorScheduleRefresh();
+        if (!silent) {
+            textMirrorSetStatus('Text selections cleared');
+        }
+    }
+
+    function textMirrorCopySelection() {
+        const payload = textMirrorBuildSelectionExport();
+        if (!payload.length) {
+            textMirrorSetStatus('No text mappings selected');
+            return;
+        }
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+            textMirrorSetStatus('Clipboard unavailable');
+            return;
+        }
+        navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+            .then(() => textMirrorSetStatus(`Copied ${payload.length} text mappings`))
+            .catch(() => textMirrorSetStatus('Copy failed'));
+    }
+
+    function textMirrorFlashSelection(sourceId) {
+        const item = textMirrorSelectionState.get(sourceId);
+        if (!item || !item.selector) {
+            textMirrorSetStatus('No selector available for that chip');
+            return;
+        }
+        const matches = selectorQuerySafe(item.selector);
+        if (!matches.length) {
+            textMirrorSetStatus('Source element is not currently available');
+            return;
+        }
+        selectorFlashElement(matches[0]);
+        textMirrorSetStatus('Flashed source element', 900);
+    }
+
+    function textMirrorRenderSelectionPanel() {
+        if (!textSelectionPanel || !textSelectionList || !textSelectionEmpty) return;
+        const selectedCount = textMirrorSelectedIds.length;
+        textSelectionPanel.classList.toggle('emr-text-selection-open', textMirrorEnabled);
+        if (!textMirrorEnabled) {
+            textSelectionList.replaceChildren();
+            return;
+        }
+
+        const visibleCount = textMirrorSelectedIds.reduce((count, sourceId) => {
+            const item = textMirrorSelectionState.get(sourceId);
+            return count + (item && item.visible !== false ? 1 : 0);
+        }, 0);
+        if (textSelectionSubtitle) {
+            textSelectionSubtitle.textContent = selectedCount
+                ? `${selectedCount} selected, ${visibleCount} currently visible. Add a map key, then Copy JSON.`
+                : 'Click text chips to collect mappings.';
+        }
+        if (textSelectionCopyBtn) textSelectionCopyBtn.disabled = !selectedCount;
+        if (textSelectionClearBtn) textSelectionClearBtn.disabled = !selectedCount;
+
+        if (!selectedCount) {
+            textSelectionList.replaceChildren();
+            textSelectionEmpty.style.display = 'block';
+            return;
+        }
+
+        textSelectionEmpty.style.display = 'none';
+        const fragment = document.createDocumentFragment();
+        textMirrorSelectedIds.forEach((sourceId, index) => {
+            const item = textMirrorSelectionState.get(sourceId);
+            if (!item) return;
+
+            const card = document.createElement('div');
+            card.className = `emr-text-selection-card${item.visible === false ? ' emr-text-selection-card-missing' : ''}`;
+
+            const topRow = document.createElement('div');
+            topRow.className = 'emr-text-selection-toprow';
+
+            const badge = document.createElement('div');
+            badge.className = 'emr-text-selection-index';
+            badge.textContent = String(index + 1);
+            topRow.appendChild(badge);
+
+            const main = document.createElement('div');
+            main.className = 'emr-text-selection-main';
+
+            const textEl = document.createElement('div');
+            textEl.className = 'emr-text-selection-text';
+            textEl.textContent = item.text;
+            main.appendChild(textEl);
+
+            const statusEl = document.createElement('div');
+            statusEl.className = `emr-text-selection-status${item.visible === false ? ' emr-text-selection-status-missing' : ''}`;
+            statusEl.textContent = item.visible === false ? 'Not currently visible in the text overlay' : 'Visible in the current text overlay';
+            main.appendChild(statusEl);
+
+            topRow.appendChild(main);
+
+            const actions = document.createElement('div');
+            actions.className = 'emr-text-selection-card-actions';
+
+            const flashBtn = document.createElement('button');
+            flashBtn.className = 'emr-text-selection-card-btn';
+            flashBtn.type = 'button';
+            flashBtn.textContent = 'Flash';
+            flashBtn.disabled = !item.selector;
+            flashBtn.addEventListener('click', () => textMirrorFlashSelection(sourceId));
+            actions.appendChild(flashBtn);
+
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'emr-text-selection-card-btn';
+            removeBtn.type = 'button';
+            removeBtn.textContent = 'Remove';
+            removeBtn.addEventListener('click', () => textMirrorRemoveSelection(sourceId));
+            actions.appendChild(removeBtn);
+
+            topRow.appendChild(actions);
+            card.appendChild(topRow);
+
+            const idMeta = document.createElement('div');
+            idMeta.className = 'emr-text-selection-meta';
+            idMeta.textContent = item.sourceId;
+            card.appendChild(idMeta);
+
+            const selectorMeta = document.createElement('div');
+            selectorMeta.className = 'emr-text-selection-meta';
+            selectorMeta.textContent = item.selector
+                || [item.tag, item.dataTestId ? `data-testid=${item.dataTestId}` : '', item.ariaLabel ? `label=${item.ariaLabel}` : '']
+                    .filter(Boolean)
+                    .join(' | ')
+                || 'No selector metadata captured';
+            card.appendChild(selectorMeta);
+
+            const mapRow = document.createElement('div');
+            mapRow.className = 'emr-text-selection-maprow';
+
+            const mapLabel = document.createElement('label');
+            mapLabel.className = 'emr-text-selection-maplabel';
+            mapLabel.textContent = 'Map key';
+            mapLabel.htmlFor = `emr-text-selection-map-${index}`;
+            mapRow.appendChild(mapLabel);
+
+            const input = document.createElement('input');
+            input.className = 'emr-selector-text-input emr-text-selection-input';
+            input.id = `emr-text-selection-map-${index}`;
+            input.type = 'text';
+            input.placeholder = 'box_text_id or target key';
+            input.value = item.mapKey || '';
+            input.addEventListener('input', (event) => {
+                textMirrorUpdateSelectionMapKey(sourceId, event.target.value);
+            });
+            mapRow.appendChild(input);
+
+            card.appendChild(mapRow);
+            fragment.appendChild(card);
+        });
+
+        textSelectionList.replaceChildren(fragment);
+    }
+
+    function textMirrorSyncSelectionState(items) {
+        const byId = new Map();
+        for (const item of items) {
+            if (item && item.sourceId) {
+                byId.set(item.sourceId, item);
+            }
+        }
+        for (const sourceId of textMirrorSelectedIds) {
+            const existing = textMirrorSelectionState.get(sourceId);
+            const current = byId.get(sourceId);
+            if (current) {
+                textMirrorSelectionState.set(sourceId, textMirrorCloneSelectionRecord(current, {
+                    mapKey: existing && existing.mapKey ? existing.mapKey : '',
+                    visible: true,
+                }));
+            } else if (existing) {
+                textMirrorSelectionState.set(sourceId, textMirrorCloneSelectionRecord(existing, {
+                    visible: false,
+                    sourceElement: null,
+                }));
+            }
+        }
+    }
+
+    function textMirrorToggleSelection(item) {
+        if (!item || !item.sourceId) return;
+        const existingIndex = textMirrorSelectedIds.indexOf(item.sourceId);
+        if (existingIndex >= 0) {
+            textMirrorRemoveSelection(item.sourceId);
+            textMirrorSetStatus('Removed text mapping');
+            return;
+        }
+        if (textMirrorSelectedIds.length >= TEXT_MIRROR_SELECTION_MAX_ITEMS) {
+            textMirrorSetStatus(`Selection limit reached (${TEXT_MIRROR_SELECTION_MAX_ITEMS})`);
+            return;
+        }
+        const existing = textMirrorSelectionState.get(item.sourceId);
+        textMirrorSelectedIds = [...textMirrorSelectedIds, item.sourceId];
+        textMirrorSelectionState.set(item.sourceId, textMirrorCloneSelectionRecord(item, {
+            mapKey: existing && existing.mapKey ? existing.mapKey : '',
+            visible: true,
+        }));
+        textMirrorRenderSelectionPanel();
+        textMirrorScheduleRefresh();
+        textMirrorSetStatus('Added text mapping');
+    }
+
+    function textReviewIsButtonLike(el) {
+        return !!(
+            selectorIsElementNode(el)
+            && typeof el.closest === 'function'
+            && el.closest('button, [role="button"], a[role="button"], [tabindex="0"]')
+        );
+    }
+
+    function textReviewRegionContains(region, rect) {
+        if (!region || !rect) return false;
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        return centerX >= region.left && centerX <= region.right && centerY >= region.top && centerY <= region.bottom;
+    }
+
+    function reviewPanelHasLayoutRect(rect) {
+        return !!(
+            rect
+            && Number.isFinite(rect.left)
+            && Number.isFinite(rect.top)
+            && Number.isFinite(rect.width)
+            && Number.isFinite(rect.height)
+            && rect.width >= 1
+            && rect.height >= 1
+        );
+    }
+
+    function textReviewPushEntry(entries, seen, entry) {
+        const text = textOverlayNormalizeText(entry && entry.text);
+        if (!text) return false;
+        const key = [
+            Math.round(entry.top),
+            Math.round(entry.left),
+            text.toLowerCase(),
+        ].join('|');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        entries.push({
+            top: entry.top,
+            left: entry.left,
+            text,
+        });
+        return true;
+    }
+
+    function textReviewBuildText(entries) {
+        if (!entries.length) return '';
+        entries.sort((a, b) => (a.top - b.top) || (a.left - b.left));
+        const lines = [];
+        for (const entry of entries) {
+            if (!lines.length || lines[lines.length - 1] !== entry.text) {
+                lines.push(entry.text);
+            }
+        }
+        return lines.join('\n');
+    }
+
+    function reviewPanelTabLooksActive(tab) {
+        if (!selectorIsElementNode(tab)) return false;
+        const ariaSelected = String(tab.getAttribute('aria-selected') || '').toLowerCase();
+        if (ariaSelected) return ariaSelected === 'true';
+        const labelNodes = [tab];
+        try {
+            labelNodes.push(...Array.from(tab.querySelectorAll('[dir="auto"]')));
+        } catch (e) {}
+        return labelNodes.some((node) => {
+            if (!selectorIsElementNode(node)) return false;
+            const styleAttr = String(node.getAttribute('style') || '').toLowerCase();
+            if (styleAttr.includes('font-weight: bold')) return true;
+            if (styleAttr.includes('font-weight: 700') || styleAttr.includes('font-weight: 600')) return true;
+            if (String(node.className || '').includes('r-cqee49')) return true;
+            const nodeView = selectorGetWindow(node);
+            const nodeComputed = nodeView.getComputedStyle(node);
+            const fontWeight = parseInt(nodeComputed.fontWeight, 10);
+            return Number.isFinite(fontWeight) && fontWeight >= 600;
+        });
+    }
+
+    function reviewPanelNotesTabLooksActive(notesTab) {
+        return reviewPanelTabLooksActive(notesTab);
+    }
+
+    function reviewPanelSetDebugStatus(message) {
+        if (typeof window.__emrSetStatus === 'function') {
+            window.__emrSetStatus(message || '');
+        }
+        try {
+            if (window.__emr_selector_debug) {
+                window.__emr_selector_debug({
+                    event: 'review_debug',
+                    details: String(message || ''),
+                }).catch(() => {});
+            }
+        } catch (e) {}
+    }
+
+    function reviewPanelBuildDebugSummary(layout, notes, middle) {
+        const parts = [
+            `tab=${layout && layout.notesTab ? '1' : '0'}`,
+            `active=${layout && layout.notesTabActive ? '1' : '0'}`,
+            `roots=${layout && Array.isArray(layout.notesRoots) ? layout.notesRoots.length : 0}`,
+            `items=${notes && Number.isFinite(notes.itemCount) ? notes.itemCount : 0}`,
+            `text=${notes && notes.text ? '1' : '0'}`,
+            `pending=${reviewPanelNotesAutoloadPending ? '1' : '0'}`,
+            `restore=${reviewPanelNotesRestoreTabKey || '-'}`,
+        ];
+        if (middle && Number.isFinite(middle.itemCount)) {
+            parts.push(`mid=${middle.itemCount}`);
+        }
+        return parts.join(' ');
+    }
+
+    function reviewPanelTriggerClick(node) {
+        if (!selectorIsElementNode(node)) return false;
+        try {
+            node.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+        } catch (e) {}
+        const eventInit = { bubbles: true, cancelable: true, composed: true, view: window };
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+            try {
+                node.dispatchEvent(new MouseEvent(type, eventInit));
+            } catch (e) {}
+        }
+        try {
+            node.click();
+        } catch (e) {}
+        return true;
+    }
+
+    function reviewPanelFindConversationTab(labelText) {
+        const expected = textOverlayNormalizeText(labelText || '').toLowerCase();
+        if (!expected) return null;
+
+        if (expected === 'notes') {
+            const notesByTestId = document.querySelector('[data-testid="tab-notes"]');
+            if (selectorIsElementNode(notesByTestId)) return notesByTestId;
+        }
+        if (expected === 'messages') {
+            const messagesByTestId = document.querySelector('[data-testid="tab-messages"]');
+            if (selectorIsElementNode(messagesByTestId)) return messagesByTestId;
+        }
+
+        const docs = selectorCollectDocuments(false);
+        for (const doc of docs) {
+            if (!doc || !doc.body) continue;
+            let candidates = [];
+            try {
+                candidates = Array.from(doc.querySelectorAll('[role="tab"], div[dir="auto"]'));
+            } catch (e) {
+                candidates = [];
+            }
+            for (const candidate of candidates) {
+                if (!selectorIsElementNode(candidate)) continue;
+                const text = textOverlayNormalizeText(candidate.innerText || candidate.textContent || '').toLowerCase();
+                if (text !== expected) continue;
+                const tabNode = candidate.matches('div[dir="auto"]') ? (candidate.parentElement || candidate) : candidate;
+                if (!selectorIsElementNode(tabNode)) continue;
+                if (overlay && overlay.contains(tabNode)) continue;
+                if (!selectorIsVisible(tabNode)) continue;
+                return tabNode;
+            }
+        }
+        return null;
+    }
+
+    function reviewPanelGetActiveConversationTabKey() {
+        const notesTab = reviewPanelFindConversationTab('Notes');
+        if (reviewPanelTabLooksActive(notesTab)) return 'notes';
+        const messagesTab = reviewPanelFindConversationTab('Messages');
+        if (reviewPanelTabLooksActive(messagesTab)) return 'messages';
+        return '';
+    }
+
+    function reviewPanelRequestNotesAutoload(layout) {
+        if (!layout || !selectorIsElementNode(layout.notesTab) || reviewPanelNotesAutoloadPending) return false;
+        const activeTabKey = reviewPanelGetActiveConversationTabKey();
+        reviewPanelNotesRestoreTabKey = activeTabKey && activeTabKey !== 'notes' ? activeTabKey : '';
+        reviewPanelNotesAutoloadPending = true;
+        reviewPanelSetDebugStatus(`Review debug: click Notes (restore=${reviewPanelNotesRestoreTabKey || '-'})`);
+        reviewPanelTriggerClick(layout.notesTab);
+        window.setTimeout(() => reviewPanelScheduleRefresh(), 140);
+        return true;
+    }
+
+    function reviewPanelRestoreConversationTabIfNeeded() {
+        if (!reviewPanelNotesAutoloadPending) return;
+        const restoreTabKey = reviewPanelNotesRestoreTabKey;
+        reviewPanelNotesAutoloadPending = false;
+        reviewPanelNotesRestoreTabKey = '';
+        if (!restoreTabKey || restoreTabKey === 'notes') return;
+        const restoreTab = reviewPanelFindConversationTab(restoreTabKey === 'messages' ? 'Messages' : 'Notes');
+        if (!selectorIsElementNode(restoreTab)) return;
+        reviewPanelSetDebugStatus(`Review debug: restore ${restoreTabKey}`);
+        reviewPanelTriggerClick(restoreTab);
+        window.setTimeout(() => reviewPanelScheduleRefresh(), 140);
+    }
+
+    function reviewPanelResolveMiddleRoots(docs) {
+        const roots = [];
+        const seen = new Set();
+
+        function pushRoot(root) {
+            if (!selectorIsElementNode(root)) return;
+            if (seen.has(root)) return;
+            seen.add(root);
+            roots.push(root);
+        }
+
+        for (const doc of docs) {
+            if (!doc || !doc.body) continue;
+            let anchors = [];
+            try {
+                anchors = Array.from(doc.querySelectorAll('[data-testid="Intake Form"], [data-testid="Check-In"], [data-testid="proposedTreatmentPlan"], [data-testid="treatmentPlan"]'));
+            } catch (e) {
+                anchors = [];
+            }
+            for (const anchor of anchors) {
+                const root = anchor.closest('div.bg-white.py-6')
+                    || anchor.closest('[data-testid="Check-In"]')
+                    || anchor.closest('[data-testid="proposedTreatmentPlan"]')
+                    || anchor.parentElement;
+                pushRoot(root);
+            }
+
+            if (!roots.length) {
+                let candidates = [];
+                try {
+                    candidates = Array.from(doc.querySelectorAll('div.bg-white.py-6, [data-testid="Intake Form"], [data-testid="Check-In"], [data-testid="proposedTreatmentPlan"], [data-testid="treatmentPlan"]'));
+                } catch (e) {
+                    candidates = [];
+                }
+                for (const candidate of candidates) {
+                    if (!selectorIsElementNode(candidate) || !selectorIsVisible(candidate)) continue;
+                    const text = textOverlayNormalizeText(candidate.innerText || candidate.textContent || '');
+                    if (!text) continue;
+                    if (!/intake forms?|check-?in|treatment plan/i.test(text)) continue;
+                    pushRoot(candidate);
+                }
+            }
+        }
+        return roots;
+    }
+
+    function reviewPanelResolveNotesRoots(docs) {
+        const roots = [];
+        const seen = new Set();
+
+        function pushRoot(root) {
+            if (!selectorIsElementNode(root)) return;
+            if (seen.has(root)) return;
+            seen.add(root);
+            roots.push(root);
+        }
+
+        for (const doc of docs) {
+            if (!doc || !doc.body) continue;
+            let root = null;
+            try {
+                root = doc.querySelector(REVIEW_PANEL_NOTES_ROOT_SELECTOR);
+            } catch (e) {
+                root = null;
+            }
+            pushRoot(root);
+
+            if (!selectorIsElementNode(root)) {
+                let noteAnchors = [];
+                try {
+                    noteAnchors = Array.from(doc.querySelectorAll('[data-testid^="note-content-"], [data-testid^="note-item-"]'));
+                } catch (e) {
+                    noteAnchors = [];
+                }
+                for (const anchor of noteAnchors) {
+                    if (!selectorIsElementNode(anchor)) continue;
+                    const candidate = anchor.closest('[data-testid="tab-notes"]')
+                        || anchor.closest('[data-testid^="note-item-"]')
+                        || anchor.closest('[data-testid^="note-content-"]')
+                        || anchor.parentElement;
+                    pushRoot(candidate);
+                }
+            }
+        }
+        return roots;
+    }
+
+    function reviewPanelGetLayout(docs = null) {
+        const resolvedDocs = docs || selectorCollectDocuments(false);
+        const bar = document.querySelector('#emr-assist-overlay .emr-bar');
+        const barRect = bar ? bar.getBoundingClientRect() : { bottom: 50 };
+        const middleRoots = reviewPanelResolveMiddleRoots(resolvedDocs);
+        const notesRoots = reviewPanelResolveNotesRoots(resolvedDocs);
+        const middleAnchor = middleRoots[0] || document.querySelector('[data-testid="proposedTreatmentPlan"]') || document.querySelector('[data-testid="treatmentPlan"]');
+        const notesTab = reviewPanelFindConversationTab('Notes') || document.querySelector('[data-testid="tab-notes"]');
+        const notesAnchor = notesRoots[0] || notesTab;
+        const middleLeft = middleAnchor ? Math.max(12, Math.round(middleAnchor.getBoundingClientRect().left - 12)) : Math.round(window.innerWidth * 0.5);
+        const rightLeft = notesAnchor ? Math.max(middleLeft + 80, Math.round(notesAnchor.getBoundingClientRect().left - 10)) : Math.round(window.innerWidth * 0.74);
+        const panelTop = Math.max(barRect.bottom + 8, 52);
+        const panelHeight = Math.max(220, Math.round((window.innerHeight - panelTop - 12) * 0.34));
+        return {
+            panelLeft: Math.min(middleLeft, Math.max(12, window.innerWidth - 460)),
+            panelTop,
+            panelHeight,
+            middleRegion: {
+                left: middleLeft,
+                right: Math.max(middleLeft + 80, rightLeft - 10),
+                top: panelTop,
+                bottom: window.innerHeight - 8,
+            },
+            notesRegion: {
+                left: rightLeft,
+                right: window.innerWidth - 8,
+                top: notesAnchor ? Math.max(panelTop, Math.round(notesAnchor.getBoundingClientRect().top)) : panelTop,
+                bottom: window.innerHeight - 8,
+            },
+            middleRoots,
+            notesRoots,
+            notesTab,
+            notesTabActive: reviewPanelNotesTabLooksActive(notesTab),
+        };
+    }
+
+    function reviewPanelCollectRootText(roots, options = {}) {
+        const entries = [];
+        const seen = new Set();
+        const excludeSelectors = Array.isArray(options.excludeSelectors) ? options.excludeSelectors : [];
+        const includeButtonLikeText = !!options.includeButtonLikeText;
+        let textNodeCount = 0;
+
+        for (const root of roots) {
+            if (!selectorIsElementNode(root) || entries.length >= REVIEW_PANEL_MAX_ITEMS) continue;
+            const doc = root.ownerDocument;
+            const nodeFilter = doc && doc.defaultView && doc.defaultView.NodeFilter
+                ? doc.defaultView.NodeFilter
+                : NodeFilter;
+            let walker = null;
+            try {
+                walker = doc.createTreeWalker(
+                    root,
+                    nodeFilter.SHOW_TEXT,
+                    {
+                        acceptNode(node) {
+                            const text = textOverlayNormalizeText(node && node.textContent);
+                            if (!text) return nodeFilter.FILTER_REJECT;
+                            const parent = node.parentElement;
+                            if (!debugGeometryEligibleTextParent(parent)) return nodeFilter.FILTER_REJECT;
+                            if (textOverlayContentEditableHost(parent)) return nodeFilter.FILTER_REJECT;
+                            if (!includeButtonLikeText && textReviewIsButtonLike(parent)) return nodeFilter.FILTER_REJECT;
+                            if (excludeSelectors.some((selector) => typeof parent.closest === 'function' && parent.closest(selector))) {
+                                return nodeFilter.FILTER_REJECT;
+                            }
+                            return nodeFilter.FILTER_ACCEPT;
+                        },
+                    }
+                );
+            } catch (e) {
+                continue;
+            }
+
+            let textNode = null;
+            while ((textNode = walker.nextNode()) && entries.length < REVIEW_PANEL_MAX_ITEMS) {
+                const text = textOverlayNormalizeText(textNode.textContent);
+                if (!text) continue;
+                textNodeCount += 1;
+                const parent = textNode.parentElement;
+                let range = null;
+                try {
+                    range = doc.createRange();
+                    range.selectNodeContents(textNode);
+                    const translated = debugGeometryTranslateRect(doc, range.getBoundingClientRect());
+                    if (!reviewPanelHasLayoutRect(translated)) continue;
+                    textReviewPushEntry(entries, seen, {
+                        top: translated.top,
+                        left: translated.left,
+                        text,
+                    });
+                } catch (e) {
+                    continue;
+                } finally {
+                    if (range) {
+                        try {
+                            range.detach();
+                        } catch (e) {}
+                    }
+                }
+            }
+
+            let controls = [];
+            try {
+                controls = Array.from(root.querySelectorAll(TEXT_OVERLAY_CONTROL_SELECTOR));
+            } catch (e) {
+                continue;
+            }
+            for (const el of controls) {
+                if (!selectorIsElementNode(el)) continue;
+                if (!selectorIsVisible(el)) continue;
+                if (!includeButtonLikeText && textReviewIsButtonLike(el)) continue;
+                if (excludeSelectors.some((selector) => typeof el.closest === 'function' && el.closest(selector))) continue;
+                const text = textOverlayExtractControlText(el);
+                if (!text) continue;
+                const translated = debugGeometryTranslateRect(doc, el.getBoundingClientRect());
+                if (!reviewPanelHasLayoutRect(translated)) continue;
+                textReviewPushEntry(entries, seen, {
+                    top: translated.top,
+                    left: translated.left,
+                    text,
+                });
+                if (entries.length >= REVIEW_PANEL_MAX_ITEMS) break;
+            }
+        }
+
+        return {
+            text: textReviewBuildText(entries),
+            itemCount: entries.length,
+            textNodeCount,
+        };
+    }
+
+    function reviewPanelCollectTextEntriesWithin(root, options = {}) {
+        const entries = [];
+        const seen = new Set();
+        const includeButtonLikeText = !!options.includeButtonLikeText;
+        const excludeSelectors = Array.isArray(options.excludeSelectors) ? options.excludeSelectors : [];
+        if (!selectorIsElementNode(root)) return entries;
+
+        const doc = root.ownerDocument;
+        const nodeFilter = doc && doc.defaultView && doc.defaultView.NodeFilter
+            ? doc.defaultView.NodeFilter
+            : NodeFilter;
+        let walker = null;
+        try {
+            walker = doc.createTreeWalker(
+                root,
+                nodeFilter.SHOW_TEXT,
+                {
+                    acceptNode(node) {
+                        const text = textOverlayNormalizeText(node && node.textContent);
+                        if (!text) return nodeFilter.FILTER_REJECT;
+                        const parent = node.parentElement;
+                        if (!reviewPanelEligibleTextParent(parent)) return nodeFilter.FILTER_REJECT;
+                        if (textOverlayContentEditableHost(parent)) return nodeFilter.FILTER_REJECT;
+                        if (!includeButtonLikeText && textReviewIsButtonLike(parent)) return nodeFilter.FILTER_REJECT;
+                        if (excludeSelectors.some((selector) => typeof parent.closest === 'function' && parent.closest(selector))) {
+                            return nodeFilter.FILTER_REJECT;
+                        }
+                        return nodeFilter.FILTER_ACCEPT;
+                    },
+                }
+            );
+        } catch (e) {
+            walker = null;
+        }
+
+        if (walker) {
+            let textNode = null;
+            while ((textNode = walker.nextNode()) && entries.length < REVIEW_PANEL_MAX_ITEMS) {
+                const text = textOverlayNormalizeText(textNode.textContent);
+                if (!text) continue;
+                let range = null;
+                try {
+                    range = doc.createRange();
+                    range.selectNodeContents(textNode);
+                    const translated = debugGeometryTranslateRect(doc, range.getBoundingClientRect());
+                    if (!reviewPanelHasLayoutRect(translated)) continue;
+                    textReviewPushEntry(entries, seen, {
+                        top: translated.top,
+                        left: translated.left,
+                        text,
+                    });
+                } catch (e) {
+                    continue;
+                } finally {
+                    if (range) {
+                        try {
+                            range.detach();
+                        } catch (e) {}
+                    }
+                }
+            }
+        }
+
+        let controls = [];
+        try {
+            controls = Array.from(root.querySelectorAll(TEXT_OVERLAY_CONTROL_SELECTOR));
+        } catch (e) {
+            controls = [];
+        }
+        for (const el of controls) {
+            if (!selectorIsElementNode(el)) continue;
+            if (!includeButtonLikeText && textReviewIsButtonLike(el)) continue;
+            if (excludeSelectors.some((selector) => typeof el.closest === 'function' && el.closest(selector))) continue;
+            const text = textOverlayExtractControlText(el);
+            if (!text) continue;
+            const translated = debugGeometryTranslateRect(doc, el.getBoundingClientRect());
+            if (!reviewPanelHasLayoutRect(translated)) continue;
+            textReviewPushEntry(entries, seen, {
+                top: translated.top,
+                left: translated.left,
+                text,
+            });
+            if (entries.length >= REVIEW_PANEL_MAX_ITEMS) break;
+        }
+
+        entries.sort((a, b) => (a.top - b.top) || (a.left - b.left));
+        return entries;
+    }
+
+    function reviewPanelExtractTimestampFromRoot(root) {
+        const entries = reviewPanelCollectTextEntriesWithin(root, {
+            includeButtonLikeText: true,
+        });
+        const timestampEntries = entries.filter((entry) => REVIEW_PANEL_NOTE_TIMESTAMP_RE.test(entry.text));
+        return timestampEntries.length ? timestampEntries[0].text : '';
+    }
+
+    function reviewPanelCollectMiddleText(roots) {
+        const sections = [];
+        const seenSections = new Set();
+        let itemCount = 0;
+
+        function pushSection(lines) {
+            const cleaned = lines.map((line) => textOverlayNormalizeText(line)).filter(Boolean);
+            if (!cleaned.length) return;
+            const key = cleaned.join('\n').toLowerCase();
+            if (seenSections.has(key)) return;
+            seenSections.add(key);
+            sections.push(cleaned.join('\n'));
+            itemCount += 1;
+        }
+
+        for (const root of roots) {
+            if (!selectorIsElementNode(root)) continue;
+
+            const label = textOverlayNormalizeText(root.getAttribute('data-testid') || '');
+            const timestamp = reviewPanelExtractTimestampFromRoot(root);
+            if (label || timestamp) {
+                pushSection([label, timestamp]);
+            }
+
+            let rows = [];
+            try {
+                rows = Array.from(root.querySelectorAll('div.flex.flex-row'));
+            } catch (e) {
+                rows = [];
+            }
+
+            for (const row of rows) {
+                if (!selectorIsElementNode(row)) continue;
+                const rowRect = debugGeometryTranslateRect(row.ownerDocument, row.getBoundingClientRect());
+                if (!reviewPanelHasLayoutRect(rowRect)) continue;
+
+                const rowEntries = reviewPanelCollectTextEntriesWithin(row, {
+                    includeButtonLikeText: true,
+                    excludeSelectors: ['[data-testid="tab-messages"]', '[data-testid="tab-notes"]'],
+                });
+                if (!rowEntries.length) continue;
+
+                const splitX = rowRect.left + rowRect.width * 0.52;
+                const leftEntries = rowEntries.filter((entry) => (entry.left < splitX));
+                const rightEntries = rowEntries.filter((entry) => (entry.left >= splitX));
+
+                const question = textReviewBuildText(leftEntries)
+                    .replace(/^(intake form|check-?in)\b/i, '')
+                    .trim();
+                const answer = textReviewBuildText(rightEntries)
+                    .replace(/^(intake form|check-?in)\b/i, '')
+                    .trim();
+
+                if (!question && !answer) continue;
+                if (!question && REVIEW_PANEL_NOTE_TIMESTAMP_RE.test(answer)) continue;
+                if (question && !/[?a-z0-9]/i.test(question)) continue;
+
+                const lines = [];
+                if (question) lines.push(question);
+                if (answer && answer.toLowerCase() !== question.toLowerCase()) lines.push(answer);
+                pushSection(lines);
+                if (itemCount >= REVIEW_PANEL_MAX_ITEMS) break;
+            }
+
+            if (itemCount >= REVIEW_PANEL_MAX_ITEMS) break;
+        }
+
+        return {
+            text: sections.join('\n\n'),
+            itemCount,
+            textNodeCount: itemCount,
+        };
+    }
+
+    function reviewPanelExtractNoteTimestamp(noteItemRoot) {
+        if (!selectorIsElementNode(noteItemRoot)) return '';
+        const doc = noteItemRoot.ownerDocument;
+        const nodeFilter = doc && doc.defaultView && doc.defaultView.NodeFilter
+            ? doc.defaultView.NodeFilter
+            : NodeFilter;
+        let walker = null;
+        const matches = [];
+
+        try {
+            walker = doc.createTreeWalker(
+                noteItemRoot,
+                nodeFilter.SHOW_TEXT,
+                {
+                    acceptNode(node) {
+                        const text = textOverlayNormalizeText(node && node.textContent);
+                        if (!text) return nodeFilter.FILTER_REJECT;
+                        const parent = node.parentElement;
+                        if (!reviewPanelEligibleTextParent(parent)) return nodeFilter.FILTER_REJECT;
+                        if (textReviewIsButtonLike(parent)) return nodeFilter.FILTER_REJECT;
+                        return nodeFilter.FILTER_ACCEPT;
+                    },
+                }
+            );
+        } catch (e) {
+            return '';
+        }
+
+        let textNode = null;
+        while ((textNode = walker.nextNode())) {
+            const text = textOverlayNormalizeText(textNode.textContent);
+            if (!text) continue;
+            const matched = text.match(REVIEW_PANEL_NOTE_TIMESTAMP_RE);
+            if (!matched) continue;
+            let range = null;
+            try {
+                range = doc.createRange();
+                range.selectNodeContents(textNode);
+                const translated = debugGeometryTranslateRect(doc, range.getBoundingClientRect());
+                if (!reviewPanelHasLayoutRect(translated)) continue;
+                matches.push({
+                    top: translated.top,
+                    left: translated.left,
+                    text: textOverlayNormalizeText(matched[0]),
+                });
+            } catch (e) {
+                continue;
+            } finally {
+                if (range) {
+                    try {
+                        range.detach();
+                    } catch (e) {}
+                }
+            }
+        }
+
+        matches.sort((a, b) => (a.top - b.top) || (a.left - b.left));
+        return matches.length ? matches[0].text : '';
+    }
+
+    function reviewPanelCollectNotes(roots) {
+        const noteEntries = [];
+        const byKey = new Map();
+
+        function getEntry(key) {
+            if (!byKey.has(key)) {
+                const entry = {
+                    key,
+                    top: Number.POSITIVE_INFINITY,
+                    timestamp: '',
+                    content: '',
+                };
+                byKey.set(key, entry);
+                noteEntries.push(entry);
+            }
+            return byKey.get(key);
+        }
+
+        function resolveKeyFromTestId(value, fallback) {
+            const text = String(value || '');
+            const match = text.match(/(\d+)$/);
+            return match ? match[1] : fallback;
+        }
+
+        function collectMatchingNodes(root, selector, prefix) {
+            const nodes = [];
+            if (!selectorIsElementNode(root)) return nodes;
+            const dataTestId = String(root.getAttribute('data-testid') || '');
+            if (dataTestId.startsWith(prefix)) {
+                nodes.push(root);
+            }
+            try {
+                nodes.push(...Array.from(root.querySelectorAll(selector)));
+            } catch (e) {}
+            return nodes;
+        }
+
+        let fallbackIndex = 0;
+        for (const root of roots) {
+            if (!selectorIsElementNode(root)) continue;
+
+            const noteItems = collectMatchingNodes(root, '[data-testid^="note-item-"]', 'note-item-');
+            for (const noteItem of noteItems) {
+                if (!selectorIsElementNode(noteItem)) continue;
+                const key = resolveKeyFromTestId(noteItem.getAttribute('data-testid'), `item-${fallbackIndex++}`);
+                const entry = getEntry(key);
+                const rect = debugGeometryTranslateRect(noteItem.ownerDocument, noteItem.getBoundingClientRect());
+                if (reviewPanelHasLayoutRect(rect)) {
+                    entry.top = Math.min(entry.top, rect.top);
+                }
+                const timestamp = reviewPanelExtractNoteTimestamp(noteItem);
+                if (timestamp) {
+                    entry.timestamp = timestamp;
+                }
+            }
+
+            const noteContents = collectMatchingNodes(root, '[data-testid^="note-content-"]', 'note-content-');
+            for (const noteContent of noteContents) {
+                if (!selectorIsElementNode(noteContent)) continue;
+                const text = textOverlayNormalizeText(noteContent.innerText || noteContent.textContent || '');
+                if (!text) continue;
+                const key = resolveKeyFromTestId(noteContent.getAttribute('data-testid'), `content-${fallbackIndex++}`);
+                const entry = getEntry(key);
+                const rect = debugGeometryTranslateRect(noteContent.ownerDocument, noteContent.getBoundingClientRect());
+                if (reviewPanelHasLayoutRect(rect)) {
+                    entry.top = Math.min(entry.top, rect.top);
+                }
+                entry.content = text;
+            }
+        }
+
+        const lines = [];
+        const visibleEntries = noteEntries
+            .filter((entry) => entry.timestamp || entry.content)
+            .sort((a, b) => (a.top - b.top) || String(a.key).localeCompare(String(b.key), undefined, { numeric: true }));
+
+        for (const entry of visibleEntries) {
+            if (entry.timestamp) lines.push(entry.timestamp);
+            if (entry.content) lines.push(entry.content);
+            lines.push('');
+        }
+
+        while (lines.length && lines[lines.length - 1] === '') {
+            lines.pop();
+        }
+
+        return {
+            text: lines.join('\n'),
+            itemCount: visibleEntries.length,
+            textNodeCount: visibleEntries.length,
+        };
+    }
+
+    function textOverlayExtractControlText(el) {
+        if (!selectorIsElementNode(el)) return '';
+        const tag = (el.tagName || '').toLowerCase();
+
+        if (tag === 'input') {
+            const type = String(el.getAttribute('type') || 'text').toLowerCase();
+            if (TEXT_OVERLAY_IGNORED_INPUT_TYPES.has(type)) return '';
+            return textOverlayNormalizeText(el.value) || textOverlayNormalizeText(el.placeholder) || '';
+        }
+
+        if (tag === 'textarea') {
+            return textOverlayNormalizeText(el.value) || textOverlayNormalizeText(el.placeholder) || '';
+        }
+
+        if (tag === 'select') {
+            const selectedTexts = Array.from(el.selectedOptions || [])
+                .map((option) => textOverlayNormalizeText(option.innerText || option.textContent || option.label || option.value))
+                .filter(Boolean);
+            if (selectedTexts.length) return selectedTexts.join(' / ');
+            if (el.options && el.selectedIndex >= 0 && el.options[el.selectedIndex]) {
+                const option = el.options[el.selectedIndex];
+                return textOverlayNormalizeText(option.innerText || option.textContent || option.label || option.value);
+            }
+            return '';
+        }
+
+        if (el.isContentEditable) {
+            return textOverlayNormalizeText(el.innerText || el.textContent)
+                || textOverlayNormalizeText(el.getAttribute('placeholder'))
+                || textOverlayNormalizeText(el.getAttribute('aria-placeholder'))
+                || textOverlayNormalizeText(el.getAttribute('data-placeholder'))
+                || textOverlayNormalizeText(el.getAttribute('aria-label'))
+                || '';
+        }
+
+        return '';
+    }
+
+    function textOverlayCollectControlRects(docs, rects, seen, maxRects) {
+        for (const doc of docs) {
+            if (!doc || !doc.body || rects.length >= maxRects) continue;
+            let controls = [];
+            try {
+                controls = Array.from(doc.body.querySelectorAll(TEXT_OVERLAY_CONTROL_SELECTOR));
+            } catch (e) {
+                continue;
+            }
+            for (const el of controls) {
+                if (!selectorIsElementNode(el)) continue;
+                if (el === overlay || overlay.contains(el)) continue;
+                if (!selectorIsVisible(el)) continue;
+                if (!textOverlayExtractControlText(el)) continue;
+                const translated = debugGeometryTranslateRect(doc, el.getBoundingClientRect());
+                textOverlayPushUniqueRect(rects, seen, translated);
+                if (rects.length >= maxRects) break;
+            }
+        }
+    }
+
+    function textOverlayCollectControlItems(docs, items, seen, maxItems) {
+        for (const doc of docs) {
+            if (!doc || !doc.body || items.length >= maxItems) continue;
+            let controls = [];
+            try {
+                controls = Array.from(doc.body.querySelectorAll(TEXT_OVERLAY_CONTROL_SELECTOR));
+            } catch (e) {
+                continue;
+            }
+            for (const el of controls) {
+                if (!selectorIsElementNode(el)) continue;
+                if (el === overlay || overlay.contains(el)) continue;
+                if (!selectorIsVisible(el)) continue;
+                const text = textOverlayExtractControlText(el);
+                if (!text) continue;
+                const translated = debugGeometryTranslateRect(doc, el.getBoundingClientRect());
+                textOverlayPushUniqueItem(items, seen, textOverlayBuildItem(el, translated, text, 'control'));
+                if (items.length >= maxItems) break;
+            }
+        }
+    }
+
+    function textOverlayIterateVisibleTextNodes(docs, maxTextNodes, visitNode) {
+        let textNodeCount = 0;
+
+        outer: for (const doc of docs) {
+            if (!doc || !doc.body) continue;
+            const nodeFilter = doc.defaultView && doc.defaultView.NodeFilter
+                ? doc.defaultView.NodeFilter
+                : NodeFilter;
+            let walker = null;
+            try {
+                walker = doc.createTreeWalker(
+                    doc.body,
+                    nodeFilter.SHOW_TEXT,
+                    {
+                        acceptNode(node) {
+                            const text = textOverlayNormalizeText(node && node.textContent);
+                            if (!text) return nodeFilter.FILTER_REJECT;
+                            const parent = node.parentElement;
+                            if (!debugGeometryEligibleTextParent(parent)) return nodeFilter.FILTER_REJECT;
+                            if (textOverlayContentEditableHost(parent)) return nodeFilter.FILTER_REJECT;
+                            return nodeFilter.FILTER_ACCEPT;
+                        },
+                    }
+                );
+            } catch (e) {
+                continue;
+            }
+
+            let textNode = null;
+            while ((textNode = walker.nextNode()) && textNodeCount < maxTextNodes) {
+                const text = textOverlayNormalizeText(textNode.textContent);
+                if (!text) continue;
+                textNodeCount += 1;
+                if (visitNode({ doc, textNode, text, textNodeCount }) === false) {
+                    break outer;
+                }
+            }
+        }
+
+        return { textNodeCount };
+    }
+
+    function debugGeometryEnsureWatchers() {
+        const docs = selectorCollectDocuments(false);
+        if (debugGeometryDocsEqual(docs, debugGeometryBoundDocs)) {
+            return docs;
+        }
+
+        debugGeometryClearWatchers();
+        debugGeometryBoundDocs = docs;
+
+        for (const doc of docs) {
+            const scheduleRefresh = () => textOverlayScheduleRefresh();
+            try {
+                doc.addEventListener('scroll', scheduleRefresh, true);
+                debugGeometryCleanupFns.push(() => doc.removeEventListener('scroll', scheduleRefresh, true));
+            } catch (e) {}
+            try {
+                doc.addEventListener('input', scheduleRefresh, true);
+                debugGeometryCleanupFns.push(() => doc.removeEventListener('input', scheduleRefresh, true));
+            } catch (e) {}
+            try {
+                doc.addEventListener('change', scheduleRefresh, true);
+                debugGeometryCleanupFns.push(() => doc.removeEventListener('change', scheduleRefresh, true));
+            } catch (e) {}
+
+            const view = doc && doc.defaultView ? doc.defaultView : null;
+            if (view) {
+                try {
+                    view.addEventListener('resize', scheduleRefresh);
+                    debugGeometryCleanupFns.push(() => view.removeEventListener('resize', scheduleRefresh));
+                } catch (e) {}
+            }
+
+            if (doc && doc.body && typeof MutationObserver === 'function') {
+                try {
+                    const observer = new MutationObserver((mutations) => {
+                        const touchesPage = mutations.some((mutation) => !debugGeometryIsOverlayNode(mutation.target));
+                        if (touchesPage) {
+                            textOverlayScheduleRefresh();
+                        }
+                    });
+                    observer.observe(doc.body, {
+                        subtree: true,
+                        childList: true,
+                        characterData: true,
+                        attributes: true,
+                        attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
+                    });
+                    debugGeometryCleanupFns.push(() => observer.disconnect());
+                } catch (e) {}
+            }
+        }
+
+        return docs;
+    }
+
+    function debugGeometryCollectRects(docs) {
+        const rects = [];
+        const seen = new Set();
+        const stats = textOverlayIterateVisibleTextNodes(
+            docs,
+            DEBUG_GEOMETRY_MAX_TEXT_NODES,
+            ({ doc, textNode }) => {
+                let range = null;
+                try {
+                    range = doc.createRange();
+                    range.selectNodeContents(textNode);
+                    const clientRects = Array.from(range.getClientRects());
+                    for (const clientRect of clientRects) {
+                        const translated = debugGeometryTranslateRect(doc, clientRect);
+                        if (!debugGeometryIsUsefulRect(translated)) continue;
+                        const dedupeKey = [
+                            Math.round(translated.left),
+                            Math.round(translated.top),
+                            Math.round(translated.width),
+                            Math.round(translated.height),
+                        ].join('|');
+                        if (seen.has(dedupeKey)) continue;
+                        seen.add(dedupeKey);
+                        rects.push(translated);
+                        if (rects.length >= DEBUG_GEOMETRY_MAX_RECTS) break;
+                    }
+                } catch (e) {
+                    return true;
+                } finally {
+                    if (range) {
+                        try {
+                            range.detach();
+                        } catch (e) {}
+                    }
+                }
+                return rects.length < DEBUG_GEOMETRY_MAX_RECTS;
+            }
+        );
+        textOverlayCollectControlRects(docs, rects, seen, DEBUG_GEOMETRY_MAX_RECTS);
+
+        return {
+            rects,
+            rectCount: rects.length,
+            textNodeCount: stats.textNodeCount,
+        };
+    }
+
+    function debugGeometryRender() {
+        debugGeometryFrameToken = 0;
+        if (!debugGeometryLayer) return;
+        if (!debugGeometryEnabled) {
+            debugGeometryLayer.classList.remove('emr-debug-layer-visible');
+            debugGeometryLayer.replaceChildren();
+            return;
+        }
+
+        const docs = debugGeometryEnsureWatchers();
+        const stats = debugGeometryCollectRects(docs);
+        const fragment = document.createDocumentFragment();
+        for (const rect of stats.rects) {
+            const box = document.createElement('div');
+            box.className = 'emr-debug-box';
+            box.style.left = `${rect.left}px`;
+            box.style.top = `${rect.top}px`;
+            box.style.width = `${rect.width}px`;
+            box.style.height = `${rect.height}px`;
+            fragment.appendChild(box);
+        }
+        debugGeometryLayer.replaceChildren(fragment);
+        debugGeometryLayer.classList.add('emr-debug-layer-visible');
+        debugGeometryUpdateButton(stats);
+    }
+
+    function textMirrorCollectItems(docs) {
+        const items = [];
+        const seen = new Set();
+        const stats = textOverlayIterateVisibleTextNodes(
+            docs,
+            TEXT_MIRROR_MAX_TEXT_NODES,
+            ({ doc, textNode, text }) => {
+                if (items.length >= TEXT_MIRROR_MAX_ITEMS) return false;
+                const parent = textNode.parentElement;
+                let range = null;
+                try {
+                    range = doc.createRange();
+                    range.selectNodeContents(textNode);
+                    const translated = debugGeometryTranslateRect(doc, range.getBoundingClientRect());
+                    if (!debugGeometryIsUsefulRect(translated)) return true;
+                    textOverlayPushUniqueItem(items, seen, textOverlayBuildItem(parent, translated, text, 'text'));
+                } catch (e) {
+                    return true;
+                } finally {
+                    if (range) {
+                        try {
+                            range.detach();
+                        } catch (e) {}
+                    }
+                }
+                return items.length < TEXT_MIRROR_MAX_ITEMS;
+            }
+        );
+        textOverlayCollectControlItems(docs, items, seen, TEXT_MIRROR_MAX_ITEMS);
+
+        return {
+            items,
+            itemCount: items.length,
+            textNodeCount: stats.textNodeCount,
+        };
+    }
+
+    function debugGeometryScheduleRefresh() {
+        if (!debugGeometryEnabled) return;
+        if (debugGeometryFrameToken) return;
+        debugGeometryFrameToken = window.requestAnimationFrame(() => debugGeometryRender());
+    }
+
+    function debugGeometryTeardown() {
+        if (debugGeometryFrameToken) {
+            window.cancelAnimationFrame(debugGeometryFrameToken);
+            debugGeometryFrameToken = 0;
+        }
+        if (debugGeometryLayer) {
+            debugGeometryLayer.classList.remove('emr-debug-layer-visible');
+            debugGeometryLayer.replaceChildren();
+        }
+        textOverlayMaybeClearWatchers();
+    }
+
+    function debugGeometryApplyEnabledState(enabled) {
+        debugGeometryEnabled = !!enabled;
+        debugGeometryPersistPreference(debugGeometryEnabled);
+        if (!debugGeometryEnabled) {
+            debugGeometryTeardown();
+            debugGeometryUpdateButton();
+            return;
+        }
+        debugGeometryEnsureWatchers();
+        debugGeometryUpdateButton();
+        debugGeometryScheduleRefresh();
+    }
+
+    function textMirrorRender() {
+        textMirrorFrameToken = 0;
+        if (!textMirrorLayer) return;
+        if (!textMirrorEnabled) {
+            textMirrorLayer.classList.remove('emr-text-mirror-layer-visible');
+            textMirrorLayer.replaceChildren();
+            textMirrorRenderSelectionPanel();
+            textMirrorUpdateButton();
+            return;
+        }
+
+        const docs = debugGeometryEnsureWatchers();
+        const stats = textMirrorCollectItems(docs);
+        textMirrorSyncSelectionState(stats.items);
+        const fragment = document.createDocumentFragment();
+        for (const item of stats.items) {
+            const chip = document.createElement('div');
+            const selected = textMirrorSelectedIds.includes(item.sourceId);
+            chip.className = `emr-text-mirror-chip${selected ? ' emr-text-mirror-chip-selected' : ''}`;
+            chip.textContent = item.text;
+            const left = Math.max(2, Math.round(item.left));
+            const top = Math.max(2, Math.round(item.top));
+            const availableWidth = Math.max(72, window.innerWidth - left - 8);
+            chip.style.left = `${left}px`;
+            chip.style.top = `${top}px`;
+            chip.style.maxWidth = `${Math.min(availableWidth, Math.max(96, Math.round(item.width) + 28))}px`;
+            chip.title = [item.sourceId, item.selector || '', item.dataTestId ? `data-testid=${item.dataTestId}` : '']
+                .filter(Boolean)
+                .join('\n');
+            chip.addEventListener('mouseenter', () => selectorSetHoverHighlight(item.sourceElement));
+            chip.addEventListener('mouseleave', () => selectorClearHoverHighlight());
+            chip.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                textMirrorToggleSelection(item);
+            });
+            fragment.appendChild(chip);
+        }
+        textMirrorLayer.replaceChildren(fragment);
+        textMirrorLayer.classList.add('emr-text-mirror-layer-visible');
+        textMirrorRenderSelectionPanel();
+        textMirrorUpdateButton(stats);
+    }
+
+    function textMirrorScheduleRefresh() {
+        if (!textMirrorEnabled) return;
+        if (textMirrorFrameToken) return;
+        textMirrorFrameToken = window.requestAnimationFrame(() => textMirrorRender());
+    }
+
+    function textMirrorTeardown() {
+        if (textMirrorFrameToken) {
+            window.cancelAnimationFrame(textMirrorFrameToken);
+            textMirrorFrameToken = 0;
+        }
+        if (textMirrorLayer) {
+            textMirrorLayer.classList.remove('emr-text-mirror-layer-visible');
+            textMirrorLayer.replaceChildren();
+        }
+        selectorClearHoverHighlight();
+        textMirrorRenderSelectionPanel();
+        textOverlayMaybeClearWatchers();
+    }
+
+    function textMirrorApplyEnabledState(enabled) {
+        textMirrorEnabled = !!enabled;
+        textMirrorPersistPreference(textMirrorEnabled);
+        if (!textMirrorEnabled) {
+            textMirrorTeardown();
+            textMirrorUpdateButton();
+            return;
+        }
+        debugGeometryEnsureWatchers();
+        textMirrorUpdateButton();
+        textMirrorScheduleRefresh();
+    }
+
+    function reviewPanelSyncLayout(layout = null) {
+        if (!reviewPanel) return;
+        const resolvedLayout = layout || reviewPanelGetLayout();
+        reviewPanel.style.top = `${resolvedLayout.panelTop}px`;
+        reviewPanel.style.left = `${resolvedLayout.panelLeft}px`;
+        reviewPanel.style.height = reviewPanelMinimized ? '' : `${resolvedLayout.panelHeight}px`;
+    }
+
+    function reviewPanelRender() {
+        reviewPanelFrameToken = 0;
+        if (!reviewPanel || !reviewMiddleContent || !reviewNotesContent) return;
+        if (!reviewPanelEnabled) {
+            reviewPanel.classList.remove('emr-review-open');
+            reviewMiddleContent.textContent = '';
+            reviewNotesContent.textContent = '';
+            return;
+        }
+
+        const docs = debugGeometryEnsureWatchers();
+        const layout = reviewPanelGetLayout(docs);
+        reviewPanelSyncLayout(layout);
+        reviewPanel.classList.add('emr-review-open');
+        reviewPanel.classList.toggle('emr-review-minimized', reviewPanelMinimized);
+
+        const middle = reviewPanelCollectMiddleText(layout.middleRoots);
+        reviewMiddleContent.textContent = middle.text || 'No visible middle-panel text detected.';
+        reviewMiddleContent.classList.toggle('emr-review-empty', !middle.text);
+
+        if (!layout.notesTab) {
+            reviewNotesContent.textContent = 'Notes tab anchor not found on this page.';
+            reviewNotesContent.classList.add('emr-review-empty');
+            if (reviewSubtitle) reviewSubtitle.textContent = `Notes debug: ${reviewPanelBuildDebugSummary(layout, null, middle)}`;
+            reviewPanelSetDebugStatus('Review debug: Notes tab anchor not found');
+            return;
+        }
+
+        const notes = reviewPanelCollectNotes(layout.notesRoots);
+        if (notes.text) {
+            reviewPanelNotesSnapshot = notes;
+            reviewPanelSetDebugStatus(`Review debug: captured notes ${reviewPanelBuildDebugSummary(layout, notes, middle)}`);
+            reviewPanelRestoreConversationTabIfNeeded();
+        }
+        if (!notes.text && !layout.notesTabActive && reviewPanelRequestNotesAutoload(layout)) {
+            const cachedNotes = reviewPanelNotesSnapshot;
+            reviewNotesContent.textContent = cachedNotes && cachedNotes.text ? cachedNotes.text : 'Loading notes...';
+            reviewNotesContent.classList.toggle('emr-review-empty', !(cachedNotes && cachedNotes.text));
+            if (reviewSubtitle) {
+                reviewSubtitle.textContent = `Notes debug: ${reviewPanelBuildDebugSummary(layout, notes, middle)} branch=click-notes`;
+            }
+            return;
+        }
+        if (!notes.text && reviewPanelNotesAutoloadPending) {
+            const cachedNotes = reviewPanelNotesSnapshot;
+            reviewNotesContent.textContent = cachedNotes && cachedNotes.text ? cachedNotes.text : 'Loading notes...';
+            reviewNotesContent.classList.toggle('emr-review-empty', !(cachedNotes && cachedNotes.text));
+            if (reviewSubtitle) {
+                reviewSubtitle.textContent = `Notes debug: ${reviewPanelBuildDebugSummary(layout, notes, middle)} branch=pending`;
+            }
+            reviewPanelSetDebugStatus(`Review debug: waiting ${reviewPanelBuildDebugSummary(layout, notes, middle)}`);
+            return;
+        }
+        if (!notes.text && !layout.notesTabActive) {
+            const cachedNotes = reviewPanelNotesSnapshot;
+            if (cachedNotes && cachedNotes.text) {
+                reviewNotesContent.textContent = cachedNotes.text;
+                reviewNotesContent.classList.remove('emr-review-empty');
+                if (reviewSubtitle) {
+                    reviewSubtitle.textContent = `Notes debug: ${reviewPanelBuildDebugSummary(layout, notes, middle)} branch=cached`;
+                }
+                reviewPanelSetDebugStatus(`Review debug: cached ${reviewPanelBuildDebugSummary(layout, notes, middle)}`);
+                return;
+            }
+            reviewNotesContent.textContent = 'Open the Notes tab to load note text into this review panel.';
+            reviewNotesContent.classList.add('emr-review-empty');
+            if (reviewSubtitle) reviewSubtitle.textContent = `Notes debug: ${reviewPanelBuildDebugSummary(layout, notes, middle)} branch=inactive-no-text`;
+            reviewPanelSetDebugStatus(`Review debug: inactive-no-text ${reviewPanelBuildDebugSummary(layout, notes, middle)}`);
+            return;
+        }
+        reviewNotesContent.textContent = notes.text || 'No visible note text detected in the right panel.';
+        reviewNotesContent.classList.toggle('emr-review-empty', !notes.text);
+        if (reviewSubtitle) {
+            reviewSubtitle.textContent = `Notes debug: ${reviewPanelBuildDebugSummary(layout, notes, middle)} branch=done`;
+        }
+        reviewPanelSetDebugStatus(`Review debug: done ${reviewPanelBuildDebugSummary(layout, notes, middle)}`);
+    }
+
+    function reviewPanelScheduleRefresh() {
+        if (!reviewPanelEnabled) return;
+        if (reviewPanelFrameToken) return;
+        reviewPanelFrameToken = window.requestAnimationFrame(() => reviewPanelRender());
+    }
+
+    function reviewPanelTeardown() {
+        if (reviewPanelFrameToken) {
+            window.cancelAnimationFrame(reviewPanelFrameToken);
+            reviewPanelFrameToken = 0;
+        }
+        if (reviewPanel) {
+            reviewPanel.classList.remove('emr-review-open');
+            reviewPanel.classList.remove('emr-review-minimized');
+        }
+        if (reviewMiddleContent) reviewMiddleContent.textContent = '';
+        if (reviewNotesContent) reviewNotesContent.textContent = '';
+        reviewPanelNotesAutoloadPending = false;
+        reviewPanelNotesRestoreTabKey = '';
+        reviewPanelNotesSnapshot = null;
+        textOverlayMaybeClearWatchers();
+    }
+
+    function reviewPanelSetMinimized(minimized) {
+        reviewPanelMinimized = false;
+        reviewPanelPersistMinimized(false);
+        if (reviewPanel) {
+            reviewPanel.classList.remove('emr-review-minimized');
+        }
+        if (reviewPanelEnabled) {
+            reviewPanelScheduleRefresh();
+        }
+    }
+
+    function reviewPanelApplyEnabledState(enabled) {
+        reviewPanelEnabled = !!enabled;
+        reviewPanelPersistPreference(reviewPanelEnabled);
+        if (!reviewPanelEnabled) {
+            reviewPanelTeardown();
+            reviewPanelUpdateButton();
+            return;
+        }
+        reviewPanelSetMinimized(false);
+        debugGeometryEnsureWatchers();
+        reviewPanelUpdateButton();
+        reviewPanelScheduleRefresh();
+    }
+
+    if (debugGeometryBtn) {
+        debugGeometryBtn.addEventListener('click', () => {
+            debugGeometryApplyEnabledState(!debugGeometryEnabled);
+        });
+    }
+
+    if (textMirrorBtn) {
+        textMirrorBtn.addEventListener('click', () => {
+            textMirrorApplyEnabledState(!textMirrorEnabled);
+        });
+    }
+
+    if (textSelectionCopyBtn) {
+        textSelectionCopyBtn.addEventListener('click', () => {
+            textMirrorCopySelection();
+        });
+    }
+
+    if (textSelectionClearBtn) {
+        textSelectionClearBtn.addEventListener('click', () => {
+            textMirrorClearSelection();
+        });
+    }
+
+    if (reviewBtn) {
+        reviewBtn.addEventListener('click', () => {
+            reviewPanelApplyEnabledState(!reviewPanelEnabled);
+        });
+    }
+
+    if (reviewPanel) {
+        reviewPanel.addEventListener('wheel', (event) => {
+            event.stopPropagation();
+        }, { passive: true });
+    }
+
+    if (reviewMiddleContent) {
+        reviewMiddleContent.addEventListener('wheel', (event) => {
+            event.stopPropagation();
+        }, { passive: true });
+    }
+
+    if (reviewNotesContent) {
+        reviewNotesContent.addEventListener('wheel', (event) => {
+            event.stopPropagation();
+        }, { passive: true });
+    }
+
+    if (miniReviewBtn) {
+        miniReviewBtn.addEventListener('click', () => {
+            reviewPanelApplyEnabledState(!reviewPanelEnabled);
+        });
+    }
+
+    window.__emrOverlayCleanup = function() {
+        debugGeometryTeardown();
+        textMirrorTeardown();
+        textMirrorClearSelection(true);
+        reviewPanelTeardown();
+        debugGeometryClearWatchers();
+    };
+
+    debugGeometryApplyEnabledState(debugGeometryLoadPreference());
+    textMirrorApplyEnabledState(textMirrorLoadPreference());
+    reviewPanelSetMinimized(false);
+    reviewPanelApplyEnabledState(reviewPanelLoadPreference());
+
     function formatPayrollNumber(value, decimals = 2) {
         const numeric = Number(value);
         return Number.isFinite(numeric) ? numeric.toFixed(decimals) : '-';
+    }
+
+    function setDashboardPayrollPanelOpen(open) {
+        dashboardPayrollPanelOpen = !!open;
+        if (dashboardPayrollPanel) {
+            dashboardPayrollPanel.hidden = !dashboardPayrollPanelOpen;
+            dashboardPayrollPanel.classList.toggle('emr-dashboard-payroll-open', dashboardPayrollPanelOpen);
+        }
+        if (dashboardPayrollBtn) {
+            dashboardPayrollBtn.classList.toggle('emr-btn-active', dashboardPayrollPanelOpen);
+            dashboardPayrollBtn.setAttribute('aria-pressed', dashboardPayrollPanelOpen ? 'true' : 'false');
+        }
     }
 
     function setDashboardPayrollVisibility(visible) {
@@ -2400,10 +4840,9 @@ OVERLAY_JS = r"""
         if (dashboardPayrollDivider) dashboardPayrollDivider.hidden = !dashboardPayrollVisible;
         if (dashboardPayrollSection) dashboardPayrollSection.hidden = !dashboardPayrollVisible;
         if (!dashboardPayrollVisible && dashboardPayrollPanel) {
-            dashboardPayrollPanel.hidden = true;
-            dashboardPayrollPanel.classList.remove('emr-dashboard-payroll-open');
+            setDashboardPayrollPanelOpen(false);
         }
-        if (dashboardPayrollVisible && lastDashboardPayroll) {
+        if (dashboardPayrollVisible && dashboardPayrollPanelOpen && lastDashboardPayroll) {
             window.__emrUpdateDashboardPayroll(lastDashboardPayroll);
         }
     }
@@ -2416,7 +4855,7 @@ OVERLAY_JS = r"""
             return;
         }
 
-        if (!dashboardPayrollPanel || !dashboardPayrollVisible || !lastDashboardPayroll) {
+        if (!dashboardPayrollPanel || !dashboardPayrollVisible || !dashboardPayrollPanelOpen || !lastDashboardPayroll) {
             return;
         }
 
@@ -2492,8 +4931,7 @@ OVERLAY_JS = r"""
         });
         actions.appendChild(saveBtn);
         dashboardPayrollPanel.appendChild(actions);
-        dashboardPayrollPanel.hidden = false;
-        dashboardPayrollPanel.classList.add('emr-dashboard-payroll-open');
+        setDashboardPayrollPanelOpen(true);
     };
 
     // â”€â”€ Minimize / Restore â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2681,9 +5119,6 @@ OVERLAY_JS = r"""
     let selectorTrialState = {};
     let selectorPreviewCache = {};
     let selectorPreviewInflight = {};
-    let selectorHoverElement = null;
-    let selectorHoverOutline = '';
-    let selectorHoverOutlineOffset = '';
     let selectorActiveView = 'variables';
     let selectorActiveTemplateName = '';
     let selectorPendingTemplateName = '';
@@ -2785,7 +5220,7 @@ OVERLAY_JS = r"""
         return matches;
     }
 
-    function selectorCollectDocuments() {
+    function selectorCollectDocuments(emitDebug = true) {
         const docs = [];
         const seen = new Set();
 
@@ -2812,7 +5247,9 @@ OVERLAY_JS = r"""
         }
 
         visit(document);
-        selectorDebug('documents_collected', { count: docs.length });
+        if (emitDebug) {
+            selectorDebug('documents_collected', { count: docs.length });
+        }
         return docs;
     }
 
@@ -4960,9 +7397,8 @@ OVERLAY_JS = r"""
     }
 
     function overlayRunDashboardPayroll(forceRefresh = false) {
-        if (!forceRefresh && dashboardPayrollPanel && !dashboardPayrollPanel.hidden) {
-            dashboardPayrollPanel.hidden = true;
-            dashboardPayrollPanel.classList.remove('emr-dashboard-payroll-open');
+        if (!forceRefresh && dashboardPayrollPanelOpen) {
+            setDashboardPayrollPanelOpen(false);
             window.__emrSetStatus('');
             return;
         }
@@ -4970,9 +7406,11 @@ OVERLAY_JS = r"""
             window.__emrSetStatus('Payroll unavailable');
             return;
         }
+        setDashboardPayrollPanelOpen(true);
         window.__emrSetStatus(forceRefresh ? 'Regrabbing payroll snapshot...' : 'Calculating payroll...');
         Promise.resolve(window.__emr_run_dashboard_payroll())
             .catch((e) => {
+                setDashboardPayrollPanelOpen(false);
                 console.error('overlay dashboard payroll error:', e);
                 window.__emrSetStatus('Payroll error');
             });
@@ -5668,6 +8106,14 @@ OVERLAY_JS = r"""
 
 OVERLAY_REMOVE_JS = """
 (() => {
+    if (typeof window.__emrOverlayCleanup === 'function') {
+        try {
+            window.__emrOverlayCleanup();
+        } catch (e) {
+            console.warn('overlay cleanup during remove failed:', e);
+        }
+        delete window.__emrOverlayCleanup;
+    }
     document.documentElement.classList.remove('emr-assist-dark-page');
     const darkModeStyle = document.getElementById('emr-assist-dark-mode-style');
     if (darkModeStyle) darkModeStyle.remove();
@@ -6205,8 +8651,13 @@ if wxadv is not None:
         def __init__(self, frame):
             super().__init__()
             self.frame = frame
+            self._balloon_click_action = None
             self.Bind(_wxadv.EVT_TASKBAR_LEFT_DCLICK, self._on_activate)
             self.Bind(_wxadv.EVT_TASKBAR_LEFT_DOWN, self._on_activate)
+            if hasattr(_wxadv, "EVT_TASKBAR_BALLOON_CLICK"):
+                self.Bind(_wxadv.EVT_TASKBAR_BALLOON_CLICK, self._on_balloon_click)
+            if hasattr(_wxadv, "EVT_TASKBAR_BALLOON_TIMEOUT"):
+                self.Bind(_wxadv.EVT_TASKBAR_BALLOON_TIMEOUT, self._on_balloon_timeout)
 
         def CreatePopupMenu(self):
             menu = wx.Menu()
@@ -6233,10 +8684,39 @@ if wxadv is not None:
         def _on_exit(self, event):
             self.frame.Close()
 
+        def _on_balloon_click(self, event):
+            action = self._balloon_click_action
+            self._balloon_click_action = None
+            if action == "open_emr":
+                self.frame.open_emr_in_chrome()
+
+        def _on_balloon_timeout(self, event):
+            self._balloon_click_action = None
+
+        def show_new_task_balloon(self):
+            self._balloon_click_action = "open_emr"
+            try:
+                shown = self.ShowBalloon(
+                    "New task available",
+                    "Click to switch to the attached Chromium EMR window.",
+                    msec=10000,
+                    flags=wx.ICON_INFORMATION,
+                )
+            except Exception as exc:
+                print(f"Tray balloon notification failed: {exc}")
+                shown = False
+            if not shown:
+                self._balloon_click_action = None
+            return shown
+
 else:
 
     class EMRAssistTaskBarIcon:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def show_new_task_balloon(self):
+            return False
 
 
 panel_title = "EMR Assist"
@@ -7009,10 +9489,11 @@ def insert_template_at_cursor(insert_source: str = "default"):
                 frame.Raise()
                 return
 
-        # Most templates should start on the next line; SH - initial needs to
-        # continue inline after a single space instead.
+        # Most templates should start on the next line; SH Initial should
+        # continue inline after a single space with no template-owned blank lines.
         leading_text = "\n"
         if template_name == "SH Initial":
+            formatted_text = formatted_text.lstrip()
             leading_text = " "
         if insert_source == "overlay_ctx_menu":
             leading_text = ""
@@ -12999,12 +15480,15 @@ class MyFrame(wx.Frame):
         info_row.Add(self.clicker_last_text, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         tab5_sizer.Add(info_row, 0, wx.EXPAND | wx.LEFT, 12)
 
-        # Notification toggle: popup vs beep
+        # Notification toggle: Windows toast vs beep
         notif_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.popup_toggle = wx.CheckBox(tab5, label="Popup on new task (instead of beep)")
+        self.popup_toggle = wx.CheckBox(tab5, label="Toast on new task (instead of beep)")
         self.popup_toggle.SetValue(True)
-        self.popup_toggle.Bind(wx.EVT_CHECKBOX, self.on_popup_toggle)
+        self.popup_toggle.Bind(wx.EVT_CHECKBOX, self.on_notification_toggle)
         notif_row.Add(self.popup_toggle, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        self.test_toast_btn = wx.Button(tab5, label="Test Toast")
+        self.test_toast_btn.Bind(wx.EVT_BUTTON, self.on_test_toast)
+        notif_row.Add(self.test_toast_btn, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         tab5_sizer.Add(notif_row, 0, wx.EXPAND | wx.LEFT, 12)
 
         # App-wide status label moved into Auto Clicker tab
@@ -13425,22 +15909,29 @@ class MyFrame(wx.Frame):
         panel.SetSizer(main_sizer)
         panel.Layout()
 
-        # Get screen dimensions and set window to full height
-        display_size = wx.GetDisplaySize()
-        screen_height = display_size.GetHeight()
-
+        # Size the window generously for the widest notebook tab while using nearly full display height.
         self.Fit()
-        self.SetMinSize((600, 800))
-        self.SetSize((700, screen_height - 100))  # Full height minus taskbar space
+        fitted_size = self.GetSize()
+        display_index = wx.Display.GetFromWindow(self)
+        if display_index == wx.NOT_FOUND:
+            display_index = 0
+        display_rect = wx.Display(display_index).GetClientArea()
+        available_width = max(1100, display_rect.GetWidth() - 24)
+        available_height = max(900, display_rect.GetHeight() - 24)
+        target_width = min(max(fitted_size.GetWidth(), 1120), available_width)
+        target_height = available_height
+
+        self.SetMinSize((target_width, 900))
+        self.SetSize((target_width, target_height))
 
         # Initialize a persistent HTTP session for speed
         try:
             self.requests_session = requests.Session()
         except Exception:
             self.requests_session = None
-        # Notification mode and popup reference
-        self.notify_with_popup = True
-        self.new_task_popup = None
+        # Notification mode for new-task detection
+        self.notify_with_toast = True
+        self._toast_registration_ready = None
         self._browser_grabber_cache = None
         self._frame_icon_ref = None
         self._tray_icon_ref = None
@@ -19300,9 +21791,10 @@ html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: au
                         print(f"   From: {pre_url}")
                         print(f"   To:   {post_url}")
                         auto_clicker_enabled[0] = False
-                        if self.notify_with_popup:
-                            wx.CallAfter(self.show_new_task_popup)
-                        wx.CallAfter(self.beep_sound)
+                        if self.notify_with_toast:
+                            wx.CallAfter(self.show_new_task_notification)
+                        else:
+                            wx.CallAfter(self.beep_sound)
                         wx.CallAfter(self.update_clicker_stopped)
                         wx.CallAfter(self.update_url_display, post_url)
                         wx.CallAfter(self.refresh_patient_location_async)
@@ -19315,9 +21807,10 @@ html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: au
                         print(f"   From: {auto_clicker_last_url[0]}")
                         print(f"   To:   {post_url}")
                         auto_clicker_enabled[0] = False
-                        if self.notify_with_popup:
-                            wx.CallAfter(self.show_new_task_popup)
-                        wx.CallAfter(self.beep_sound)
+                        if self.notify_with_toast:
+                            wx.CallAfter(self.show_new_task_notification)
+                        else:
+                            wx.CallAfter(self.beep_sound)
                         wx.CallAfter(self.update_clicker_stopped)
                         wx.CallAfter(self.update_url_display, post_url)
                         wx.CallAfter(self.refresh_patient_location_async)
@@ -19406,74 +21899,290 @@ html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: au
             print(f"Auto clicker method set to {self.clicker_method_mode.upper()}")
         self.update_click_method(self.clicker_method_mode)
 
-    def on_popup_toggle(self, event):
-        """Handle toggle for popup vs beep notification"""
+    def on_notification_toggle(self, event):
+        """Handle toggle for Windows toast vs beep notification."""
         try:
-            self.notify_with_popup = self.popup_toggle.GetValue()
+            self.notify_with_toast = self.popup_toggle.GetValue()
         except Exception:
-            self.notify_with_popup = False
+            self.notify_with_toast = False
 
-    def show_new_task_popup(self):
-        """Show a small always-on-top popup with a button to open EMR in Chrome."""
+    def _preferred_toast_target_path(self) -> str:
+        executable = os.path.abspath(sys.executable)
+        base_name = os.path.basename(executable).lower()
+        if base_name == "python.exe":
+            pythonw_path = os.path.join(os.path.dirname(executable), "pythonw.exe")
+            if os.path.exists(pythonw_path):
+                return pythonw_path
+        return executable
+
+    def _set_process_toast_app_id(self):
         try:
-            # If already open, just raise it
-            if self.new_task_popup and self.new_task_popup.IsShown():
-                try:
-                    self.new_task_popup.Raise()
-                    self.new_task_popup.RequestUserAttention(wx.NOTIFY)
-                except Exception:
-                    pass
-                return
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(TOAST_APP_ID)
+        except Exception as exc:
+            print(f"Failed to set toast AppUserModelID: {exc}")
 
-            dlg = wx.Dialog(
-                self,
-                title="New task detected",
-                style=wx.DEFAULT_DIALOG_STYLE | wx.STAY_ON_TOP | wx.FRAME_NO_TASKBAR | wx.FRAME_TOOL_WINDOW,
+    def _ensure_windows_toast_registration(self) -> bool:
+        if self._toast_registration_ready is not None:
+            return self._toast_registration_ready
+
+        self._set_process_toast_app_id()
+        appdata_dir = os.environ.get("APPDATA") or ""
+        shortcut_dir = os.path.join(appdata_dir, "Microsoft", "Windows", "Start Menu", "Programs")
+        shortcut_path = os.path.join(shortcut_dir, TOAST_SHORTCUT_NAME)
+        script_path = os.path.abspath(sys.argv[0] or __file__)
+        arguments = ""
+        if not getattr(sys, "frozen", False):
+            arguments = subprocess.list2cmdline([script_path])
+
+        env = os.environ.copy()
+        env["EMR_ASSIST_TOAST_APP_ID"] = TOAST_APP_ID
+        env["EMR_ASSIST_TOAST_SHORTCUT"] = shortcut_path
+        env["EMR_ASSIST_TOAST_TARGET"] = self._preferred_toast_target_path()
+        env["EMR_ASSIST_TOAST_ARGUMENTS"] = arguments
+        env["EMR_ASSIST_TOAST_WORKDIR"] = os.path.dirname(script_path) or os.getcwd()
+        env["EMR_ASSIST_TOAST_ICON"] = env["EMR_ASSIST_TOAST_TARGET"]
+
+        ps_script = r'''
+$ErrorActionPreference = 'Stop'
+$shortcutDir = Split-Path -Parent $env:EMR_ASSIST_TOAST_SHORTCUT
+if (-not (Test-Path $shortcutDir)) {
+    New-Item -ItemType Directory -Force -Path $shortcutDir | Out-Null
+}
+$code = @"
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+
+[ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+class CShellLink {}
+
+[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
+interface IShellLinkW {
+    void GetPath(System.Text.StringBuilder pszFile, int cchMaxPath, IntPtr pfd, uint fFlags);
+    void GetIDList(out IntPtr ppidl);
+    void SetIDList(IntPtr pidl);
+    void GetDescription(System.Text.StringBuilder pszName, int cchMaxName);
+    void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+    void GetWorkingDirectory(System.Text.StringBuilder pszDir, int cchMaxPath);
+    void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+    void GetArguments(System.Text.StringBuilder pszArgs, int cchMaxPath);
+    void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+    void GetHotkey(out short pwHotkey);
+    void SetHotkey(short wHotkey);
+    void GetShowCmd(out int piShowCmd);
+    void SetShowCmd(int iShowCmd);
+    void GetIconLocation(System.Text.StringBuilder pszIconPath, int cchIconPath, out int iIcon);
+    void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+    void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, uint dwReserved);
+    void Resolve(IntPtr hwnd, uint fFlags);
+    void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct PROPERTYKEY {
+    public Guid fmtid;
+    public uint pid;
+}
+
+[StructLayout(LayoutKind.Explicit)]
+struct PROPVARIANT {
+    [FieldOffset(0)] public ushort vt;
+    [FieldOffset(8)] public IntPtr pwszVal;
+}
+
+[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+interface IPropertyStore {
+    uint GetCount(out uint cProps);
+    uint GetAt(uint iProp, out PROPERTYKEY pkey);
+    uint GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+    uint SetValue(ref PROPERTYKEY key, ref PROPVARIANT pv);
+    uint Commit();
+}
+
+[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("0000010b-0000-0000-C000-000000000046")]
+interface IPersistFile {
+    void GetClassID(out Guid pClassID);
+    int IsDirty();
+    void Load([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, uint dwMode);
+    void Save([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, bool fRemember);
+    void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
+    void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string ppszFileName);
+}
+
+public static class ShortcutHelper {
+    public static void CreateShortcut(string shortcutPath, string targetPath, string arguments, string workingDir, string appId, string description, string iconPath) {
+        var link = (IShellLinkW)new CShellLink();
+        link.SetPath(targetPath);
+        link.SetArguments(arguments ?? string.Empty);
+        link.SetWorkingDirectory(workingDir ?? string.Empty);
+        link.SetDescription(description ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(iconPath)) {
+            link.SetIconLocation(iconPath, 0);
+        }
+        var store = (IPropertyStore)link;
+        var key = new PROPERTYKEY {
+            fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"),
+            pid = 5
+        };
+        var pv = new PROPVARIANT {
+            vt = 31,
+            pwszVal = Marshal.StringToCoTaskMemUni(appId)
+        };
+        try {
+            Marshal.ThrowExceptionForHR((int)store.SetValue(ref key, ref pv));
+            Marshal.ThrowExceptionForHR((int)store.Commit());
+        }
+        finally {
+            if (pv.pwszVal != IntPtr.Zero) {
+                Marshal.FreeCoTaskMem(pv.pwszVal);
+            }
+        }
+        ((IPersistFile)link).Save(shortcutPath, true);
+    }
+}
+"@
+Add-Type -TypeDefinition $code -Language CSharp
+[ShortcutHelper]::CreateShortcut(
+    $env:EMR_ASSIST_TOAST_SHORTCUT,
+    $env:EMR_ASSIST_TOAST_TARGET,
+    $env:EMR_ASSIST_TOAST_ARGUMENTS,
+    $env:EMR_ASSIST_TOAST_WORKDIR,
+    $env:EMR_ASSIST_TOAST_APP_ID,
+    'EMR Assist',
+    $env:EMR_ASSIST_TOAST_ICON
+)
+'''
+
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt" and hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps_script,
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+                timeout=30,
             )
-            sizer = wx.BoxSizer(wx.VERTICAL)
-            msg = wx.StaticText(dlg, label="New task detected")
-            btn_row = wx.BoxSizer(wx.HORIZONTAL)
-            open_btn = wx.Button(dlg, label="Open EMR in Chrome")
-            close_btn = wx.Button(dlg, label="Close")
+            if completed.returncode != 0:
+                print(f"Toast registration failed: {completed.stderr.strip() or completed.stdout.strip()}")
+                self._toast_registration_ready = False
+            else:
+                self._toast_registration_ready = os.path.exists(shortcut_path)
+        except Exception as exc:
+            print(f"Toast registration failed: {exc}")
+            self._toast_registration_ready = False
 
-            open_btn.Bind(wx.EVT_BUTTON, lambda evt: self._on_popup_open_emr(dlg))
-            close_btn.Bind(wx.EVT_BUTTON, lambda evt: dlg.Destroy())
+        return bool(self._toast_registration_ready)
 
-            sizer.Add(msg, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 10)
-            btn_row.Add(open_btn, 0, wx.ALL, 5)
-            btn_row.Add(close_btn, 0, wx.ALL, 5)
-            sizer.Add(btn_row, 0, wx.ALL | wx.ALIGN_CENTER_HORIZONTAL, 5)
+    def _show_windows_toast(self, title: str, message: str) -> bool:
+        """Best-effort Windows toast without introducing an extra Python dependency."""
+        if not self._ensure_windows_toast_registration():
+            return False
+        title = (title or "").strip() or "EMR Assist"
+        message = (message or "").strip() or "New task available."
+        ps_script = """
+$ErrorActionPreference = 'Stop'
+$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+$title = [System.Security.SecurityElement]::Escape($env:EMR_ASSIST_TOAST_TITLE)
+$body = [System.Security.SecurityElement]::Escape($env:EMR_ASSIST_TOAST_BODY)
+$template = @"
+<toast>
+  <visual>
+    <binding template="ToastGeneric">
+      <text>$title</text>
+      <text>$body</text>
+    </binding>
+  </visual>
+</toast>
+"@
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml($template)
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(1)
+$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:EMR_ASSIST_TOAST_APP_ID)
+$notifier.Show($toast)
+"""
+        env = os.environ.copy()
+        env["EMR_ASSIST_TOAST_APP_ID"] = TOAST_APP_ID
+        env["EMR_ASSIST_TOAST_TITLE"] = title
+        env["EMR_ASSIST_TOAST_BODY"] = message
 
-            dlg.SetSizerAndFit(sizer)
-            # Position centered on the visible screen (same display as the app window)
-            try:
-                display_index = wx.Display.GetFromWindow(self)
-                if display_index == wx.NOT_FOUND:
-                    display_index = 0
-                rect = wx.Display(display_index).GetClientArea()  # excludes taskbar
-                size = dlg.GetSize()
-                x = rect.GetX() + (rect.GetWidth() - size.GetWidth()) // 2
-                y = rect.GetY() + (rect.GetHeight() - size.GetHeight()) // 2
-                dlg.SetPosition((x, y))
-            except Exception:
-                try:
-                    dlg.CentreOnScreen()
-                except Exception:
-                    pass
-            self.new_task_popup = dlg
-            dlg.Show()  # modeless
-            dlg.Raise()
-        except Exception as e:
-            print(f"Error showing popup: {e}")
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt" and hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-    def _on_popup_open_emr(self, dlg):
-        # Close popup first to avoid Z-order/focus flicker, then bring Chrome forward
         try:
-            dlg.Destroy()
-        except Exception:
-            pass
-        self.new_task_popup = None
-        self.open_emr_in_chrome()
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps_script,
+                ],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            return True
+        except Exception as exc:
+            print(f"Windows toast launch failed: {exc}")
+            return False
+
+    def show_new_task_notification(self):
+        """Show a Windows toast for a newly available task without stealing focus."""
+        shown = self._show_windows_toast(
+            "New task available",
+            "A new EMR task is ready.",
+        )
+        if not shown:
+            self.beep_sound()
+        return shown
+
+    def on_test_toast(self, event):
+        """Trigger the toast path manually for debugging."""
+        shown = self._show_windows_toast(
+            "EMR Assist test",
+            "This is a manual toast test from the Auto Clicker tab.",
+        )
+        if shown:
+            print("Manual toast test requested")
+            try:
+                self.grab_status_text.SetLabel("Manual toast test requested")
+            except Exception:
+                pass
+        else:
+            print("Manual toast test failed; using beep fallback")
+            self.beep_sound()
+            try:
+                self.grab_status_text.SetLabel("Manual toast test failed; check console output")
+            except Exception:
+                pass
 
     def open_emr_in_chrome(self):
         """Activate the EMR tab in Chrome and bring the Chrome window to foreground."""
@@ -20561,17 +23270,6 @@ html.emr-assist-dark-page body > :not(#emr-assist-overlay) [style*="overflow: au
         try:
             self._cdp_driver = None
             self._cdp_driver_thread_id = None
-        except Exception:
-            pass
-
-        # Dismiss any modeless popup to prevent stray events
-        try:
-            if getattr(self, "new_task_popup", None):
-                try:
-                    self.new_task_popup.Destroy()
-                except Exception:
-                    pass
-                self.new_task_popup = None
         except Exception:
             pass
 

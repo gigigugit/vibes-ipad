@@ -1,0 +1,211 @@
+========================================================================
+  Grab Test Run — 2026-04-07 13:50:08
+========================================================================
+
+[app-like playwright:inner_text_body + hair parser]
+--- 8444 characters ---
+Configured method: inner_text_body
+Parsed hair_medication: <empty>
+========================================================================
+Dashboard
+Clinical Guidelines
+Matthew Tomcik
+Thomas Apjohn
+Sex
+Male
+DOB
+11/18/1976 (49 yrs)
+State
+VT
+View in Dosespot
+Edit Patient
+Allergies
+None
+Medications
+1
+Losartan (Cozaar)
++ add medication
+Conditions
+1
+High blood pressure
++ add condition
+Hospitalizations
+1
+Bicep tears, rotator cuff surgery
++ add hospitalization
+Hims & Hers Managed Conditions
+1
+ED
++ add managed condition
+Hims & Hers Prescriptions
+1
+
+Tadalafil 8.5mg, Atorvastatin 11mg, cmpd tablet
+
+Quarterly shipping
+
+NP Sandy Wang
+
+April 9, 2025 5:10 PM
+
+Status: Discontinued
+
+Visit History
+Sexual Health
+2 visits
+Treatment: Sexual Health
+Renewal
+Submitted: April 7, 2026
+Status: Ready to Process
+Treatment: Sexual Health
+Submitted: April 8, 2025
+Processed: April 9, 2025
+Status: Prescribed
+Lab History
+None
+Sexual Health - Renewal
+Treatment plan
+Patient Preference
+Tadalafil / Atorvastatin, 8.5mg / 11mg
+30 doses per month, shipped every 5 months
+Treatment
+Tadalafil / Atorvastatin, 8.5mg / 11mg
+Edit
+30 doses per month, shipped every 5 months
+Refer Patient
+Prescribe
+Photos
+Click an image to inspect it or reject the photo
+diagnostic photo
+diagnostic photo
+Intake Forms
+Intake Form
+Apr 7, 2026 11:28 AM
+Are you happy with the way your treatment is working?
+Yes
+Have you experienced any bothersome or worsening side effects since your last consultation or check-in?
+No
+Do you have any diagnoses, medications, allergies, symptoms, or hospitalizations other than those you previously identified to your provider?
+No
+Have you experienced any of the following symptoms in the last 3 months:  chest pain with physical exertion or sexual activity, fainting or dizziness, irregular or unusual heartbeats?
+No
+Do you have or have you previously been diagnosed with any of the following?
+High blood pressure
+Show unselected answers
+Diabetes
+Kidney diseases or conditions
+Nerve, spinal cord, or brain disorders
+Blood conditions or diseases
+Heart conditions or diseases
+Vascular conditions or diseases
+Other chronic medical conditions
+Low blood pressure
+None of these apply to me
+Please tell us more about your condition if not previously reported to your healthcare provider through the Hims & Hers platform.
+NA
+This question is hidden to patients. Patient is only required to report BP if any of the following are true:
+Previously diagnosed with high or low BP
+Show unselected answers
+Age > 50
+Medical conditions 
+None of the above - Patient is not required to report BP
+What was your last blood pressure reading?
+90-139/50-80
+Show unselected answers
+Less than 90/less than 50
+Less than 90/50-80
+Less than 90/81-89
+Less than 90/100 or higher
+90-139/less than 50 
+90-139/81-99
+90-139/100 or higher
+140-169/less than 50 
+140-169/50-80
+140-169/81-99
+140-169/100 or higher
+170 or higher/less than 50 
+170 or higher/50-80
+170 or higher/81-99
+170 or higher/100 or higher
+I dont remember
+Messages
+Notes
+Sexual Health
+This is the only treatment channel for this patient.
+Thomas Apjohn
+$234 for 6 months please.
+Apr 7, 2026 1:38 PM
+Dr. Matthew Tomcik
+I do think it is likely to be more effective.
+The tadalafil 10 mg daily is only available with shipping monthly, quarterly or every 6 months but not every 5 months.
+Prices per shipment are $79 for monthly, $147 for quarterly, or $234 for every 6 months
+Which do you prefer?
+Apr 7, 2026 1:27 PM
+Thomas Apjohn
+I would like to try the 10 if you feel that it might help.
+Apr 7, 2026 1:24 PM
+✓ Read by Dr. Matthew Tomcik on April 7, 2026 at 1:27 PM
+Dr. Matthew Tomcik
+You were prescribed the Tadalafil/Atorvastatin, 8.5mg / 11mg
+The tadalafil dose is 8.5 mg.
+Apr 7, 2026 12:47 PM
+Thomas Apjohn
+remind me please - what is my current dose?
+Apr 7, 2026 12:44 PM
+✓ Read by Dr. Matthew Tomcik on April 7, 2026 at 12:47 PM
+Dr. Matthew Tomcik
+Hi, my name is Matthew Tomcik, MD, a board-certified family physician licensed in your state.
+If you’re not getting a good erection that allows you to have sex and to achieve ejaculation, there may be a better response to the higher dose daily tadalafil, either 10 mg or 11.2 mg are available.
+Apr 7, 2026 12:33 PM
+Care Assistant
+Welcome to messaging, Thomas.
+Here you can chat with our network of licensed providers about questions or concerns you have during your treatment journey.
+Reach out to your Care Team any time as part of your subscription.
+Apr 7, 2026 11:28 AM
+Apr 7, 2026
+Thomas Apjohn
+The patient has sent an introduction and has asked any additional questions here:
+Is there the ability to increase the firmness of my erection?
+Apr 7, 2026 10:28 AM
+✓ Read by Dr. Matthew Tomcik on April 7, 2026 at 12:33 PM
+Apr 10, 2025
+Thomas Apjohn
+TY
+Apr 10, 2025 7:40 AM
+✓ Read by Dr. Matthew Tomcik on April 7, 2026 at 12:33 PM
+Apr 9, 2025
+NP Sandy Wang
+Hi Thomas,
+I’m Sandy Wang, a licensed nurse practitioner, and it is my pleasure to support you with your care today.
+**I have prescribed you 30 doses per month of Sex Rx + Heart Support containing 8.5 mg of tadalafil and 11 mg of atorvastatin. Take 1 tablet by mouth daily to treat ED and reduce risk of heart attack and stroke. You will continue to receive the medication throughout your active subscription, which you can cancel if needed. Hims & Hers will notify you when further action is needed to keep your subscription active, and a member of the Medical Care Team will check in on how you are doing and make sure that your medical information remains up to date.
+IMPORTANT - How and when you take your medication can make a big difference, and I want to set you up for success. Sex Rx + Heart Support can cause dizziness, lightheadedness or even fainting in people sensitive to small changes in blood pressure. Be sure that you are well-hydrated and in a safe, controlled environment the first time that you take Sex Rx + Heart Support. Check out the link below before you get started with treatment to review important tips and safety information. Please also review the telemedicine disclosure below.
+Sex Rx + Heart Support Medication Overview
+Telemedicine Disclosure
+Please remember that sexual function and overall wellness often go hand-in-hand. Sleeping well, eating healthy, eliminating bad habits, and practicing mindfulness can make you feel a lot better in many ways, and may even reduce your requirement for long term medication to support sexual function. Sometimes ED can even be a presenting symptom of hidden health issues like diabetes or vascular disease. If you are also taking this medicine to treat urinary symptoms, you should notice improvement in those symptoms within 1-2 weeks. If you haven’t seen your healthcare provider in a while, or if you don’t have one, now is a great time to connect. Be sure to tell them that you are now taking tadalafil and atorvastatin - it is important that they have your complete and updated health information. If you do not have insurance, you can find a low cost provider at findahealthcenter.hrsa.gov.
+Please also note that Sex Rx + Heart Support is a compounded medication, and is not FDA approved. FDA does not verify the safety or effectiveness of compounded drugs.
+Your package will be delivered to your door soon. If you need additional support, visit our Help Center where you can find helpful information or chat with us. If you have any non-medical questions, please contact Customer Support. If you have any medical questions, feel free to send a message through your account anytime to connect with a provider in our medical group.
+I see that you are being treated for high blood pressure or your blood pressure reading is elevated.
+A link between high blood pressure and erectile dysfunction has been proved in men.
+Over time, high blood pressure can damage the lining of the blood vessels and causes arteries to harden and narrow, limiting blood flow. This means that less blood flows to the penis.
+Living a healthy lifestyle can help lower your blood pressure and potentially improve your sex life.
+Try these healthy lifestyle choices:
+•
+Do not smoke or use tobacco.
+•
+Eat healthy foods.
+•
+Limit the amount of alcohol you drink.
+•
+Reduce the amount of salt in your diet.
+•
+Get regular exercise.
+•
+Lose extra pounds.
+Ask your healthcare provider if you are taking the right steps to manage your blood pressure.
+Apr 9, 2025 5:10 PM
+Type a message...
+Send Message
+You have dropped the item. You have moved the item from position 2 to position 4
+
+────────────────────────────────────────────────────────────────────────
+
