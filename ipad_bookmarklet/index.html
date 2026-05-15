@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Vibes iPad Phase 0 Bookmarklet Spike</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        background: #08121f;
+        color: #e7f2ff;
+      }
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 24px 16px 48px;
+      }
+      .card {
+        background: #0f1d30;
+        border: 1px solid #1f3750;
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
+        margin-bottom: 16px;
+      }
+      h1,
+      h2 {
+        margin: 0 0 12px;
+      }
+      p,
+      li {
+        line-height: 1.5;
+      }
+      ol,
+      ul {
+        padding-left: 20px;
+      }
+      .bookmarklet-row {
+        display: grid;
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .bookmarklet-link,
+      button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        border-radius: 10px;
+        border: 1px solid #2d5277;
+        background: #15314a;
+        color: #f4f9ff;
+        text-decoration: none;
+        font: inherit;
+        cursor: pointer;
+        padding: 0 14px;
+      }
+      textarea,
+      code {
+        width: 100%;
+        background: #08121f;
+        color: #d9ebff;
+        border: 1px solid #1f3750;
+        border-radius: 10px;
+        padding: 12px;
+        box-sizing: border-box;
+        font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+      .tiny {
+        color: #9bb1ca;
+        font-size: 12px;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+    </style>
+    <script src="./bookmarklet.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <h1>Vibes iPad Chrome Phase 0</h1>
+        <p>
+          This spike is intentionally narrow: prove bookmarklet delivery, one medication DOM read,
+          and one copy-to-clipboard action on the live EMR in iPad Chrome.
+        </p>
+        <ol>
+          <li>Open this page from hosted static files.</li>
+          <li>Create a bookmark from the primary link below.</li>
+          <li>Run it on the real EMR visit page in iPad Chrome.</li>
+          <li>If the hosted loader is blocked, retry once with the inline fallback bookmarklet.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>Primary bookmarklet</h2>
+        <p class="tiny">Loads <code data-output="overlay-url"></code> into the current page.</p>
+        <div class="bookmarklet-row">
+          <a class="bookmarklet-link" data-bookmarklet="loader" href="#">Phase 0 spike bookmarklet</a>
+          <div class="actions">
+            <button type="button" data-copy="loader">Copy</button>
+          </div>
+          <textarea readonly data-output="loader"></textarea>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Fallback bookmarklet</h2>
+        <p class="tiny">Use this only if the hosted script load is blocked on the EMR page.</p>
+        <div class="bookmarklet-row">
+          <a class="bookmarklet-link" data-bookmarklet="inline" href="#">Inline fallback bookmarklet</a>
+          <div class="actions">
+            <button type="button" data-copy="inline">Copy</button>
+          </div>
+          <textarea readonly data-output="inline"></textarea>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>What the overlay does</h2>
+        <ul>
+          <li>Shows a visible injected pill/panel so Micro-test 1 is obvious.</li>
+          <li>Reads only medication-related fields using the existing EMR selectors.</li>
+          <li>Copies exactly <code>the medication is: [value]</code> for Micro-test 3.</li>
+          <li>Provides a manual refresh button and auto-refreshes on DOM changes.</li>
+        </ul>
+        <p class="tiny" data-output="status">Preparing bookmarklets…</p>
+      </section>
+    </main>
+  </body>
+</html>
