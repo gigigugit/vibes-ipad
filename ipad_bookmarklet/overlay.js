@@ -26,17 +26,17 @@
     existingRoot.remove();
   }
 
-  const normalizeWhitespace = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
   const extractTextFromSelector = (selector) => {
     const node = document.querySelector(selector);
     if (!node) {
       return '';
     }
-    if (typeof node.value === 'string' && normalizeWhitespace(node.value)) {
-      return normalizeWhitespace(node.value);
+    if (typeof node.value === 'string' && normalizeText(node.value)) {
+      return normalizeText(node.value);
     }
-    return normalizeWhitespace(node.innerText || node.textContent || '');
+    return normalizeText(node.innerText || node.textContent || '');
   };
 
   const findFirstMatchingSelector = (selectors) => {
@@ -59,7 +59,7 @@
   const extractMedication = () => {
     const title = findFirstMatchingSelector(TITLE_SELECTORS);
     const detail = findFirstMatchingSelector(DETAIL_SELECTORS);
-    const medication = normalizeWhitespace(buildMedicationValue(title.value, detail.value));
+    const medication = normalizeText(buildMedicationValue(title.value, detail.value));
     return {
       medication,
       found: Boolean(medication),
@@ -245,7 +245,7 @@
       }
       statusNode.textContent = `Copied: ${text}`;
     } catch (error) {
-      statusNode.textContent = `Copy failed: ${error && error.message ? error.message : error}`;
+      statusNode.textContent = `Copy failed: ${String(error?.message || error || 'Unknown error')}`;
     }
   };
 

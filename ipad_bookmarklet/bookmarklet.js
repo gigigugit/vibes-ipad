@@ -6,17 +6,23 @@
   const inlineCode = document.querySelector('[data-output="inline"]');
   const overlayUrlNode = document.querySelector('[data-output="overlay-url"]');
   const statusNode = document.querySelector('[data-output="status"]');
-  const sanitizeOverlayUrl = (urlValue) => {
-    const parsed = new URL(urlValue, window.location.href);
-    if (!/^https?:$/.test(parsed.protocol)) {
-      throw new Error('Installer page must be served over http or https.');
+  const sanitizeOrigin = (originValue) => {
+    const match = String(originValue || '').match(/^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?$/);
+    if (!match) {
+      throw new Error('Installer page must be served from a valid http or https origin.');
     }
-    parsed.hash = '';
-    parsed.search = '';
-    if (!parsed.pathname.endsWith('/overlay.js')) {
+    return match[0];
+  };
+  const sanitizeOverlayPath = (pathValue) => {
+    const match = String(pathValue || '').match(/^\/[A-Za-z0-9._~!$&'()*+,;=:@/%-]*\/overlay\.js$/);
+    if (!match) {
       throw new Error('Overlay URL must resolve to overlay.js.');
     }
-    return parsed.toString();
+    return match[0];
+  };
+  const buildOverlayUrl = (urlValue) => {
+    const parsed = new URL(urlValue, window.location.href);
+    return `${sanitizeOrigin(parsed.origin)}${sanitizeOverlayPath(parsed.pathname)}`;
   };
 
   const attachCopyHandler = (button, getValue) => {
@@ -35,12 +41,12 @@
           button.textContent = 'Copy';
         }, 1200);
       } catch (error) {
-        statusNode.textContent = `Copy failed: ${error && error.message ? error.message : error}`;
+        statusNode.textContent = `Copy failed: ${String(error?.message || error || 'Unknown error')}`;
       }
     });
   };
 
-  const overlayUrl = sanitizeOverlayUrl(new URL('./overlay.js', window.location.href).toString());
+  const overlayUrl = buildOverlayUrl(new URL('./overlay.js', window.location.href).toString());
   const loaderBookmarklet = `javascript:(()=>{const d=document;const old=d.getElementById('vibes-ipad-phase0-loader');if(old)old.remove();const s=d.createElement('script');s.id='vibes-ipad-phase0-loader';s.src=${JSON.stringify(overlayUrl)}+'?t='+Date.now();(d.head||d.documentElement).appendChild(s);})();`;
 
   overlayUrlNode.textContent = overlayUrl;
