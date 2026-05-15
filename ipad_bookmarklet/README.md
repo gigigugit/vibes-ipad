@@ -23,3 +23,4 @@ This folder is an isolated browser experiment for the iPad Chrome feasibility ga
 - This spike reads medication only.
 - It does not depend on the Python runtime.
 - It does not attempt broad parsing, template libraries, or direct insertion.
+- Clipboard copy uses the async Clipboard API first and falls back to `document.execCommand('copy')` only when needed.
