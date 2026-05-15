@@ -245,7 +245,7 @@
       }
       statusNode.textContent = `Copied: ${text}`;
     } catch (error) {
-      statusNode.textContent = `Copy failed: ${String(error?.message || error || 'Unknown error')}`;
+      statusNode.textContent = `Copy failed: ${error instanceof Error ? error.message : String(error || 'Unknown error')}`;
     }
   };
 
