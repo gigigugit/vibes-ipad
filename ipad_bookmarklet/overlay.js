@@ -26,22 +26,22 @@
     existingRoot.remove();
   }
 
-  const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const normalizeWhitespace = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
-  const readNodeText = (selector) => {
+  const extractTextFromSelector = (selector) => {
     const node = document.querySelector(selector);
     if (!node) {
       return '';
     }
-    if (typeof node.value === 'string' && cleanText(node.value)) {
-      return cleanText(node.value);
+    if (typeof node.value === 'string' && normalizeWhitespace(node.value)) {
+      return normalizeWhitespace(node.value);
     }
-    return cleanText(node.innerText || node.textContent || '');
+    return normalizeWhitespace(node.innerText || node.textContent || '');
   };
 
-  const pickFirst = (selectors) => {
+  const findFirstMatchingSelector = (selectors) => {
     for (const selector of selectors) {
-      const value = readNodeText(selector);
+      const value = extractTextFromSelector(selector);
       if (value) {
         return { selector, value };
       }
@@ -57,9 +57,9 @@
   };
 
   const extractMedication = () => {
-    const title = pickFirst(TITLE_SELECTORS);
-    const detail = pickFirst(DETAIL_SELECTORS);
-    const medication = cleanText(buildMedicationValue(title.value, detail.value));
+    const title = findFirstMatchingSelector(TITLE_SELECTORS);
+    const detail = findFirstMatchingSelector(DETAIL_SELECTORS);
+    const medication = normalizeWhitespace(buildMedicationValue(title.value, detail.value));
     return {
       medication,
       found: Boolean(medication),
